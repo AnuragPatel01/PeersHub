@@ -15,9 +15,7 @@ self.addEventListener("notificationclick", (event) => {
   event.notification.close();
   event.waitUntil(
     clients.matchAll({ type: "window" }).then((clientsArr) => {
-      if (clientsArr.length > 0) {
-        return clientsArr[0].focus();
-      }
+      if (clientsArr.length > 0) return clientsArr[0].focus();
       return clients.openWindow("/");
     })
   );
