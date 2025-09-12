@@ -196,9 +196,9 @@ import "./App.css";
 
 // new testing
 
-// import "./App.css";
 
-// Chat.jsx
+
+// src/components/Chat.jsx
 import "./App.css";
 import React, { useEffect, useState, useRef } from "react";
 import {
@@ -212,66 +212,97 @@ import {
 } from "./webrtc";
 
 /**
- * Updated Chat.jsx
- * - No manual "Connect to Peer" UI anymore (only Create Hub / Join Hub / Leave)
- * - Uses latest webrtc.js (auto-elect bootstrap, system messages)
- * - Username prompt stored in localStorage
- * - Auto-scrolls on new messages
- * - Shows friendly names (uses getPeerNames())
- * - Displays system messages centered
+ * Chat.jsx (updated)
+ * - stores recent messages in localStorage
+ * - autoscrolls down (newest at bottom)
+ * - deduplicates system messages using ids
+ * - public broadcast "[Alice] is now the host" + private "You're the host now"
+ * - Create / Join / Leave buttons (no "Connect to Peer")
+ * - preserves your styling/colors
  */
+
+const LS_MSGS = "ph_msgs_v1";
+const MAX_MSGS = 100;
 
 export default function Chat() {
   const [myId, setMyId] = useState(() => getLocalPeerId() || "...");
-  const [peers, setPeers] = useState([]); // array of peer ids
-  const [peerNamesMap, setPeerNamesMap] = useState({}); // id -> name
-  const [messages, setMessages] = useState([]); // {from (name), text, ts, type?}
+  const [peers, setPeers] = useState([]);
+  const [peerNamesMap, setPeerNamesMap] = useState({});
+  const [messages, setMessages] = useState(() => {
+    try {
+      const raw = localStorage.getItem(LS_MSGS);
+      if (raw) return JSON.parse(raw);
+    } catch (e) {}
+    return [];
+  });
   const [text, setText] = useState("");
   const [username, setUsername] = useState(() => localStorage.getItem("ph_name") || "");
   const [showNamePrompt, setShowNamePrompt] = useState(() => !localStorage.getItem("ph_name"));
   const [joinedBootstrap, setJoinedBootstrap] = useState(() => localStorage.getItem("ph_hub_bootstrap") || "");
   const messagesEndRef = useRef(null);
+  const seenSystemIdsRef = useRef(new Set());
   const peerRef = useRef(null);
 
-  // Incoming messages handler (called by webrtc)
-  const handleIncoming = (fromName, msgText) => {
-    const safeText = typeof msgText === "string" ? msgText : JSON.stringify(msgText);
-    // if system message, mark its type
-    const isSystem = fromName === "System";
-    const fromDisplay = isSystem ? "System" : fromName || "peer";
-    const msg = {
-      from: fromDisplay,
-      text: safeText,
-      ts: Date.now(),
-      type: isSystem ? "system" : "chat",
-    };
-    setMessages((m) => [msg, ...m]);
+  // persist messages to localStorage (trimmed)
+  const persistMessages = (arr) => {
+    try {
+      const tail = arr.slice(-MAX_MSGS);
+      localStorage.setItem(LS_MSGS, JSON.stringify(tail));
+    } catch (e) {}
   };
 
-  // Peer list update: update peers array and refresh names map
+  // incoming messages callback from webrtc
+  const handleIncoming = (from, payloadOrText) => {
+    // payloadOrText may be a string OR an object { type, text, id, ... }
+    if (payloadOrText && typeof payloadOrText === "object" && payloadOrText.type && payloadOrText.id) {
+      // system or typed payload with id — use dedupe
+      const { type, text: txt, id } = payloadOrText;
+      if (seenSystemIdsRef.current.has(id)) {
+        return; // duplicate — ignore
+      }
+      seenSystemIdsRef.current.add(id);
+      const msg = {
+        from: "System",
+        text: txt,
+        ts: Date.now(),
+        type: type,
+        id,
+      };
+      setMessages((m) => {
+        const next = [...m, msg];
+        persistMessages(next);
+        return next;
+      });
+      return;
+    }
+
+    // fallback: treat as normal chat text
+    const safeText = typeof payloadOrText === "string" ? payloadOrText : JSON.stringify(payloadOrText);
+    const fromDisplay = from || "peer";
+    const msg = { from: fromDisplay, text: safeText, ts: Date.now(), type: "chat" };
+    setMessages((m) => {
+      const next = [...m, msg];
+      persistMessages(next);
+      return next;
+    });
+  };
+
+  // peer list update callback
   const handlePeerListUpdate = (list) => {
     setPeers(list || []);
     try {
       const names = getPeerNames();
       setPeerNamesMap(names || {});
-    } catch (e) {
-      // ignore
-    }
+    } catch (e) {}
   };
 
-  // Bootstrap changed callback (called by webrtc when election or broadcast happens)
+  // handle bootstrap changes announced by webrtc (update UI)
   const handleBootstrapChange = (newBootstrapId) => {
     setJoinedBootstrap(newBootstrapId || "");
-    // announce to UI as a system message (but skip if it's this client — webrtc will already send "You're the host now")
-    const myLocalId = getLocalPeerId() || myId;
-    if (!newBootstrapId) return;
-    if (newBootstrapId === myLocalId) return; // skip: webrtc will send the personal system message
-    const friendly = (getPeerNames()[newBootstrapId] || newBootstrapId);
-    const sysMsg = { from: "System", text: `${friendly} is now the host`, ts: Date.now(), type: "system" };
-    setMessages((m) => [sysMsg, ...m]);
+    // we do not insert duplicate public system messages here because the elected bootstrap will broadcast one and we will handle it through handleIncoming (deduped by id)
   };
 
-  // init PeerJS once username is available
+  // initialize Peer when username present
   useEffect(() => {
     if (!username) return;
     const p = initPeer(handleIncoming, handlePeerListUpdate, username, handleBootstrapChange);
@@ -285,14 +316,12 @@ export default function Chat() {
     return () => {
       try {
         p && p.destroy && p.destroy();
-      } catch (e) {
-        console.warn("peer destroy err", e);
-      }
+      } catch (e) {}
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [username]);
 
-  // Auto-scroll when messages update (messages are newest-first and we render reversed)
+  // autoscroll to bottom when messages change
   useEffect(() => {
     if (!messagesEndRef.current) return;
     try {
@@ -300,18 +329,23 @@ export default function Chat() {
     } catch (e) {}
   }, [messages]);
 
-  // Create Hub (make me host / bootstrap = my id)
+  // Create Hub (persist self as bootstrap)
   const handleCreateHub = () => {
     const id = getLocalPeerId() || myId;
     if (!id) return alert("Peer not ready yet. Wait a moment and try again.");
     joinHub(id);
     setJoinedBootstrap(id);
-    // show system note locally
-    const sys = { from: "System", text: `You created the hub. Share this ID: ${id}`, ts: Date.now(), type: "system" };
-    setMessages((m) => [sys, ...m]);
+
+    // show local system message
+    const sysPlain = { from: "System", text: `You created the hub. Share this ID: ${id}`, ts: Date.now(), type: "system" };
+    setMessages((m) => {
+      const next = [...m, sysPlain];
+      persistMessages(next);
+      return next;
+    });
   };
 
-  // Join hub by entering bootstrap id (persisted). Try immediate connect as well.
+  // Join hub by entering bootstrap id (persisted)
   const handleJoinHub = async () => {
     const id = prompt("Enter Hub bootstrap peer ID (the host's ID):");
     if (!id) return;
@@ -319,46 +353,55 @@ export default function Chat() {
     joinHub(trimmed);
     setJoinedBootstrap(trimmed);
 
-    // attempt immediate connection (we still don't expose a manual connect button)
+    // attempt immediate connect
     try {
       connectToPeer(trimmed, handleIncoming, handlePeerListUpdate, username);
-    } catch (e) {
-      // would retry automatically per webrtc reconnect loop
-    }
-
+    } catch (e) {}
     const friendly = (getPeerNames()[trimmed] || trimmed);
     const sys = { from: "System", text: `Join requested for hub: ${friendly}`, ts: Date.now(), type: "system" };
-    setMessages((m) => [sys, ...m]);
+    setMessages((m) => {
+      const next = [...m, sys];
+      persistMessages(next);
+      return next;
+    });
   };
 
-  // Leave current hub (stop auto-join)
+  // Leave hub
   const handleLeaveHub = () => {
     leaveHub();
     setJoinedBootstrap("");
     const sys = { from: "System", text: "You left the hub. Auto-join cleared.", ts: Date.now(), type: "system" };
-    setMessages((m) => [sys, ...m]);
+    setMessages((m) => {
+      const next = [...m, sys];
+      persistMessages(next);
+      return next;
+    });
   };
 
-  // send chat message
+  // send chat
   const send = () => {
     if (!text.trim()) return;
     const msgObj = { from: username, text: text.trim(), ts: Date.now(), type: "chat" };
-    setMessages((m) => [msgObj, ...m]);
+    setMessages((m) => {
+      const next = [...m, msgObj];
+      persistMessages(next);
+      return next;
+    });
     broadcastMessage(username, text.trim());
     setText("");
   };
 
-  // rendering each message (system messages centered)
-  const renderMessage = (m) => {
+  // render message (system messages centered)
+  const renderMessage = (m, idx) => {
     const from = m.from ?? "peer";
     const txt = typeof m.text === "string" ? m.text : JSON.stringify(m.text);
     const time = new Date(m.ts).toLocaleTimeString();
-    const isSystem = m.type === "system" || from === "System";
+    const isSystem = m.type && m.type.toString().startsWith("system");
     const isMe = from === username;
 
     if (isSystem) {
       return (
-        <div key={m.ts + from} className="w-full text-center my-2">
+        <div key={`${m.id ?? m.ts}-${idx}`} className="w-full text-center my-2">
           <div className="inline-block px-3 py-1 rounded bg-white/20 text-white text-sm">
             {txt}
           </div>
@@ -368,11 +411,11 @@ export default function Chat() {
 
     return (
       <div
-        key={m.ts + from}
+        key={`${m.ts}-${idx}`}
         className={`p-2 rounded-lg max-w-[80%] mb-2 ${
           isMe
-            ? "ml-auto bg-gradient-to-br from-purple-500 to-purple-700 text-white"
-            : "bg-white/20 text-white"
+            ? "ml-auto bg-gradient-to-br from-blue-500 to-purple-600 text-white"
+            : "bg-gradient-to-br from-blue-600 to-white text-white"
         }`}
       >
         <div className="text-xs font-bold">
@@ -383,7 +426,7 @@ export default function Chat() {
     );
   };
 
-  // first-time name prompt
+  // first-time username prompt
   if (showNamePrompt) {
     return (
       <div className="h-screen flex items-center justify-center bg-gradient-to-br from-purple-200 to-purple-400 text-purple-600">
@@ -411,11 +454,10 @@ export default function Chat() {
     );
   }
 
-  // friendly names for connected peers
   const connectedNames = peers.length ? peers.map((id) => peerNamesMap[id] || id) : [];
 
   return (
-    <div className="h-screen md:h-[80vh] bg-gradient-to-br from-purple-200 to-purple-400 text-purple-600 p-6 flex flex-col rounded-4xl">
+    <div className="h-screen md:h-[80vh] bg-gradient-to-br from-purple-200 via-blue-500 to-purple-200 text-purple-600 p-6 flex flex-col rounded-4xl">
       <header className="flex items-center justify-between mb-4">
         <div>
           <div className="text-sm text-purple-600">Your ID</div>
@@ -427,21 +469,21 @@ export default function Chat() {
         <div className="flex items-center gap-3">
           <button
             onClick={handleCreateHub}
-            className="px-3 py-2 bg-gradient-to-br from-green-500 to-green-700 text-white rounded text-sm"
+            className="px-3 py-2 bg-gradient-to-br from-purple-500 to-purple-700 text-white rounded text-sm"
           >
-            Create Hub (Host)
+            Create Hub
           </button>
 
           <button
             onClick={handleJoinHub}
-            className="px-3 py-2 bg-white/10 text-white rounded text-sm"
+            className="px-3 py-2 bg-gradient-to-br from-blue-500 to-blue-700 text-white rounded text-sm"
           >
             Join Hub
           </button>
 
           <button
             onClick={handleLeaveHub}
-            className="px-3 py-2 bg-red-600 text-white rounded text-sm"
+            className="px-3 py-2 bg-gradient-to-br from-red-500 to-red-700 text-white rounded text-sm"
           >
             Leave
           </button>
@@ -452,11 +494,11 @@ export default function Chat() {
       <br />
 
       <main className="flex-1 overflow-auto mb-4">
-        <div className="flex flex-col-reverse" style={{ paddingBottom: 8 }}>
+        <div style={{ paddingBottom: 8 }}>
           {messages.length === 0 && (
             <div className="text-sm text-white/60">No messages yet</div>
           )}
-          {messages.map((m) => renderMessage(m))}
+          {messages.map((m, i) => renderMessage(m, i))}
           <div ref={messagesEndRef} />
         </div>
       </main>

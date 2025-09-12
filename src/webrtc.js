@@ -1,4 +1,4 @@
-// src/webrtc.js (replace existing)
+// src/webrtc.js
 import Peer from "peerjs";
 import { nanoid } from "nanoid";
 
@@ -14,13 +14,15 @@ const LS_PEER_ID = "ph_peer_id";
 const LS_HUB_BOOTSTRAP = "ph_hub_bootstrap";
 const LS_LOCAL_NAME = "ph_name";
 
-// global callbacks so election/everywhere can notify UI / messages
+// global callbacks
 let onMessageGlobal = null;
 let onPeerListUpdateGlobal = null;
 let onBootstrapChangedGlobal = null;
 
 /**
  * initPeer(onMessage, onPeerListUpdate, localName = "Anonymous", onBootstrapChange = null)
+ * - onMessage(from, payloadOrText)
+ *   payloadOrText may be string OR object { type, text, id, ... }
  */
 export const initPeer = (onMessage, onPeerListUpdate, localName = "Anonymous", onBootstrapChange = null) => {
   onMessageGlobal = onMessage || null;
@@ -36,11 +38,13 @@ export const initPeer = (onMessage, onPeerListUpdate, localName = "Anonymous", o
     if (!storedId) localStorage.setItem(LS_PEER_ID, id);
     peerNames[id] = localName;
 
+    // If user previously joined a hub, try to connect to bootstrap
     const bootstrap = localStorage.getItem(LS_HUB_BOOTSTRAP);
     if (bootstrap && bootstrap !== id) {
       try {
         connectToPeer(bootstrap, onMessageGlobal, onPeerListUpdateGlobal, localName);
       } catch (e) {
+        // start reconnect loop if immediate connect fails
         startReconnectLoop(onMessageGlobal, onPeerListUpdateGlobal, localName);
       }
     }
@@ -50,13 +54,18 @@ export const initPeer = (onMessage, onPeerListUpdate, localName = "Anonymous", o
     setupConnection(conn, onMessageGlobal, onPeerListUpdateGlobal, localName);
   });
 
-  peer.on("error", (err) => console.warn("Peer error:", err));
+  peer.on("error", (err) => {
+    console.warn("Peer error:", err);
+  });
 
   return peer;
 };
 
 export const connectToPeer = (peerId, onMessage, onPeerListUpdate, localName = "Anonymous") => {
-  if (!peer) return;
+  if (!peer) {
+    console.warn("Peer not initialized yet");
+    return;
+  }
   if (peerId === peer.id) return;
   if (connections[peerId]) return;
 
@@ -64,12 +73,18 @@ export const connectToPeer = (peerId, onMessage, onPeerListUpdate, localName = "
   setupConnection(conn, onMessage, onPeerListUpdate, localName);
 };
 
+/**
+ * Persist bootstrap id (join hub)
+ */
 export const joinHub = (bootstrapPeerId) => {
   if (!bootstrapPeerId) return;
   localStorage.setItem(LS_HUB_BOOTSTRAP, bootstrapPeerId);
   if (onBootstrapChangedGlobal) onBootstrapChangedGlobal(bootstrapPeerId);
 };
 
+/**
+ * Leave hub: clear connections and persisted bootstrap
+ */
 export const leaveHub = () => {
   stopReconnectLoop();
   Object.values(connections).forEach((conn) => {
@@ -82,42 +97,61 @@ export const leaveHub = () => {
   if (onBootstrapChangedGlobal) onBootstrapChangedGlobal(null);
 };
 
-// Broadcast a bootstrap change to all peers
-const broadcastBootstrapChange = (newBootstrapId) => {
-  const payload = { type: "bootstrap", id: newBootstrapId };
-  Object.values(connections).forEach((conn) => sendToConn(conn, payload));
-};
-
-// Elect a new bootstrap deterministically (lexicographically smallest id among connected + self)
+/**
+ * If bootstrap is missing or offline, elect a bootstrap.
+ * Deterministic rule: lexicographically smallest id among (connected peers + self).
+ *
+ * New rule to avoid duplicate broadcasts:
+ * - Only the elected bootstrap peer (peer.id === newBootstrap) will broadcast the *public* announcement.
+ * - All peers will persist the new bootstrap locally.
+ */
 const electBootstrapIfNeeded = () => {
   const storedBootstrap = localStorage.getItem(LS_HUB_BOOTSTRAP);
-  if (storedBootstrap && (storedBootstrap === (peer && peer.id) || peersList.includes(storedBootstrap))) return;
+  if (storedBootstrap && (storedBootstrap === (peer && peer.id) || peersList.includes(storedBootstrap))) {
+    // bootstrap exists and is present
+    return;
+  }
 
   const candidates = [...new Set([...(peersList || []), peer?.id].filter(Boolean))];
   if (candidates.length === 0) return;
 
-  candidates.sort();
+  candidates.sort(); // lexicographic deterministic
   const newBootstrap = candidates[0];
 
-  localStorage.setItem(LS_HUB_BOOTSTRAP, newBootstrap);
-  broadcastBootstrapChange(newBootstrap);
-  if (onBootstrapChangedGlobal) onBootstrapChangedGlobal(newBootstrap);
-  console.log("Elected new bootstrap:", newBootstrap);
+  // set persistently
+  const prev = localStorage.getItem(LS_HUB_BOOTSTRAP);
+  if (prev === newBootstrap) return; // nothing changed
 
-  // Notify the newly elected bootstrap: either locally, or by sending a system message if we have a connection
-  const systemText = "You're the host now";
-  if (newBootstrap === peer?.id) {
-    // If this client is the new bootstrap, show system message locally
-    if (onMessageGlobal) onMessageGlobal("System", systemText);
+  localStorage.setItem(LS_HUB_BOOTSTRAP, newBootstrap);
+  if (onBootstrapChangedGlobal) onBootstrapChangedGlobal(newBootstrap);
+
+  // Build announcement payloads
+  const publicId = `bootstrap-${newBootstrap}`;
+  const privateId = `bootstrap-private-${newBootstrap}`;
+  const displayName = peerNames[newBootstrap] || newBootstrap;
+  const publicText = `${displayName} is now the host`;
+  const privateText = `You're the host now`;
+
+  // Only the elected bootstrap itself will broadcast the public announcement widely (to avoid multiple peers simultaneously broadcasting)
+  if (peer?.id === newBootstrap) {
+    // Broadcast public announcement
+    broadcastRaw({ type: "system_public", text: publicText, id: publicId });
+    // Also notify self privately
+    if (onMessageGlobal) onMessageGlobal("System", { type: "system_private", text: privateText, id: privateId });
   } else {
-    // If we have a connection to the new bootstrap, send them a system message
+    // Non-elected peers: if they have a connection to the new bootstrap, send that bootstrap a private system message
     const connToBootstrap = connections[newBootstrap];
     if (connToBootstrap) {
-      sendToConn(connToBootstrap, { type: "system", text: systemText });
+      sendToConn(connToBootstrap, { type: "system_private", text: privateText, id: privateId });
     }
+    // do not broadcast public announcement; elected bootstrap will broadcast it
   }
+  console.log("Elected new bootstrap:", newBootstrap);
 };
 
+/**
+ * Setup connection object handlers
+ */
 const setupConnection = (conn, onMessage, onPeerListUpdate, localName = "Anonymous") => {
   conn.on("open", () => {
     console.log("Connected to", conn.peer);
@@ -126,7 +160,7 @@ const setupConnection = (conn, onMessage, onPeerListUpdate, localName = "Anonymo
     if (!peersList.includes(conn.peer)) peersList.push(conn.peer);
     onPeerListUpdate && onPeerListUpdate([...peersList]);
 
-    // send intro
+    // send intro (advertise id, name, and known peers)
     sendToConn(conn, {
       type: "intro",
       id: peer.id,
@@ -134,7 +168,7 @@ const setupConnection = (conn, onMessage, onPeerListUpdate, localName = "Anonymo
       peers: [...peersList],
     });
 
-    // After connecting, validate bootstrap
+    // after connecting, ensure bootstrap is valid (may trigger election)
     electBootstrapIfNeeded();
   });
 
@@ -146,6 +180,7 @@ const setupConnection = (conn, onMessage, onPeerListUpdate, localName = "Anonymo
       if (data.id && data.name) peerNames[data.id] = data.name;
       if (data.id && !peersList.includes(data.id)) peersList.push(data.id);
 
+      // auto-connect to peers introducer knows
       (data.peers || []).forEach((p) => {
         if (p !== peer.id && !connections[p]) {
           try { connectToPeer(p, onMessageGlobal, onPeerListUpdateGlobal, peerNames[peer.id] || localName); } catch (e) {}
@@ -157,7 +192,20 @@ const setupConnection = (conn, onMessage, onPeerListUpdate, localName = "Anonymo
       return;
     }
 
+    if (data.type === "system_public") {
+      // global public system message (broadcast by elected bootstrap)
+      if (onMessageGlobal) onMessageGlobal("System", { type: "system_public", text: data.text, id: data.id });
+      return;
+    }
+
+    if (data.type === "system_private") {
+      // private system message targeted to a peer
+      if (onMessageGlobal) onMessageGlobal("System", { type: "system_private", text: data.text, id: data.id });
+      return;
+    }
+
     if (data.type === "bootstrap") {
+      // old-style bootstrap message support (if any)
       if (data.id) {
         localStorage.setItem(LS_HUB_BOOTSTRAP, data.id);
         if (onBootstrapChangedGlobal) onBootstrapChangedGlobal(data.id);
@@ -168,19 +216,13 @@ const setupConnection = (conn, onMessage, onPeerListUpdate, localName = "Anonymo
       return;
     }
 
-    if (data.type === "system") {
-      // system messages delivered to UI as from "System"
-      if (onMessageGlobal) onMessageGlobal("System", data.text ?? "");
-      return;
-    }
-
     if (data.type === "chat") {
       const fromName = data.fromName || peerNames[data.from] || data.from || "peer";
       if (onMessageGlobal) onMessageGlobal(fromName, data.text ?? "");
       return;
     }
 
-    // fallback
+    // fallback: unknown
     if (onMessageGlobal) onMessageGlobal(data.fromName ?? data.from ?? conn.peer, data.text ? data.text : JSON.stringify(data));
   });
 
@@ -191,6 +233,7 @@ const setupConnection = (conn, onMessage, onPeerListUpdate, localName = "Anonymo
     delete peerNames[conn.peer];
     onPeerListUpdate && onPeerListUpdate([...peersList]);
 
+    // elect new bootstrap if needed
     electBootstrapIfNeeded();
 
     const bootstrap = localStorage.getItem(LS_HUB_BOOTSTRAP);
@@ -202,8 +245,18 @@ const setupConnection = (conn, onMessage, onPeerListUpdate, localName = "Anonymo
   conn.on("error", (err) => console.warn("Connection error with", conn.peer, err));
 };
 
+/**
+ * Broadcast chat message to all peers
+ */
 export const broadcastMessage = (fromName, text) => {
   const payload = { type: "chat", from: peer?.id, fromName, text };
+  Object.values(connections).forEach((conn) => sendToConn(conn, payload));
+};
+
+/**
+ * Utility to broadcast arbitrary object to all connections
+ */
+const broadcastRaw = (payload) => {
   Object.values(connections).forEach((conn) => sendToConn(conn, payload));
 };
 
