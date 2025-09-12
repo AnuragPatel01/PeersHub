@@ -1,56 +1,52 @@
-// Minimal WebRTC utils for manual offer/answer exchange
+import Peer from "peerjs";
+import { nanoid } from "nanoid";
 
-const config = { iceServers: [{ urls: "stun:stun.l.google.com:19302" }] };
-const peersRef = {};
+let peer;
+let connections = {};
+let peersList = [];
 
-export const createPeerConnection = async (user, setPeers) => {
-  const pc = new RTCPeerConnection(config);
-  const dc = pc.createDataChannel("chat");
-  peersRef[user] = { pc, dc };
+export const initPeer = (onMessage, onPeerConnected) => {
+  peer = new Peer(nanoid(6)); // short 6-digit ID
 
-  dc.onmessage = (ev) => console.log("Message from peer:", ev.data);
-
-  const offer = await pc.createOffer();
-  await pc.setLocalDescription(offer);
-  await waitForIce(pc);
-
-  const code = btoa(JSON.stringify({ type: "offer", sdp: pc.localDescription, from: user }));
-  setPeers((p) => ({ ...p, [user]: { pc, dc } }));
-  return { pc, code };
-};
-
-export const handlePasteOffer = async (decoded, user, setPeers) => {
-  const pc = new RTCPeerConnection(config);
-  peersRef[decoded.from] = { pc };
-
-  pc.ondatachannel = (ev) => {
-    const dc = ev.channel;
-    peersRef[decoded.from].dc = dc;
-    dc.onmessage = (ev) => console.log("Message:", ev.data);
-  };
-
-  await pc.setRemoteDescription(decoded.sdp);
-  const answer = await pc.createAnswer();
-  await pc.setLocalDescription(answer);
-  await waitForIce(pc);
-
-  const code = btoa(JSON.stringify({ type: "answer", sdp: pc.localDescription, from: user, to: decoded.from }));
-  setPeers((p) => ({ ...p, [decoded.from]: { pc } }));
-  return code;
-};
-
-export const handlePasteAnswer = async (decoded, setPeers) => {
-  const entry = peersRef[decoded.from];
-  if (!entry?.pc) return;
-  await entry.pc.setRemoteDescription(decoded.sdp);
-};
-
-const waitForIce = (pc) =>
-  new Promise((res) => {
-    if (pc.iceGatheringState === "complete") res();
-    else {
-      pc.addEventListener("icegatheringstatechange", () => {
-        if (pc.iceGatheringState === "complete") res();
-      });
-    }
+  peer.on("open", (id) => {
+    console.log("My PeerJS ID:", id);
   });
+
+  // Incoming connection
+  peer.on("connection", (conn) => {
+    setupConnection(conn, onMessage, onPeerConnected);
+  });
+
+  return peer;
+};
+
+export const connectToPeer = (peerId, onMessage, onPeerConnected) => {
+  if (connections[peerId]) return;
+  const conn = peer.connect(peerId);
+  setupConnection(conn, onMessage, onPeerConnected);
+};
+
+const setupConnection = (conn, onMessage, onPeerConnected) => {
+  conn.on("open", () => {
+    connections[conn.peer] = conn;
+    peersList.push(conn.peer);
+    onPeerConnected(conn.peer);
+  });
+
+  conn.on("data", (data) => {
+    onMessage(conn.peer, data);
+  });
+
+  conn.on("close", () => {
+    delete connections[conn.peer];
+    peersList = peersList.filter((p) => p !== conn.peer);
+  });
+};
+
+export const broadcastMessage = (msg) => {
+  Object.values(connections).forEach((conn) => {
+    conn.send(msg);
+  });
+};
+
+export const getPeers = () => peersList;
