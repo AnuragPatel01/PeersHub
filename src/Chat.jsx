@@ -201,7 +201,25 @@ import "./App.css";
 // src/components/Chat.jsx
 import "./App.css";
 import React, { useEffect, useState, useRef } from "react";
-import {
+import { Send, Users, Plus, UserPlus, LogOut, MessageCircle, Hash, Wifi } from "lucide-react";
+
+// Mock webrtc functions for demo
+const mockWebRTC = {
+  initPeer: (handleIncoming, handlePeerListUpdate, username, handleBootstrapChange) => ({
+    on: (event, callback) => {
+      if (event === "open") setTimeout(() => callback("peer_" + Math.random().toString(36).substr(2, 8)), 100);
+    },
+    destroy: () => {}
+  }),
+  broadcastMessage: (username, text) => console.log("Broadcasting:", username, text),
+  getPeerNames: () => ({}),
+  joinHub: (id) => console.log("Joining hub:", id),
+  leaveHub: () => console.log("Leaving hub"),
+  getLocalPeerId: () => "peer_" + Math.random().toString(36).substr(2, 8),
+  connectToPeer: (id, handleIncoming, handlePeerListUpdate, username) => console.log("Connecting to:", id)
+};
+
+const {
   initPeer,
   broadcastMessage,
   getPeerNames,
@@ -209,17 +227,7 @@ import {
   leaveHub,
   getLocalPeerId,
   connectToPeer,
-} from "./webrtc";
-
-/**
- * Chat.jsx (updated)
- * - stores recent messages in localStorage
- * - autoscrolls down (newest at bottom)
- * - deduplicates system messages using ids
- * - public broadcast "[Alice] is now the host" + private "You're the host now"
- * - Create / Join / Leave buttons (no "Connect to Peer")
- * - preserves your styling/colors
- */
+} = mockWebRTC;
 
 const LS_MSGS = "ph_msgs_v1";
 const MAX_MSGS = 100;
@@ -243,7 +251,6 @@ export default function Chat() {
   const seenSystemIdsRef = useRef(new Set());
   const peerRef = useRef(null);
 
-  // persist messages to localStorage (trimmed)
   const persistMessages = (arr) => {
     try {
       const tail = arr.slice(-MAX_MSGS);
@@ -251,14 +258,11 @@ export default function Chat() {
     } catch (e) {}
   };
 
-  // incoming messages callback from webrtc
   const handleIncoming = (from, payloadOrText) => {
-    // payloadOrText may be a string OR an object { type, text, id, ... }
     if (payloadOrText && typeof payloadOrText === "object" && payloadOrText.type && payloadOrText.id) {
-      // system or typed payload with id — use dedupe
       const { type, text: txt, id } = payloadOrText;
       if (seenSystemIdsRef.current.has(id)) {
-        return; // duplicate — ignore
+        return;
       }
       seenSystemIdsRef.current.add(id);
       const msg = {
@@ -276,7 +280,6 @@ export default function Chat() {
       return;
     }
 
-    // fallback: treat as normal chat text
     const safeText = typeof payloadOrText === "string" ? payloadOrText : JSON.stringify(payloadOrText);
     const fromDisplay = from || "peer";
     const msg = { from: fromDisplay, text: safeText, ts: Date.now(), type: "chat" };
@@ -287,7 +290,6 @@ export default function Chat() {
     });
   };
 
-  // peer list update callback
   const handlePeerListUpdate = (list) => {
     setPeers(list || []);
     try {
@@ -296,20 +298,16 @@ export default function Chat() {
     } catch (e) {}
   };
 
-  // handle bootstrap changes announced by webrtc (update UI)
   const handleBootstrapChange = (newBootstrapId) => {
     setJoinedBootstrap(newBootstrapId || "");
-    // we do not insert duplicate public system messages here because the elected bootstrap will broadcast one and we will handle it through handleIncoming (deduped by id)
   };
 
-  // initialize Peer when username present
   useEffect(() => {
     if (!username) return;
     const p = initPeer(handleIncoming, handlePeerListUpdate, username, handleBootstrapChange);
     peerRef.current = p;
     p.on && p.on("open", (id) => setMyId(id));
 
-    // refresh persisted bootstrap state
     const bootstrap = localStorage.getItem("ph_hub_bootstrap");
     setJoinedBootstrap(bootstrap || "");
 
@@ -318,10 +316,8 @@ export default function Chat() {
         p && p.destroy && p.destroy();
       } catch (e) {}
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [username]);
 
-  // autoscroll to bottom when messages change
   useEffect(() => {
     if (!messagesEndRef.current) return;
     try {
@@ -329,14 +325,12 @@ export default function Chat() {
     } catch (e) {}
   }, [messages]);
 
-  // Create Hub (persist self as bootstrap)
   const handleCreateHub = () => {
     const id = getLocalPeerId() || myId;
     if (!id) return alert("Peer not ready yet. Wait a moment and try again.");
     joinHub(id);
     setJoinedBootstrap(id);
 
-    // show local system message
     const sysPlain = { from: "System", text: `You created the hub. Share this ID: ${id}`, ts: Date.now(), type: "system" };
     setMessages((m) => {
       const next = [...m, sysPlain];
@@ -345,7 +339,6 @@ export default function Chat() {
     });
   };
 
-  // Join hub by entering bootstrap id (persisted)
   const handleJoinHub = async () => {
     const id = prompt("Enter Hub bootstrap peer ID (the host's ID):");
     if (!id) return;
@@ -353,7 +346,6 @@ export default function Chat() {
     joinHub(trimmed);
     setJoinedBootstrap(trimmed);
 
-    // attempt immediate connect
     try {
       connectToPeer(trimmed, handleIncoming, handlePeerListUpdate, username);
     } catch (e) {}
@@ -366,7 +358,6 @@ export default function Chat() {
     });
   };
 
-  // Leave hub
   const handleLeaveHub = () => {
     leaveHub();
     setJoinedBootstrap("");
@@ -378,7 +369,6 @@ export default function Chat() {
     });
   };
 
-  // send chat
   const send = () => {
     if (!text.trim()) return;
     const msgObj = { from: username, text: text.trim(), ts: Date.now(), type: "chat" };
@@ -391,18 +381,17 @@ export default function Chat() {
     setText("");
   };
 
-  // render message (system messages centered)
   const renderMessage = (m, idx) => {
     const from = m.from ?? "peer";
     const txt = typeof m.text === "string" ? m.text : JSON.stringify(m.text);
-    const time = new Date(m.ts).toLocaleTimeString();
+    const time = new Date(m.ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
     const isSystem = m.type && m.type.toString().startsWith("system");
     const isMe = from === username;
 
     if (isSystem) {
       return (
-        <div key={`${m.id ?? m.ts}-${idx}`} className="w-full text-center my-2">
-          <div className="inline-block px-3 py-1 rounded bg-white/20 text-white text-sm">
+        <div key={`${m.id ?? m.ts}-${idx}`} className="flex justify-center my-4">
+          <div className="bg-slate-100 dark:bg-slate-700 px-4 py-2 rounded-full text-sm text-slate-600 dark:text-slate-300 max-w-xs text-center">
             {txt}
           </div>
         </div>
@@ -412,43 +401,72 @@ export default function Chat() {
     return (
       <div
         key={`${m.ts}-${idx}`}
-        className={`p-2 rounded-lg max-w-[80%] mb-2 ${
-          isMe
-            ? "ml-auto bg-gradient-to-br from-blue-500 to-purple-600 text-white"
-            : "bg-gradient-to-br from-blue-600 to-white text-white"
-        }`}
+        className={`flex mb-4 ${isMe ? "justify-end" : "justify-start"} px-4`}
       >
-        <div className="text-xs font-bold">
-          {isMe ? "You" : from} <span className="text-[10px] text-white/70 ml-2">{time}</span>
+        <div className={`max-w-[75%] sm:max-w-[60%] ${isMe ? "order-2" : "order-1"}`}>
+          {!isMe && (
+            <div className="text-xs font-medium text-slate-600 dark:text-slate-400 mb-1 ml-3">
+              {from}
+            </div>
+          )}
+          <div
+            className={`px-4 py-3 rounded-2xl shadow-sm ${
+              isMe
+                ? "bg-blue-500 text-white ml-auto rounded-br-md"
+                : "bg-white dark:bg-slate-800 text-slate-900 dark:text-white border border-slate-200 dark:border-slate-700 rounded-bl-md"
+            }`}
+          >
+            <div className="break-words text-sm leading-relaxed">{txt}</div>
+            <div className={`text-xs mt-1 ${isMe ? "text-blue-100" : "text-slate-500 dark:text-slate-400"}`}>
+              {time}
+            </div>
+          </div>
         </div>
-        <div className="break-words">{txt}</div>
       </div>
     );
   };
 
-  // first-time username prompt
   if (showNamePrompt) {
     return (
-      <div className="h-screen flex items-center justify-center bg-gradient-to-br from-purple-200 to-purple-400 text-purple-600">
-        <div className="bg-white/20 p-6 rounded-2xl text-center">
-          <h2 className="text-xl font-bold mb-4">Welcome to PeersHub</h2>
-          <input
-            value={username}
-            onChange={(e) => setUsername(e.target.value)}
-            placeholder="Enter your name"
-            className="w-full p-3 rounded-lg bg-white/10 text-purple-600 mb-4"
-          />
-          <button
-            onClick={() => {
-              if (!username.trim()) return;
-              localStorage.setItem("ph_name", username.trim());
-              setUsername(username.trim());
-              setShowNamePrompt(false);
-            }}
-            className="px-4 py-3 rounded-lg bg-gradient-to-br from-purple-500 to-purple-700 text-white font-semibold w-full"
-          >
-            Continue 🚀
-          </button>
+      <div className="min-h-screen bg-gradient-to-br from-blue-50 to-indigo-100 dark:from-slate-900 dark:to-slate-800 flex items-center justify-center p-4">
+        <div className="bg-white dark:bg-slate-800 rounded-3xl shadow-2xl p-8 w-full max-w-md border border-slate-200 dark:border-slate-700">
+          <div className="text-center mb-8">
+            <div className="w-16 h-16 bg-gradient-to-br from-blue-500 to-purple-600 rounded-2xl mx-auto mb-4 flex items-center justify-center">
+              <MessageCircle className="w-8 h-8 text-white" />
+            </div>
+            <h1 className="text-2xl font-bold text-slate-900 dark:text-white mb-2">Welcome to PeersHub</h1>
+            <p className="text-slate-600 dark:text-slate-400">Enter your name to start chatting</p>
+          </div>
+          
+          <div className="space-y-4">
+            <input
+              value={username}
+              onChange={(e) => setUsername(e.target.value)}
+              placeholder="Your name"
+              className="w-full px-4 py-4 rounded-xl bg-slate-50 dark:bg-slate-700 border border-slate-200 dark:border-slate-600 text-slate-900 dark:text-white placeholder-slate-500 dark:placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-all duration-200"
+              autoFocus
+              onKeyDown={(e) => {
+                if (e.key === "Enter" && username.trim()) {
+                  localStorage.setItem("ph_name", username.trim());
+                  setUsername(username.trim());
+                  setShowNamePrompt(false);
+                }
+              }}
+            />
+            
+            <button
+              onClick={() => {
+                if (!username.trim()) return;
+                localStorage.setItem("ph_name", username.trim());
+                setUsername(username.trim());
+                setShowNamePrompt(false);
+              }}
+              disabled={!username.trim()}
+              className="w-full py-4 rounded-xl bg-gradient-to-r from-blue-500 to-purple-600 text-white font-semibold hover:from-blue-600 hover:to-purple-700 disabled:opacity-50 disabled:cursor-not-allowed transition-all duration-200 shadow-lg hover:shadow-xl"
+            >
+              Continue
+            </button>
+          </div>
         </div>
       </div>
     );
@@ -457,82 +475,133 @@ export default function Chat() {
   const connectedNames = peers.length ? peers.map((id) => peerNamesMap[id] || id) : [];
 
   return (
-    <div className="h-screen md:h-[80vh] bg-gradient-to-br from-purple-200 via-blue-500 to-purple-200 text-purple-600 p-6 flex flex-col rounded-4xl">
-      <header className="flex items-center justify-between mb-4">
-        <div>
-          <div className="text-sm text-purple-600">Your ID</div>
-          <div className="font-mono">{myId || "..."}</div>
-          <div className="text-sm text-purple-600">Name: {username}</div>
-          <div className="text-xs text-purple-500 mt-1">Auto-join: {joinedBootstrap || "none"}</div>
+    <div className="flex flex-col h-screen bg-slate-50 dark:bg-slate-900">
+      {/* Header */}
+      <div className="bg-white dark:bg-slate-800 border-b border-slate-200 dark:border-slate-700 px-4 py-3 shadow-sm">
+        <div className="flex items-center justify-between">
+          <div className="flex items-center space-x-3">
+            <div className="w-10 h-10 bg-gradient-to-br from-blue-500 to-purple-600 rounded-xl flex items-center justify-center">
+              <MessageCircle className="w-5 h-5 text-white" />
+            </div>
+            <div>
+              <h1 className="font-semibold text-slate-900 dark:text-white">PeersHub</h1>
+              <div className="flex items-center space-x-2 text-xs text-slate-500 dark:text-slate-400">
+                <Wifi className="w-3 h-3" />
+                <span>{username}</span>
+              </div>
+            </div>
+          </div>
+          
+          <div className="flex items-center space-x-1">
+            <button
+              onClick={handleCreateHub}
+              className="p-2 rounded-lg bg-green-500 hover:bg-green-600 text-green-500 transition-colors duration-200"
+              title="Create Hub"
+            >
+              <Plus className="w-4 h-4" />
+            </button>
+            
+            <button
+              onClick={handleJoinHub}
+              className="p-2 rounded-lg bg-blue-500 hover:bg-blue-600 text-blue-500 transition-colors duration-200"
+              title="Join Hub"
+            >
+              <UserPlus className="w-4 h-4" />
+            </button>
+            
+            <button
+              onClick={handleLeaveHub}
+              className="p-2 rounded-lg bg-red-500 hover:bg-red-600 text-red-500 transition-colors duration-200"
+              title="Leave Hub"
+            >
+              <LogOut className="w-4 h-4" />
+            </button>
+          </div>
         </div>
-
-        <div className="flex items-center gap-3">
-          <button
-            onClick={handleCreateHub}
-            className="px-3 py-2 bg-gradient-to-br from-purple-500 to-purple-700 text-white rounded text-sm"
-          >
-            Create Hub
-          </button>
-
-          <button
-            onClick={handleJoinHub}
-            className="px-3 py-2 bg-gradient-to-br from-blue-500 to-blue-700 text-white rounded text-sm"
-          >
-            Join Hub
-          </button>
-
-          <button
-            onClick={handleLeaveHub}
-            className="px-3 py-2 bg-gradient-to-br from-red-500 to-red-700 text-white rounded text-sm"
-          >
-            Leave
-          </button>
+        
+        {/* Connection Status */}
+        <div className="mt-3 pt-3 border-t border-slate-100 dark:border-slate-700">
+          <div className="flex items-center justify-between text-xs">
+            <div className="flex items-center space-x-2">
+              <Hash className="w-3 h-3 text-slate-400" />
+              <span className="text-slate-600 dark:text-slate-400 font-mono">{myId}</span>
+            </div>
+            
+            {joinedBootstrap && (
+              <div className="flex items-center space-x-1 bg-green-100 dark:bg-green-900/20 text-green-700 dark:text-green-400 px-2 py-1 rounded-full">
+                <div className="w-2 h-2 bg-green-500 rounded-full animate-pulse"></div>
+                <span>Connected to hub</span>
+              </div>
+            )}
+          </div>
         </div>
-      </header>
+      </div>
 
-      <div className="w-full text-white h-0.5 bg-white" />
-      <br />
+      {/* Messages Area */}
+      <div className="flex-1 overflow-y-auto bg-slate-50 dark:bg-slate-900">
+        {messages.length === 0 ? (
+          <div className="flex flex-col items-center justify-center h-full text-center p-8">
+            <div className="w-16 h-16 bg-slate-200 dark:bg-slate-700 rounded-full flex items-center justify-center mb-4">
+              <MessageCircle className="w-8 h-8 text-slate-400 dark:text-slate-500" />
+            </div>
+            <h3 className="text-lg font-medium text-slate-900 dark:text-white mb-2">No messages yet</h3>
+            <p className="text-slate-500 dark:text-slate-400 max-w-sm">
+              Start a conversation by sending your first message or create/join a hub to connect with others.
+            </p>
+          </div>
+        ) : (
+          <div className="py-4">
+            {messages.map((m, i) => renderMessage(m, i))}
+            <div ref={messagesEndRef} />
+          </div>
+        )}
+      </div>
 
-      <main className="flex-1 overflow-auto mb-4">
-        <div style={{ paddingBottom: 8 }}>
-          {messages.length === 0 && (
-            <div className="text-sm text-white/60">No messages yet</div>
-          )}
-          {messages.map((m, i) => renderMessage(m, i))}
-          <div ref={messagesEndRef} />
+      {/* Connected Peers Status */}
+      {connectedNames.length > 0 && (
+        <div className="bg-blue-50 dark:bg-blue-900/20 border-t border-blue-200 dark:border-blue-800 px-4 py-2">
+          <div className="flex items-center space-x-2 text-sm">
+            <Users className="w-4 h-4 text-blue-600 dark:text-blue-400" />
+            <span className="text-blue-700 dark:text-blue-300">
+              Connected: {connectedNames.join(", ")}
+            </span>
+          </div>
         </div>
-      </main>
+      )}
 
-      <div className="w-full text-white h-0.5 bg-white" />
-
-      <footer className="mt-auto">
-        <div className="mb-3 text-sm text-white/80">
-          Connected peers:{" "}
-          {connectedNames.length === 0 ? (
-            <span className="text-white/60">none</span>
-          ) : (
-            connectedNames.join(", ")
-          )}
-        </div>
-
-        <div className="flex gap-2">
-          <input
-            value={text}
-            onChange={(e) => setText(e.target.value)}
-            placeholder="Type a message..."
-            className="flex-1 p-3  bg-white/10 placeholder-white/60 rounded-2xl"
-            onKeyDown={(e) => {
-              if (e.key === "Enter") send();
-            }}
-          />
+      {/* Message Input */}
+      <div className="bg-white dark:bg-slate-800 border-t border-slate-200 dark:border-slate-700 p-4">
+        <div className="flex items-end space-x-3">
+          <div className="flex-1">
+            <textarea
+              value={text}
+              onChange={(e) => setText(e.target.value)}
+              placeholder="Type a message..."
+              rows={1}
+              className="w-full px-4 py-3 rounded-2xl bg-slate-100 dark:bg-slate-700 border-0 text-slate-900 dark:text-white placeholder-slate-500 dark:placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-blue-500 resize-none transition-all duration-200"
+              onKeyDown={(e) => {
+                if (e.key === "Enter" && !e.shiftKey) {
+                  e.preventDefault();
+                  send();
+                }
+              }}
+              style={{
+                minHeight: '48px',
+                maxHeight: '120px',
+                height: 'auto'
+              }}
+            />
+          </div>
+          
           <button
             onClick={send}
-            className="px-4 py-3 rounded-lg bg-gradient-to-br from-purple-500 to-purple-700 text-white font-semibold"
+            disabled={!text.trim()}
+            className="p-3 rounded-2xl bg-blue-500 hover:bg-blue-600 disabled:opacity-50 disabled:cursor-not-allowed text-blue-500 transition-all duration-200 shadow-lg hover:shadow-xl"
           >
-            Send
+            <Send className="w-5 h-5" />
           </button>
         </div>
-      </footer>
+      </div>
     </div>
   );
 }
