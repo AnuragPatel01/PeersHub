@@ -575,6 +575,7 @@ import {
   getLocalPeerId,
   connectToPeer,
   broadcastSystem,
+
 } from "./webrtc";
 // notification helpers
 import { requestNotificationPermission, showNotification } from "./notify";
@@ -742,23 +743,6 @@ export default function Chat() {
     if (from === "__system_ack_read__" && payloadOrText && payloadOrText.id) {
       const { fromPeer, id } = payloadOrText;
       addUniqueToMsgArray(id, "reads", fromPeer);
-      return;
-    }
-
-    // handle peer leave broadcasts
-    if (from === "__system_leave__" && payloadOrText) {
-      const msg = payloadOrText;
-      setMessages((prev) => [
-        ...prev,
-        {
-          id: msg.id || `sys-${Date.now()}`,
-          from: "system",
-          fromName: "System",
-          text: msg.text || "A peer left the hub.",
-          ts: Date.now(),
-          type: "system_leave",
-        },
-      ]);
       return;
     }
 
@@ -961,39 +945,39 @@ export default function Chat() {
 
   // Create Hub
   const handleCreateHub = () => {
-    const id = getLocalPeerId() || myId;
-    if (!id) return alert("Peer not ready yet. Wait a moment and try again.");
-    joinHub(id);
-    setJoinedBootstrap(id);
+  const id = getLocalPeerId() || myId;
+  if (!id) return alert("Peer not ready yet. Wait a moment and try again.");
+  joinHub(id);
+  setJoinedBootstrap(id);
 
-    // persist hub + autojoin flag
-    localStorage.setItem("ph_hub_bootstrap", id);
-    localStorage.setItem("ph_should_autojoin", "true");
+  // persist hub + autojoin flag
+  localStorage.setItem("ph_hub_bootstrap", id);
+  localStorage.setItem("ph_should_autojoin", "true");
 
-    // local system message for the creator
-    const sysPlain = {
-      id: `sys-create-${Date.now()}`,
-      from: "System",
-      text: `You created the hub. Share this ID: ${id}`,
-      ts: Date.now(),
-      type: "system",
-    };
-    setMessages((m) => {
-      const next = [...m, sysPlain];
-      persistMessages(next);
-      return next;
-    });
-
-    // BROADCAST public system announcement so others know who the host is
-    try {
-      const publicText = `[${username || "Host"}] is the host`;
-      broadcastSystem("system_public", publicText, `sys-host-${id}`);
-    } catch (e) {
-      console.warn("broadcastSystem failed", e);
-    }
-
-    setMenuOpen(false);
+  // local system message for the creator
+  const sysPlain = {
+    id: `sys-create-${Date.now()}`,
+    from: "System",
+    text: `You created the hub. Share this ID: ${id}`,
+    ts: Date.now(),
+    type: "system",
   };
+  setMessages((m) => {
+    const next = [...m, sysPlain];
+    persistMessages(next);
+    return next;
+  });
+
+  // BROADCAST public system announcement so others know who the host is
+  try {
+    const publicText = `[${username || "Host"}] is the host`;
+    broadcastSystem("system_public", publicText, `sys-host-${id}`);
+  } catch (e) {
+    console.warn("broadcastSystem failed", e);
+  }
+
+  setMenuOpen(false);
+};
 
   // Join Hub
   const handleJoinHub = async () => {
@@ -1184,18 +1168,12 @@ export default function Chat() {
     const isMe =
       (m.fromId || m.from) === (getLocalPeerId() || myId) || from === username;
 
-    if (isSystem || m.type === "system_leave") {
+    if (isSystem) {
       return (
         <div key={`${m.id ?? m.ts}-${idx}`} className="w-full text-center my-2">
-          {m.type === "system_leave" ? (
-            <div className="text-center text-gray-400 text-sm my-2 italic">
-              {m.text}
-            </div>
-          ) : (
-            <div className="inline-block px-3 py-1 rounded bg-white/20 text-blue-500 text-sm">
-              {m.text}
-            </div>
-          )}
+          <div className="inline-block px-3 py-1 rounded bg-white/20 text-blue-500 text-sm">
+            {m.text}
+          </div>
         </div>
       );
     }
