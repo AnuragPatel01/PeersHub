@@ -565,11 +565,7 @@
 
 // New testing
 
-
 // src/components/Chat.jsx
-
-
-// src/components/Chat.jsx// src/components/Chat.jsx
 import "./App.css";
 
 import React, { useEffect, useState, useRef } from "react";
@@ -590,11 +586,12 @@ import { requestNotificationPermission, showNotification } from "./notify";
 import { nanoid } from "nanoid";
 
 /**
- * Chat.jsx
- * - WhatsApp-like read/delivery states (gray/red/yellow/green)
- * - auto-ack read when chat is visible (document.visibilityState === 'visible')
- * - ack_read on tap reply as well
- * - keeps your UI classes/colors exactly
+ * Chat.jsx (fixed for read-acks)
+ *
+ * - Auto-send ack_read immediately when message arrives and document is visible
+ * - On visibilitychange -> send ack_read for any unread messages
+ * - Keeps tap-to-reply behavior (still sends ack_read)
+ * - Keeps all UI classes/colors intact
  */
 
 const LS_MSGS = "ph_msgs_v1";
@@ -626,7 +623,6 @@ export default function Chat() {
 
   useEffect(() => {
     if (!username) return;
-    // ask for permission once (non-blocking)
     requestNotificationPermission().then((granted) => {
       console.log("Notification permission granted:", granted);
     });
@@ -692,7 +688,6 @@ export default function Chat() {
         ts: incoming.ts || Date.now(),
         type: "chat",
         replyTo: incoming.replyTo || null,
-        // deliveries & reads arrays store peer IDs who delivered/read
         deliveries: incoming.deliveries || [],
         reads: incoming.reads || [],
       };
@@ -794,15 +789,24 @@ export default function Chat() {
         payloadOrText.text
       );
 
-      // Auto-read: if user currently has the tab visible consider it "read" immediately
-      // i.e., WhatsApp logic: delivered when device receives; read when chat open/visible
+      // --- NEW: auto-send ack_read NOW if the app is visible and message not from me ---
       try {
         const origin = payloadOrText.from || payloadOrText.origin || null;
-        if (document.visibilityState === "visible" && payloadOrText.id && origin) {
-          // notify origin that we read
-          sendAckRead(payloadOrText.id, origin);
-          // also locally record that we read this message (so counts are consistent on this client)
-          addUniqueToMsgArray(payloadOrText.id, "reads", getLocalPeerId() || myId);
+        const localId = getLocalPeerId() || myId;
+        // only send ack_read if origin exists and origin is not me
+        if (
+          origin &&
+          origin !== localId &&
+          document.visibilityState === "visible"
+        ) {
+          // send ack_read to origin
+          try {
+            sendAckRead(payloadOrText.id, origin);
+          } catch (e) {
+            console.warn("sendAckRead error (auto on receive):", e);
+          }
+          // locally record read
+          addUniqueToMsgArray(payloadOrText.id, "reads", localId);
         }
       } catch (e) {
         console.warn("auto ack_read failed", e);
@@ -877,6 +881,35 @@ export default function Chat() {
       messagesEndRef.current.scrollIntoView({ behavior: "smooth", block: "end" });
     } catch (e) {}
   }, [messages]);
+
+  // when tab becomes visible, send ack_read for any unread messages
+  useEffect(() => {
+    const onVisibility = () => {
+      if (document.visibilityState === "visible") {
+        const localId = getLocalPeerId() || myId;
+        messages.forEach((m) => {
+          if (!m || m.type !== "chat") return;
+          // only for messages from other peers and not already read by me
+          const origin = m.fromId || m.from;
+          if (!origin || origin === localId) return;
+          const alreadyRead = Array.isArray(m.reads) && m.reads.includes(localId);
+          if (!alreadyRead) {
+            try {
+              sendAckRead(m.id, origin);
+            } catch (e) {
+              console.warn("sendAckRead error (on visibility):", e);
+            }
+            addUniqueToMsgArray(m.id, "reads", localId);
+          }
+        });
+      }
+    };
+    document.addEventListener("visibilitychange", onVisibility);
+    // also run once in case the page is already visible when component mounts
+    if (document.visibilityState === "visible") onVisibility();
+    return () => document.removeEventListener("visibilitychange", onVisibility);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [messages, myId]);
 
   // menu outside click handler
   useEffect(() => {
@@ -1039,34 +1072,29 @@ export default function Chat() {
 
   // compute status dot for message using WhatsApp-like rules
   const renderStatusDot = (m) => {
-    const total = (peers?.length || 0);
-    // group semantics: total is number of other peers, sender excluded.
-    // If no peers (total === 0) -> gray (no recipients)
-    if (total === 0) {
+    const totalPeers = (peers?.length || 0); // recipients count (excluding self)
+    if (totalPeers === 0) {
       return <span className="inline-block w-2 h-2 rounded-full bg-gray-400 ml-2" title="No recipients (offline)" />;
     }
 
-    // count deliveries and reads among recipients
     const deliveries = (m.deliveries || []).filter((id) => id !== (getLocalPeerId() || myId)).length;
     const reads = (m.reads || []).filter((id) => id !== (getLocalPeerId() || myId)).length;
 
-    // deliveredCount & readCount are among recipients (exclude self)
-    // single tick (red) when not delivered to everyone (some or all missing)
-    if (deliveries < total) {
-      return <span className="inline-block w-2 h-2 rounded-full bg-red-500 ml-2" title={`Single tick — delivered to ${deliveries}/${total}`} />;
+    // single tick (red) when not delivered to all recipients
+    if (deliveries < totalPeers) {
+      return <span className="inline-block w-2 h-2 rounded-full bg-red-500 ml-2" title={`Single tick — delivered to ${deliveries}/${totalPeers}`} />;
     }
 
-    // delivered to all, but not read by all => yellow (double tick)
-    if (deliveries === total && reads < total) {
-      return <span className="inline-block w-2 h-2 rounded-full bg-yellow-400 ml-2" title={`Double tick — delivered to all (${total}), reads ${reads}/${total}`} />;
+    // double tick (yellow) when delivered to everyone but not read by all
+    if (deliveries === totalPeers && reads < totalPeers) {
+      return <span className="inline-block w-2 h-2 rounded-full bg-yellow-400 ml-2" title={`Double tick — delivered to all (${totalPeers}), reads ${reads}/${totalPeers}`} />;
     }
 
-    // read by all => green (double-blue)
-    if (reads === total) {
+    // double-blue (green) when read by everyone
+    if (reads === totalPeers) {
       return <span className="inline-block w-2 h-2 rounded-full bg-green-500 ml-2" title="Double-blue — read by everyone" />;
     }
 
-    // fallback
     return <span className="inline-block w-2 h-2 rounded-full bg-gray-400 ml-2" />;
   };
 
@@ -1092,7 +1120,7 @@ export default function Chat() {
       <div
         onClick={() => handleTapMessage(m)}
         key={`${m.id ?? m.ts}-${idx}`}
-        className={`p-2 rounded-2xl max-w-[40%] mb-2 cursor-pointer ${isMe ? "ml-auto bg-blue-500 text-white" : "bg-white/100  text-black"}`}
+        className={`p-2 rounded-2xl max-w-[50%] mb-2 cursor-pointer ${isMe ? "ml-auto bg-blue-500 text-white" : "bg-white/100  text-black"}`}
       >
         <div className="text-xs font-bold flex items-center">
           <div className="flex-1">{isMe ? "You" : from}</div>
@@ -1144,7 +1172,6 @@ export default function Chat() {
     const names = Object.keys(typingUsers);
     if (!names.length) return null;
     const shown = names.slice(0, 2).join(", ");
-    // kept your color classes
     return <div className="text-sm text-blue-500 mb-2">{shown} typing...</div>;
   };
 
@@ -1153,7 +1180,7 @@ export default function Chat() {
       <div className="h-screen md:h-[80vh] bg-gray-50 text-purple-600 p-6 flex flex-col rounded-4xl">
         <header className="flex items-center justify-between mb-4">
           <div className="flex gap-2.5">
-            <div className="text-sm text-blue-600">YourID</div>
+            <div className="text-sm text-blue-600">Your ID</div>
             <div className="font-mono">{myId || "..."}</div>
             <div className="text-sm text-blue-600">Name: {username}</div>
             <div className="text-xs text-purple-500 mt-1">
