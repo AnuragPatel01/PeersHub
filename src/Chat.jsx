@@ -2200,10 +2200,6 @@ import {
   getLocalPeerId,
   connectToPeer,
   broadcastSystem,
-  // preview / join-request APIs (from updated webrtc.js)
-  requestPreview,
-  sendJoinRequest,
-  respondToJoinRequest,
 } from "./webrtc";
 // notification helpers
 import { requestNotificationPermission, showNotification } from "./notify";
@@ -2211,12 +2207,16 @@ import { requestNotificationPermission, showNotification } from "./notify";
 import { nanoid } from "nanoid";
 
 /**
- * Chat.jsx (with Pre-join preview + join-request)
+ * Chat.jsx (fixed for read-acks) + Pre-join Preview modal
  *
  * - Auto-send ack_read immediately when message arrives and document is visible
- * - Pre-join preview modal (anonymized user list) + "Request to join" with quick message
- * - Host receives join requests and can accept/decline
- * - Keeps tap-to-reply behavior and other UI intact
+ * - On visibilitychange -> send ack_read for any unread messages
+ * - Pre-join Preview: anonymized list + quick message + targeted join-request
+ *
+ * Implementation notes:
+ * - Join request is implemented as a normal "chat" message with a meta flag:
+ *     { type: "chat", ..., to: <hostId>, meta: { join_request: true }, text: "<quick message>" }
+ *   webrtc routing honors data.to so only the host receives it.
  */
 
 const LS_MSGS = "ph_msgs_v1";
@@ -2248,17 +2248,14 @@ export default function Chat() {
   const [menuOpen, setMenuOpen] = useState(false);
   const [confirmLeaveOpen, setConfirmLeaveOpen] = useState(false);
 
-  // --- Preview / Join UI state ---
+  // Preview modal state
   const [previewOpen, setPreviewOpen] = useState(false);
-  const [previewLoading, setPreviewLoading] = useState(false);
-  const [previewPeers, setPreviewPeers] = useState([]); // anonymized peers from host
-  const [previewError, setPreviewError] = useState(null);
-  const [joinMessage, setJoinMessage] = useState("");
-  const [joinRequestId, setJoinRequestId] = useState(null);
-  const [joinRequestSent, setJoinRequestSent] = useState(false);
-
-  // host side pending join requests
-  const [joinRequests, setJoinRequests] = useState([]); // { id, from, name, message, ts }
+  const [previewHubId, setPreviewHubId] = useState("");
+  const [previewConnecting, setPreviewConnecting] = useState(false);
+  const [previewAnonList, setPreviewAnonList] = useState([]); // anonymized peers list
+  const [previewQuickMsg, setPreviewQuickMsg] = useState("");
+  const [previewRequested, setPreviewRequested] = useState(false);
+  const previewWaitTimerRef = useRef(null);
 
   useEffect(() => {
     if (!username) return;
@@ -2329,6 +2326,8 @@ export default function Chat() {
         replyTo: incoming.replyTo || null,
         deliveries: incoming.deliveries || [],
         reads: incoming.reads || [],
+        meta: incoming.meta || undefined,
+        to: incoming.to || undefined,
       };
       const next = [...m, msgObj];
       persistMessages(next);
@@ -2350,67 +2349,26 @@ export default function Chat() {
     });
   };
 
+  // push local system message (keeps UI style)
+  const pushLocalSystemMessage = (text, type = "system") => {
+    const sys = {
+      id: `sys-local-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+      from: "System",
+      text,
+      ts: Date.now(),
+      type,
+      deliveries: [],
+      reads: [],
+    };
+    setMessages((m) => {
+      const next = [...m, sys];
+      persistMessages(next);
+      return next;
+    });
+  };
+
   // incoming messages callback from webrtc
   const handleIncoming = (from, payloadOrText) => {
-    // PREVIEW response (from host)
-    if (from === "__system_preview_response__" && payloadOrText && payloadOrText.peers) {
-      // payloadOrText.peers: [{id, anonName}, ...]
-      setPreviewLoading(false);
-      setPreviewPeers(payloadOrText.peers || []);
-      setPreviewError(null);
-      return;
-    }
-
-    // JOIN REQUEST received by host
-    if (from === "__system_join_request__" && payloadOrText && payloadOrText.id) {
-      const req = {
-        id: payloadOrText.id,
-        from: payloadOrText.from,
-        name: payloadOrText.name || "Visitor",
-        message: payloadOrText.message || "",
-        ts: payloadOrText.ts || Date.now(),
-      };
-      setJoinRequests((s) => {
-        // dedupe
-        if (s.find((r) => r.id === req.id)) return s;
-        return [...s, req];
-      });
-      // optional notify host
-      maybeNotify("Join request", `${req.name} requested to join`);
-      return;
-    }
-
-    // JOIN RESPONSE received by requester
-    if (from === "__system_join_response__" && payloadOrText && payloadOrText.reqId) {
-      const { reqId, from: hostId, accept } = payloadOrText;
-      // show a small system message or update UI
-      const sysText = accept
-        ? "Your join request was accepted — attempting to join..."
-        : "Your join request was declined.";
-      const sys = {
-        id: `sys-joinresp-${Date.now()}`,
-        from: "System",
-        text: sysText,
-        ts: Date.now(),
-        type: "system",
-      };
-      setMessages((m) => {
-        const next = [...m, sys];
-        persistMessages(next);
-        return next;
-      });
-      setJoinRequestSent(false);
-      setJoinRequestId(null);
-      // if accepted, webrtc layer will auto-attempt connectToPeer (see webrtc.js),
-      // but we also update joinedBootstrap to hostId so UI shows joined state
-      if (accept && hostId) {
-        setJoinedBootstrap(hostId);
-        localStorage.setItem("ph_hub_bootstrap", hostId);
-        localStorage.setItem("ph_should_autojoin", "true");
-      }
-      return;
-    }
-
     // typing system
     if (
       from === "__system_typing__" &&
@@ -2481,32 +2439,63 @@ export default function Chat() {
       payloadOrText.type === "chat" &&
       payloadOrText.id
     ) {
+      // If this chat is a join_request (meta.join_request), surface it specially for-host
+      if (payloadOrText.meta && payloadOrText.meta.join_request) {
+        // Present as a clear system-like message for the host
+        const fromDisplay = payloadOrText.fromName || payloadOrText.from || "Anon";
+        const shortText =
+          payloadOrText.text && payloadOrText.text.trim().length
+            ? `${fromDisplay} requested to join: "${payloadOrText.text.trim()}"`
+            : `${fromDisplay} requested to join`;
+        // push system-like message for host
+        const sys = {
+          id: `sys-joinreq-${Date.now()}-${Math.random().toString(36).slice(2, 5)}`,
+          from: "System",
+          text: shortText,
+          ts: Date.now(),
+          type: "system_join_request",
+        };
+        setMessages((m) => {
+          const next = [...m, sys];
+          persistMessages(next);
+          return next;
+        });
+        // notify the host (if appropriate)
+        maybeNotify(fromDisplay, payloadOrText.text || "Join request");
+        return;
+      }
+
+      // normal chat flow otherwise
       upsertIncomingChat(payloadOrText);
       maybeNotify(
         payloadOrText.fromName || payloadOrText.from,
         payloadOrText.text
       );
 
-      // auto-send ack_read NOW if the app is visible and message not from me
+      // --- NEW: auto-send ack_read NOW if the app is visible and message not from me ---
       try {
         const origin = payloadOrText.from || payloadOrText.origin || null;
         const localId = getLocalPeerId() || myId;
+        // only send ack_read if origin exists and origin is not me
         if (
           origin &&
           origin !== localId &&
           document.visibilityState === "visible"
         ) {
+          // send ack_read to origin
           try {
             sendAckRead(payloadOrText.id, origin);
           } catch (e) {
             console.warn("sendAckRead error (auto on receive):", e);
           }
+          // locally record read
           addUniqueToMsgArray(payloadOrText.id, "reads", localId);
         }
       } catch (e) {
         console.warn("auto ack_read failed", e);
       }
 
+      // webrtc.js already sends ack_deliver back to origin when it receives chat
       return;
     }
 
@@ -2568,6 +2557,7 @@ export default function Chat() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [username]);
 
+  // autoscroll to bottom when messages change
   useEffect(() => {
     if (!messagesEndRef.current) return;
     try {
@@ -2585,6 +2575,7 @@ export default function Chat() {
         const localId = getLocalPeerId() || myId;
         messages.forEach((m) => {
           if (!m || m.type !== "chat") return;
+          // only for messages from other peers and not already read by me
           const origin = m.fromId || m.from;
           if (!origin || origin === localId) return;
           const alreadyRead =
@@ -2601,6 +2592,7 @@ export default function Chat() {
       }
     };
     document.addEventListener("visibilitychange", onVisibility);
+    // also run once in case the page is already visible when component mounts
     if (document.visibilityState === "visible") onVisibility();
     return () => document.removeEventListener("visibilitychange", onVisibility);
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -2671,7 +2663,7 @@ export default function Chat() {
     setMenuOpen(false);
   };
 
-  // Join Hub
+  // Join Hub (regular flow)
   const handleJoinHub = async () => {
     const id = prompt("Enter Hub bootstrap peer ID (the host's ID):");
     if (!id) {
@@ -2860,6 +2852,7 @@ export default function Chat() {
     const isMe =
       (m.fromId || m.from) === (getLocalPeerId() || myId) || from === username;
 
+    // Special rendering: system_join_request already converted to a system message text
     if (isSystem) {
       return (
         <div key={`${m.id ?? m.ts}-${idx}`} className="w-full text-center my-2">
@@ -2894,58 +2887,6 @@ export default function Chat() {
         <div className="break-words">{txt}</div>
       </div>
     );
-  };
-
-  // --- Preview actions ---
-
-  const openPreviewFor = async (bootstrapId) => {
-    if (!bootstrapId) return setPreviewError("No host id provided");
-    setPreviewError(null);
-    setPreviewLoading(true);
-    setPreviewPeers([]);
-    setPreviewOpen(true);
-    try {
-      requestPreview(bootstrapId);
-      // requestPreview will cause host to reply with "__system_preview_response__"
-      // if response doesn't arrive within ~5s, show an error
-      const to = setTimeout(() => {
-        if (previewLoading) {
-          setPreviewLoading(false);
-          setPreviewError("Preview timed out or host unreachable.");
-        }
-      }, 5000);
-      // cleanup when modal closed or response arrives
-      // note: response handler clears previewLoading
-      return () => clearTimeout(to);
-    } catch (e) {
-      setPreviewLoading(false);
-      setPreviewError("Preview request failed.");
-    }
-  };
-
-  const handleRequestToJoin = async (bootstrapId) => {
-    if (!bootstrapId) return alert("No host specified.");
-    try {
-      const reqId = sendJoinRequest(bootstrapId, username || "Visitor", joinMessage || "");
-      setJoinRequestId(reqId);
-      setJoinRequestSent(true);
-      setJoinMessage("");
-      // leave preview open and show confirmation
-    } catch (e) {
-      console.warn("sendJoinRequest failed", e);
-      alert("Failed to send join request.");
-    }
-  };
-
-  // Host accepts/declines a join request
-  const handleHostRespond = (reqId, requesterPeerId, accept) => {
-    try {
-      respondToJoinRequest(reqId, requesterPeerId, !!accept);
-      // remove from pending list
-      setJoinRequests((s) => s.filter((r) => r.id !== reqId));
-    } catch (e) {
-      console.warn("respondToJoinRequest failed", e);
-    }
   };
 
   // first-time username prompt
@@ -2988,11 +2929,118 @@ export default function Chat() {
     return <div className="text-sm text-blue-500 mb-2">{shown} typing...</div>;
   };
 
+  /* ----------------------
+     PREVIEW helpers & flow
+     ---------------------- */
+
+  // open preview modal (optionally prefill with hubId)
+  const openPreview = (hubId = "") => {
+    setPreviewOpen(true);
+    setPreviewHubId(hubId || "");
+    setPreviewAnonList([]);
+    setPreviewQuickMsg("");
+    setPreviewRequested(false);
+  };
+
+  const closePreview = () => {
+    setPreviewOpen(false);
+    setPreviewConnecting(false);
+    setPreviewAnonList([]);
+    setPreviewQuickMsg("");
+    setPreviewRequested(false);
+    if (previewWaitTimerRef.current) {
+      clearTimeout(previewWaitTimerRef.current);
+      previewWaitTimerRef.current = null;
+    }
+  };
+
+  // attempt to fetch anonymized peer list from the hub by connecting (but do NOT join)
+  const previewFetchPeers = async () => {
+    if (!previewHubId || !previewHubId.trim()) {
+      alert("Enter a Hub ID to preview.");
+      return;
+    }
+    const hub = previewHubId.trim();
+    setPreviewConnecting(true);
+    setPreviewAnonList([]);
+    try {
+      // try connecting to the hub peer (this will result in an intro message from host containing peers)
+      connectToPeer(hub, handleIncoming, handlePeerListUpdate, username);
+
+      // give it a little moment for intro to arrive; fallback to reading known peers we have
+      setTimeout(() => {
+        // derive anonymized list from the peerNamesMap / peers array
+        try {
+          const hostPeers = (peers && peers.length > 0) ? peers : [];
+          // attempt to include the host itself if we have it
+          const arr = hostPeers.includes(hub) ? hostPeers : [hub, ...hostPeers];
+          // unique
+          const uniq = Array.from(new Set(arr)).slice(0, 8);
+          // anonymize: Anon 1, Anon 2...
+          const anon = uniq.map((_, i) => `Anon ${i + 1}`);
+          setPreviewAnonList(anon);
+        } catch (e) {
+          setPreviewAnonList([]);
+        }
+        setPreviewConnecting(false);
+      }, 800);
+    } catch (e) {
+      console.warn("previewFetchPeers error", e);
+      setPreviewConnecting(false);
+    }
+  };
+
+  // send a targeted join request to the hub (host). We use sendChat with `to` + meta.join_request
+  const previewSendJoinRequest = () => {
+    if (!previewHubId || !previewHubId.trim()) {
+      alert("Hub ID missing.");
+      return;
+    }
+    const hub = previewHubId.trim();
+    // build a chat payload targeted to host
+    const id = nanoid();
+    const payload = {
+      id,
+      from: getLocalPeerId() || myId,
+      fromName: username || "Visitor",
+      text: previewQuickMsg && previewQuickMsg.trim() ? previewQuickMsg.trim() : "",
+      ts: Date.now(),
+      deliveries: [],
+      reads: [],
+      to: hub,
+      meta: { join_request: true },
+    };
+
+    // locally show a message that we've requested join (visitor)
+    setPreviewRequested(true);
+    pushLocalSystemMessage("Join request sent — waiting for host...", "system");
+
+    try {
+      sendChat(payload); // broadcast but payload.to ensures only the hub processes it
+    } catch (e) {
+      console.warn("previewSendJoinRequest: sendChat failed", e);
+      pushLocalSystemMessage("Failed to send join request.", "system");
+      setPreviewRequested(false);
+      return;
+    }
+
+    // start a 30s wait timer; if no host response, clear waiting
+    if (previewWaitTimerRef.current) clearTimeout(previewWaitTimerRef.current);
+    previewWaitTimerRef.current = setTimeout(() => {
+      setPreviewRequested(false);
+      pushLocalSystemMessage("Host did not respond to request (timeout).", "system");
+      previewWaitTimerRef.current = null;
+    }, 30000);
+  };
+
+  /* ---------------------- end preview helpers ---------------------- */
+
+  // render UI
   return (
     <>
       <div className="min-h-[92vh] md:h-[92vh] max-w-[400px] w-full mx-auto bg-gray-50 text-purple-600 p-6 flex flex-col rounded-4xl">
         <header className="flex items-center justify-between mb-4">
-          <div className="flex gap-2.5 items-center">
+          <div className="flex gap-2.5">
             <div className="text-sm text-blue-600">YourID</div>
             <div className="font-mono">{myId || "..."}</div>
             <div className="text-sm text-blue-600">Name: {username}</div>
@@ -3021,7 +3069,7 @@ export default function Chat() {
             </button>
 
             <div
-              className={`absolute right-0 mt-2 w-56 bg-white/10 backdrop-blur rounded-lg shadow-lg z-50 transform origin-top-right transition-all duration-200 ${
+              className={`absolute right-0 mt-2 w-52 bg-white/10 backdrop-blur rounded-lg shadow-lg z-50 transform origin-top-right transition-all duration-200 ${
                 menuOpen
                   ? "opacity-100 scale-100 pointer-events-auto"
                   : "opacity-0 scale-95 pointer-events-none"
@@ -3040,15 +3088,13 @@ export default function Chat() {
               <button
                 onClick={() => {
                   setMenuOpen(false);
-                  // open preview modal for existing joinedBootstrap or ask for id
-                  const hostId = joinedBootstrap || prompt("Enter Hub ID to preview:");
-                  if (hostId) openPreviewFor(hostId.trim());
+                  openPreview();
                 }}
-                className="w-full text-left px-4 py-3 hover:bg-white/20 border-b border-white/5 text-yellow-400"
+                className="w-full text-left px-4 py-3 hover:bg-white/20 border-b border-white/5 text-blue-500"
               >
                 <span className="font-semibold">Preview Hub</span>
                 <div className="text-xs text-gray-400">
-                  See anonymized attendees before joining
+                  Preview a hub before joining
                 </div>
               </button>
 
@@ -3102,40 +3148,6 @@ export default function Chat() {
             )}
           </div>
 
-          {/* Host: pending join requests */}
-          {joinRequests.length > 0 && (
-            <div className="mb-3 p-3 rounded-lg bg-white/10">
-              <div className="text-sm font-semibold text-blue-500 mb-2">
-                Join requests
-              </div>
-              {joinRequests.map((r) => (
-                <div key={r.id} className="mb-2 p-2 rounded bg-white/5">
-                  <div className="text-sm">
-                    <strong>{r.name}</strong> —{" "}
-                    <span className="text-xs text-gray-400">
-                      {new Date(r.ts).toLocaleTimeString()}
-                    </span>
-                  </div>
-                  <div className="text-xs text-gray-300 mb-2">{r.message}</div>
-                  <div className="flex gap-2">
-                    <button
-                      onClick={() => handleHostRespond(r.id, r.from, true)}
-                      className="px-3 py-1 rounded bg-gradient-to-br from-green-500 to-green-600 text-white text-sm"
-                    >
-                      Accept
-                    </button>
-                    <button
-                      onClick={() => handleHostRespond(r.id, r.from, false)}
-                      className="px-3 py-1 rounded bg-gradient-to-br from-red-500 to-red-600 text-white text-sm"
-                    >
-                      Decline
-                    </button>
-                  </div>
-                </div>
-              ))}
-            </div>
-          )}
-
           {replyTo && (
             <div className="mb-2 p-3 bg-white/10 text-gray-500 rounded-lg">
               Replying to <strong>{replyTo.from}</strong>:{" "}
@@ -3174,66 +3186,81 @@ export default function Chat() {
         </footer>
       </div>
 
-      {/* Preview modal */}
+      {/* Preview Modal */}
       {previewOpen && (
         <div className="fixed inset-0 z-60 flex items-center justify-center">
           <div
             className="absolute inset-0 bg-black/50"
-            onClick={() => setPreviewOpen(false)}
+            onClick={closePreview}
           />
-          <div className="relative bg-white p-6 rounded-lg backdrop-blur text-black w-96 z-70">
+          <div className="relative bg-white/10 p-6 rounded-lg backdrop-blur text-white w-96 z-70">
             <h3 className="text-lg font-bold mb-2">Preview Hub</h3>
-            <p className="text-sm text-gray-700 mb-3">
-              This is an anonymized preview of attendees. You can request to join the host from here.
-            </p>
 
-            {previewLoading && <div className="text-sm text-blue-500 mb-2">Loading preview…</div>}
-            {previewError && <div className="text-sm text-red-500 mb-2">{previewError}</div>}
-
-            {!previewLoading && previewPeers.length > 0 && (
-              <div className="mb-3">
-                <div className="text-xs text-gray-500 mb-2">Attendees</div>
-                <ul className="mb-3">
-                  {previewPeers.map((p) => (
-                    <li key={p.id} className="text-sm text-gray-800">
-                      {p.anonName}
-                    </li>
-                  ))}
-                </ul>
-              </div>
-            )}
+            <label className="text-xs text-gray-300">Hub ID</label>
+            <input
+              value={previewHubId}
+              onChange={(e) => setPreviewHubId(e.target.value)}
+              placeholder="Enter host/hub id"
+              className="w-full p-2 rounded mt-1 mb-3 bg-white/5 text-white"
+            />
 
             <div className="mb-3">
-              <label className="text-xs text-gray-600">Quick message</label>
-              <input
-                value={joinMessage}
-                onChange={(e) => setJoinMessage(e.target.value)}
-                placeholder="Hi — I'd like to join"
-                className="w-full p-2 mt-1 border rounded"
+              <button
+                onClick={previewFetchPeers}
+                disabled={!previewHubId || previewConnecting}
+                className="px-3 py-2 rounded bg-gradient-to-br from-blue-500 to-blue-600 text-white mr-2"
+              >
+                {previewConnecting ? "Connecting..." : "Fetch preview"}
+              </button>
+
+              <button
+                onClick={() => {
+                  // open join modal for convenience
+                  setPreviewOpen(false);
+                  setTimeout(() => handleJoinHub(), 200);
+                }}
+                className="px-3 py-2 rounded bg-gradient-to-br from-green-500 to-green-600 text-white"
+              >
+                Join Hub
+              </button>
+            </div>
+
+            <div className="mb-3 text-sm text-gray-300">
+              <strong>Anonymized participants</strong>
+              <div className="mt-2">
+                {previewAnonList.length === 0 && (
+                  <div className="text-xs text-gray-400">No participants found</div>
+                )}
+                {previewAnonList.map((a, i) => (
+                  <div key={i} className="text-sm text-white/80">{a}</div>
+                ))}
+              </div>
+            </div>
+
+            <div className="mb-3">
+              <label className="text-xs text-gray-300">Quick message (optional)</label>
+              <textarea
+                value={previewQuickMsg}
+                onChange={(e) => setPreviewQuickMsg(e.target.value)}
+                placeholder="Write a short message to the host..."
+                className="w-full p-2 mt-1 rounded bg-white/5 text-white"
+                rows={3}
               />
             </div>
 
             <div className="flex justify-end gap-2">
               <button
-                onClick={() => setPreviewOpen(false)}
-                className="px-3 py-2 rounded bg-gray-200 text-black"
+                onClick={closePreview}
+                className="px-3 py-2 rounded bg-gradient-to-br from-gray-500 to-gray-600 text-white"
               >
                 Close
               </button>
               <button
-                onClick={() => {
-                  const hostId = joinedBootstrap || prompt("Enter host ID to request join:");
-                  if (!hostId) return alert("Host ID required to request join");
-                  handleRequestToJoin(hostId.trim());
-                }}
-                disabled={joinRequestSent}
-                className={`px-3 py-2 rounded ${
-                  joinRequestSent
-                    ? "bg-gray-300 text-gray-600 cursor-not-allowed"
-                    : "bg-blue-500 text-white"
-                }`}
+                onClick={previewSendJoinRequest}
+                disabled={previewRequested}
+                className="px-3 py-2 rounded bg-gradient-to-br from-green-500 to-green-600 text-white"
               >
-                {joinRequestSent ? "Request Sent" : "Request to join"}
+                {previewRequested ? "Requested..." : "Request to Join"}
               </button>
             </div>
           </div>
@@ -3272,3 +3299,4 @@ export default function Chat() {
     </>
   );
 }
+
