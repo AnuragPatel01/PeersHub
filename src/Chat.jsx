@@ -2887,7 +2887,7 @@ export default function Chat() {
   // First-time username prompt
   if (showNamePrompt) {
     return (
-      <div className="min-h-screen bg-gradient-to-br from-slate-900 via-purple-900 to-slate-900 flex items-center justify-center p-4">
+      <div className="min-h-[92vh]  bg-gradient-to-br from-slate-900 via-purple-900 to-slate-900 flex items-center justify-center p-4">
         <div className="bg-white/10 backdrop-blur-lg p-8 rounded-3xl shadow-2xl max-w-md w-full border border-white/20">
           <div className="text-center mb-6">
             <div className="inline-flex items-center justify-center w-16 h-16 bg-gradient-to-br from-purple-500 to-pink-500 rounded-2xl shadow-lg mb-4">
@@ -2960,7 +2960,7 @@ export default function Chat() {
 
   return (
     <>
-      <div className="min-h-screen bg-gradient-to-br from-slate-900 via-purple-900 to-slate-900 flex items-center justify-center p-4">
+      <div className="min-h-[92vh] mx-auto bg-gradient-to-br from-slate-900 via-blue-600 to-slate-900 flex items-center justify-center p-4">
         <div className="w-full max-w-md bg-white/10 backdrop-blur-lg rounded-3xl shadow-2xl border border-white/20 overflow-hidden">
           {/* Header */}
           <header className="p-4 border-b border-white/10 bg-white/5">
@@ -2979,7 +2979,7 @@ export default function Chat() {
               <div className="relative" ref={menuRef}>
                 <button
                   onClick={() => setMenuOpen((s) => !s)}
-                  className="p-2 rounded-full bg-white/10 text-white hover:bg-white/20 transition-colors"
+                  className="p-2 rounded-full bg-white/10 text-blue-600 hover:bg-white/20 transition-colors"
                   aria-label="Menu"
                 >
                   <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor">
@@ -3039,7 +3039,7 @@ export default function Chat() {
           </header>
 
           {/* Messages */}
-          <main className="flex-1 h-96 overflow-y-auto">
+          <main className="flex-1 h-140 w-90 overflow-y-auto">
             <div className="p-2">
               {messages.length === 0 && (
                 <div className="text-center text-gray-400 text-sm py-8">
@@ -3085,7 +3085,7 @@ export default function Chat() {
               <button
                 onClick={send}
                 disabled={!text.trim()}
-                className="absolute right-2 top-1/2 -translate-y-1/2 p-2 rounded-lg bg-purple-500 text-white hover:bg-purple-600 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                className="absolute right-2 top-1/2 -translate-y-1/2 p-2 rounded-lg bg-purple-500 text-blue-700 hover:bg-purple-600 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
               >
                 <svg className="w-4 h-4" fill="currentColor" viewBox="0 0 24 24">
                   <path d="M3.4 20.6L21 12 3.4 3.4 3 10l11 2-11 2z" />
@@ -3107,13 +3107,13 @@ export default function Chat() {
             <div className="flex space-x-3">
               <button
                 onClick={handleCancelLeave}
-                className="flex-1 px-4 py-2 rounded-xl bg-white/10 text-white hover:bg-white/20 transition-colors"
+                className="flex-1 px-4 py-2 rounded-xl bg-white/10 text-green-500 hover:bg-white/20 transition-colors"
               >
                 Cancel
               </button>
               <button
                 onClick={handleConfirmLeave}
-                className="flex-1 px-4 py-2 rounded-xl bg-red-500 text-white hover:bg-red-600 transition-colors"
+                className="flex-1 px-4 py-2 rounded-xl bg-red-500 text-red-500 hover:bg-red-600 transition-colors"
               >
                 Leave & Clear
               </button>
