@@ -306,74 +306,141 @@
 
 
 
-
 // src/webrtc.js
 import Peer from "peerjs";
 import { nanoid } from "nanoid";
 
+/**
+ * Robust webrtc helpers for PeersHub
+ * - persists local peer id
+ * - keeps a persisted known-peers list so clients retry connects after refresh
+ * - robust reconnect loop to bootstrap + known peers
+ * - intro message propagates known peers
+ */
+
 let peer = null;
 let connections = {}; // peerId -> DataConnection
-let peersList = []; // connected peer IDs
+let peersList = []; // currently connected peer IDs (in-memory)
 let peerNames = {}; // id -> name
+
+// persistent store keys
+const LS_PEER_ID = "ph_peer_id";
+const LS_HUB_BOOTSTRAP = "ph_hub_bootstrap";
+const LS_KNOWN_PEERS = "ph_known_peers";
+const LS_LOCAL_NAME = "ph_name";
 
 let reconnectInterval = null;
 const RECONNECT_INTERVAL_MS = 3000;
 
-const LS_PEER_ID = "ph_peer_id";
-const LS_HUB_BOOTSTRAP = "ph_hub_bootstrap";
-const LS_LOCAL_NAME = "ph_name";
-
-// global callbacks
+// global callbacks (set in initPeer)
 let onMessageGlobal = null;
 let onPeerListUpdateGlobal = null;
 let onBootstrapChangedGlobal = null;
 
-/**
- * initPeer(onMessage, onPeerListUpdate, localName = "Anonymous", onBootstrapChange = null)
- */
-export const initPeer = (onMessage, onPeerListUpdate, localName = "Anonymous", onBootstrapChange = null) => {
-  onMessageGlobal = onMessage || null;
-  onPeerListUpdateGlobal = onPeerListUpdate || null;
-  onBootstrapChangedGlobal = onBootstrapChange || null;
-
-  const storedId = localStorage.getItem(LS_PEER_ID);
-  const desiredId = storedId || nanoid(6);
-  peer = new Peer(desiredId);
-
-  peer.on("open", (id) => {
-    console.log("My ID:", id);
-    if (!storedId) localStorage.setItem(LS_PEER_ID, id);
-    peerNames[id] = localName;
-
-    const bootstrap = localStorage.getItem(LS_HUB_BOOTSTRAP);
-    if (bootstrap && bootstrap !== id) {
-      try {
-        connectToPeer(bootstrap, onMessageGlobal, onPeerListUpdateGlobal, localName);
-      } catch (e) {
-        startReconnectLoop(onMessageGlobal, onPeerListUpdateGlobal, localName);
-      }
-    }
-  });
-
-  peer.on("connection", (conn) => {
-    setupConnection(conn, onMessageGlobal, onPeerListUpdateGlobal, localName);
-  });
-
-  peer.on("error", (err) => console.warn("Peer error:", err));
-
-  return peer;
+/* ---------- util for knownPeers persistence ---------- */
+const loadKnownPeers = () => {
+  try {
+    const raw = localStorage.getItem(LS_KNOWN_PEERS);
+    if (!raw) return new Set();
+    const arr = JSON.parse(raw);
+    if (!Array.isArray(arr)) return new Set();
+    return new Set(arr);
+  } catch (e) {
+    return new Set();
+  }
 };
+
+const saveKnownPeers = (set) => {
+  try {
+    localStorage.setItem(LS_KNOWN_PEERS, JSON.stringify(Array.from(set)));
+  } catch (e) {}
+};
+
+const addKnownPeer = (id) => {
+  if (!id || id === getLocalPeerId()) return;
+  const s = loadKnownPeers();
+  s.add(id);
+  saveKnownPeers(s);
+};
+
+/* ---------- low-level send helpers ---------- */
+const sendToConn = (conn, payload) => {
+  try {
+    if (!conn || conn.open === false) return;
+    if (typeof payload === "string") conn.send(payload);
+    else conn.send(JSON.stringify(payload));
+  } catch (e) {
+    console.warn("Send failed", e);
+  }
+};
+
+const broadcastRaw = (payload) => {
+  Object.values(connections).forEach((conn) => {
+    try { sendToConn(conn, payload); } catch (e) {}
+  });
+};
+
+/* ---------- public API: chat + typing + ack ---------- */
+export const sendChat = (msgObj) => {
+  // msgObj should include id, from, fromName, text, ts, replyTo, etc.
+  const payload = { type: "chat", ...msgObj };
+  broadcastRaw(payload);
+};
+
+export const sendTyping = (fromName, isTyping) => {
+  const payload = { type: "typing", fromName, isTyping };
+  broadcastRaw(payload);
+};
+
+const sendAckDeliver = (toPeerId, msgId) => {
+  if (!msgId) return;
+  const conn = connections[toPeerId];
+  if (conn) {
+    sendToConn(conn, { type: "ack_deliver", id: msgId, from: peer.id });
+  } else {
+    // route fallback — include to so only the origin processes it
+    broadcastRaw({ type: "ack_deliver", id: msgId, from: peer.id, to: toPeerId });
+  }
+};
+
+// exported clean helper for UI to call when user reads a message
+export const sendAckRead = (msgId, originPeerId) => {
+  if (!msgId) return;
+  try {
+    if (originPeerId && connections[originPeerId]) {
+      sendToConn(connections[originPeerId], { type: "ack_read", id: msgId, from: peer.id });
+      return;
+    }
+    // fallback route
+    broadcastRaw({ type: "ack_read", id: msgId, from: peer.id, to: originPeerId || null });
+  } catch (e) {
+    console.warn("sendAckRead failed", e);
+  }
+};
+
+/* ---------- helper getters ---------- */
+export const getPeers = () => [...peersList];
+export const getPeerNames = () => ({ ...peerNames });
+export const getLocalPeerId = () => (peer ? peer.id : localStorage.getItem(LS_PEER_ID) || null);
+export const getKnownPeers = () => Array.from(loadKnownPeers());
+
+/* ---------- connection management ---------- */
 
 export const connectToPeer = (peerId, onMessage, onPeerListUpdate, localName = "Anonymous") => {
   if (!peer) {
-    console.warn("Peer not initialized yet");
+    console.warn("connectToPeer: peer not initialized yet");
     return;
   }
+  if (!peerId) return;
   if (peerId === peer.id) return;
-  if (connections[peerId]) return;
+  if (connections[peerId]) return; // already connected
 
-  const conn = peer.connect(peerId, { reliable: true });
-  setupConnection(conn, onMessage, onPeerListUpdate, localName);
+  try {
+    const conn = peer.connect(peerId, { reliable: true });
+    setupConnection(conn, onMessage, onPeerListUpdate, localName);
+  } catch (e) {
+    console.warn("connectToPeer error", e);
+  }
 };
 
 export const joinHub = (bootstrapPeerId) => {
@@ -391,62 +458,12 @@ export const leaveHub = () => {
   peersList = [];
   peerNames = {};
   localStorage.removeItem(LS_HUB_BOOTSTRAP);
+  // do NOT remove known peers here — keep them for reconnection convenience
+  if (onPeerListUpdateGlobal) onPeerListUpdateGlobal([...peersList]);
   if (onBootstrapChangedGlobal) onBootstrapChangedGlobal(null);
 };
 
-// low-level send helpers
-const sendToConn = (conn, payload) => {
-  try {
-    if (typeof payload === "string") conn.send(payload);
-    else conn.send(JSON.stringify(payload));
-  } catch (e) {
-    console.warn("Send failed", e);
-  }
-};
-
-const broadcastRaw = (payload) => {
-  Object.values(connections).forEach((conn) => sendToConn(conn, payload));
-};
-
-// public chat send (UI should call this)
-export const sendChat = (msgObj) => {
-  const payload = { type: "chat", ...msgObj };
-  broadcastRaw(payload);
-};
-
-// public typing signal
-export const sendTyping = (fromName, isTyping) => {
-  const payload = { type: "typing", fromName, isTyping };
-  broadcastRaw(payload);
-};
-
-// previously internal: send ack deliver to a specific peer
-const sendAckDeliver = (toPeerId, msgId) => {
-  const conn = connections[toPeerId];
-  if (conn) {
-    sendToConn(conn, { type: "ack_deliver", id: msgId, from: peer.id });
-  } else {
-    // fall back: route via broadcast with 'to' field so only the receiver uses it
-    broadcastRaw({ type: "ack_deliver", id: msgId, from: peer.id, to: toPeerId });
-  }
-};
-
-// NEW exported: send ack read to origin peer (clean helper)
-export const sendAckRead = (msgId, originPeerId) => {
-  if (!msgId) return;
-  try {
-    if (originPeerId && connections[originPeerId]) {
-      // send directly
-      sendToConn(connections[originPeerId], { type: "ack_read", id: msgId, from: peer.id });
-      return;
-    }
-    // fallback: broadcast with 'to' so the origin processes it when it sees it
-    broadcastRaw({ type: "ack_read", id: msgId, from: peer.id, to: originPeerId || null });
-  } catch (e) {
-    console.warn("sendAckRead failed", e);
-  }
-};
-
+/* ---------- parse incoming raw data ---------- */
 const parseMessage = (raw) => {
   if (typeof raw === "string") {
     try { return JSON.parse(raw); } catch (e) { return { type: "chat", text: raw }; }
@@ -455,15 +472,15 @@ const parseMessage = (raw) => {
   return { type: "chat", text: String(raw) };
 };
 
+/* ---------- setup per-connection handlers ---------- */
 const setupConnection = (conn, onMessage, onPeerListUpdate, localName = "Anonymous") => {
   conn.on("open", () => {
-    console.log("Connected to", conn.peer);
+    // store
     connections[conn.peer] = conn;
-
     if (!peersList.includes(conn.peer)) peersList.push(conn.peer);
-    onPeerListUpdate && onPeerListUpdate([...peersList]);
+    if (onPeerListUpdate) onPeerListUpdate([...peersList]);
 
-    // send intro
+    // tell them who we are + known peers
     sendToConn(conn, {
       type: "intro",
       id: peer.id,
@@ -476,23 +493,28 @@ const setupConnection = (conn, onMessage, onPeerListUpdate, localName = "Anonymo
     const data = parseMessage(raw);
     if (!data || typeof data !== "object") return;
 
-    // If message has a 'to' field and it's not for me, ignore it (routing)
-    if (data.to && data.to !== peer.id) {
-      // not for me — ignore
-      return;
-    }
+    // routing: if 'to' present and not for me, ignore
+    if (data.to && data.to !== peer.id) return;
 
     if (data.type === "intro") {
+      // record name + peers
       if (data.id && data.name) peerNames[data.id] = data.name;
       if (data.id && !peersList.includes(data.id)) peersList.push(data.id);
 
+      // add known peers to persisted set and try to connect to them
       (data.peers || []).forEach((p) => {
-        if (p !== peer.id && !connections[p]) {
-          try { connectToPeer(p, onMessage, onPeerListUpdate, peerNames[peer.id] || localName); } catch (e) {}
+        if (p && p !== peer.id) {
+          addKnownPeer(p);
+          if (!connections[p]) {
+            // try connect after a tiny delay to avoid thundering
+            setTimeout(() => {
+              try { connectToPeer(p, onMessageGlobal, onPeerListUpdateGlobal, peerNames[peer.id] || localName); } catch (e) {}
+            }, 100);
+          }
         }
       });
 
-      onPeerListUpdate && onPeerListUpdate([...peersList]);
+      if (onPeerListUpdate) onPeerListUpdate([...peersList]);
       return;
     }
 
@@ -502,9 +524,9 @@ const setupConnection = (conn, onMessage, onPeerListUpdate, localName = "Anonymo
     }
 
     if (data.type === "chat") {
-      // notify UI and also send ack_deliver back to origin
+      // forward full payload to UI
       if (onMessage) onMessage(data.from, data);
-      // send ack_deliver back to original sender (use 'origin' if supplied)
+      // ack delivery back to origin
       const origin = data.origin || data.from;
       if (origin && origin !== peer.id) {
         sendAckDeliver(origin, data.id);
@@ -513,46 +535,140 @@ const setupConnection = (conn, onMessage, onPeerListUpdate, localName = "Anonymo
     }
 
     if (data.type === "ack_deliver") {
-      // someone acknowledges delivery for msg id
       if (onMessage) onMessage("__system_ack_deliver__", { fromPeer: data.from, id: data.id });
       return;
     }
 
     if (data.type === "ack_read") {
-      // read ack — deliver to UI
       if (onMessage) onMessage("__system_ack_read__", { fromPeer: data.from, id: data.id });
       return;
     }
 
-    // fallback
+    // fallback: pass to UI
     if (onMessage) onMessage(data.from || conn.peer, data);
   });
 
   conn.on("close", () => {
-    console.log("Disconnected from", conn.peer);
-    delete connections[conn.peer];
+    try { delete connections[conn.peer]; } catch (e) {}
     peersList = peersList.filter((p) => p !== conn.peer);
     delete peerNames[conn.peer];
-    onPeerListUpdate && onPeerListUpdate([...peersList]);
+    if (onPeerListUpdate) onPeerListUpdate([...peersList]);
+    // add to known peers (so we try to re-establish)
+    addKnownPeer(conn.peer);
+    // start reconnect loop so any dropped connections are attempted
+    startReconnectLoop(onMessageGlobal, onPeerListUpdateGlobal, peerNames[peer.id]);
   });
 
-  conn.on("error", (err) => console.warn("Connection error with", conn.peer, err));
+  conn.on("error", (err) => {
+    console.warn("Connection error with", conn.peer, err);
+    // schedule reconnect attempts
+    addKnownPeer(conn.peer);
+    startReconnectLoop(onMessageGlobal, onPeerListUpdateGlobal, peerNames[peer.id]);
+  });
 };
 
-export const getPeers = () => peersList;
-export const getPeerNames = () => ({ ...peerNames });
-export const getLocalPeerId = () => (peer ? peer.id : localStorage.getItem(LS_PEER_ID) || null);
-
-/* reconnect loop */
+/* ---------- reconnect loop ---------- */
 const startReconnectLoop = (onMessage, onPeerListUpdate, localName) => {
   stopReconnectLoop();
   reconnectInterval = setInterval(() => {
+    // attempt connect to bootstrap
     const bootstrap = localStorage.getItem(LS_HUB_BOOTSTRAP);
-    if (!bootstrap || !peer) { stopReconnectLoop(); return; }
-    if (connections[bootstrap]) { stopReconnectLoop(); return; }
-    try { connectToPeer(bootstrap, onMessage, onPeerListUpdate, localName); } catch (e) {}
+    if (bootstrap && bootstrap !== getLocalPeerId() && !connections[bootstrap]) {
+      try { connectToPeer(bootstrap, onMessage, onPeerListUpdate, localName); } catch (e) {}
+    }
+    // attempt connect to known peers
+    const known = loadKnownPeers();
+    known.forEach((p) => {
+      if (!p || p === getLocalPeerId()) return;
+      if (!connections[p]) {
+        try { connectToPeer(p, onMessage, onPeerListUpdate, localName); } catch (e) {}
+      }
+    });
+    // if we've connected to someone, and no bootstrap configured, stop loop after first success
+    if (Object.keys(connections).length > 0) {
+      // keep loop running to handle future dropouts — but you can choose to stop here if you want
+    }
   }, RECONNECT_INTERVAL_MS);
 };
+
 const stopReconnectLoop = () => {
-  if (reconnectInterval) { clearInterval(reconnectInterval); reconnectInterval = null; }
+  if (reconnectInterval) {
+    clearInterval(reconnectInterval);
+    reconnectInterval = null;
+  }
 };
+
+/* ---------- initPeer: create Peer & set handlers ---------- */
+export const initPeer = (onMessage, onPeerListUpdate, localName = "Anonymous", onBootstrapChange = null) => {
+  onMessageGlobal = onMessage || null;
+  onPeerListUpdateGlobal = onPeerListUpdate || null;
+  onBootstrapChangedGlobal = onBootstrapChange || null;
+
+  // try stored id or generate one
+  let storedId = localStorage.getItem(LS_PEER_ID);
+  if (!storedId) {
+    storedId = nanoid(6);
+    localStorage.setItem(LS_PEER_ID, storedId);
+  }
+
+  const createPeerWithId = (id) => {
+    try {
+      peer = new Peer(id);
+
+      peer.on("open", (idOpen) => {
+        // ensure we persist the id used
+        localStorage.setItem(LS_PEER_ID, idOpen);
+        peerNames[idOpen] = localName;
+
+        // immediately try to reconnect to bootstrap and known peers
+        const bootstrap = localStorage.getItem(LS_HUB_BOOTSTRAP);
+        if (bootstrap && bootstrap !== idOpen) {
+          try { connectToPeer(bootstrap, onMessageGlobal, onPeerListUpdateGlobal, localName); } catch (e) {}
+        }
+
+        // try known peers quickly
+        const known = loadKnownPeers();
+        known.forEach((p) => {
+          if (!p || p === idOpen) return;
+          if (!connections[p]) {
+            try { connectToPeer(p, onMessageGlobal, onPeerListUpdateGlobal, localName); } catch (e) {}
+          }
+        });
+
+        // always start reconnect loop to be resilient
+        startReconnectLoop(onMessageGlobal, onPeerListUpdateGlobal, localName);
+      });
+
+      peer.on("connection", (conn) => {
+        setupConnection(conn, onMessageGlobal, onPeerListUpdateGlobal, localName);
+      });
+
+      peer.on("error", (err) => {
+        console.warn("Peer error", err);
+        // if id taken / unavailable, create a new one
+        // PeerJS may emit an error like 'ID is taken' — handle by recreating with new id
+        try {
+          if (err && err.type === "unavailable-id") {
+            const newId = nanoid(6);
+            localStorage.setItem(LS_PEER_ID, newId);
+            // destroy old peer then recreate
+            try { peer.destroy && peer.destroy(); } catch (e) {}
+            createPeerWithId(newId);
+          }
+        } catch (e) {}
+      });
+
+      // return peer instance
+      return peer;
+    } catch (e) {
+      console.warn("createPeerWithId failed", e);
+      // try again with random id
+      const newId = nanoid(6);
+      localStorage.setItem(LS_PEER_ID, newId);
+      return createPeerWithId(newId);
+    }
+  };
+
+  return createPeerWithId(storedId);
+};
+
