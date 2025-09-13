@@ -615,11 +615,14 @@ export default function Chat() {
   const [showNamePrompt, setShowNamePrompt] = useState(
     () => !localStorage.getItem("ph_name")
   );
-  const [joinedBootstrap, setJoinedBootstrap] = useState(
-    () => localStorage.getItem("ph_hub_bootstrap") || ""
-  );
+ const [joinedBootstrap, setJoinedBootstrap] = useState(() => {
+  const id = localStorage.getItem("ph_hub_bootstrap") || "";
+  const should = localStorage.getItem("ph_should_autojoin") === "true";
+  return should ? id : "";
+});
   const [menuOpen, setMenuOpen] = useState(false);
   const [confirmLeaveOpen, setConfirmLeaveOpen] = useState(false);
+  
 
   useEffect(() => {
     if (!username) return;
@@ -940,12 +943,17 @@ export default function Chat() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [text]);
 
-  // Create Hub
+   // Create Hub
   const handleCreateHub = () => {
     const id = getLocalPeerId() || myId;
     if (!id) return alert("Peer not ready yet. Wait a moment and try again.");
     joinHub(id);
     setJoinedBootstrap(id);
+
+    // persist hub + autojoin flag
+    localStorage.setItem("ph_hub_bootstrap", id);
+    localStorage.setItem("ph_should_autojoin", "true");
+
     const sysPlain = {
       id: `sys-create-${Date.now()}`,
       from: "System",
@@ -971,6 +979,11 @@ export default function Chat() {
     const trimmed = id.trim();
     joinHub(trimmed);
     setJoinedBootstrap(trimmed);
+
+    // persist hub + autojoin flag
+    localStorage.setItem("ph_hub_bootstrap", trimmed);
+    localStorage.setItem("ph_should_autojoin", "true");
+
     try {
       connectToPeer(trimmed, handleIncoming, handlePeerListUpdate, username);
     } catch (e) {}
@@ -1001,6 +1014,11 @@ export default function Chat() {
       leaveHub();
     } catch (e) {}
     setJoinedBootstrap("");
+
+    // clear hub + autojoin flag
+    localStorage.removeItem("ph_hub_bootstrap");
+    localStorage.removeItem("ph_should_autojoin");
+
     try {
       localStorage.removeItem(LS_MSGS);
     } catch (e) {}
@@ -1180,7 +1198,7 @@ export default function Chat() {
       <div className="h-screen md:h-[80vh] bg-gray-50 text-purple-600 p-6 flex flex-col rounded-4xl">
         <header className="flex items-center justify-between mb-4">
           <div className="flex gap-2.5">
-            <div className="text-sm text-blue-600">Your ID</div>
+            <div className="text-sm text-blue-600">YourID</div>
             <div className="font-mono">{myId || "..."}</div>
             <div className="text-sm text-blue-600">Name: {username}</div>
             <div className="text-xs text-purple-500 mt-1">
