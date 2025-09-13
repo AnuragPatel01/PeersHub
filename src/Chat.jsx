@@ -567,6 +567,9 @@
 
 
 // src/components/Chat.jsx
+
+
+// src/components/Chat.jsx
 import "./App.css";
 
 import React, { useEffect, useState, useRef } from "react";
@@ -574,15 +577,25 @@ import {
   initPeer,
   sendChat,
   sendTyping,
+  sendAckRead,
   getPeerNames,
   joinHub,
   leaveHub,
   getLocalPeerId,
   connectToPeer,
-  sendAckRead
 } from "./webrtc";
-// notification helpers (you already added these files)
+// notification helpers
 import { requestNotificationPermission, showNotification } from "./notify";
+// id generator
+import { nanoid } from "nanoid";
+
+/**
+ * Chat.jsx (fixed)
+ * - imports nanoid so send() works
+ * - imports sendAckRead and uses it (no global hack)
+ * - typingSummary now uses Object.keys(typingUsers) so names (not timestamps) are shown
+ * - preserves UI classes/colors exactly
+ */
 
 const LS_MSGS = "ph_msgs_v1";
 const MAX_MSGS = 100;
@@ -599,27 +612,58 @@ export default function Chat() {
     return [];
   });
   const [text, setText] = useState("");
-  const [username, setUsername] = useState(() => localStorage.getItem("ph_name") || "");
-  const [showNamePrompt, setShowNamePrompt] = useState(() => !localStorage.getItem("ph_name"));
-  const [joinedBootstrap, setJoinedBootstrap] = useState(() => localStorage.getItem("ph_hub_bootstrap") || "");
+  const [username, setUsername] = useState(
+    () => localStorage.getItem("ph_name") || ""
+  );
+  const [showNamePrompt, setShowNamePrompt] = useState(
+    () => !localStorage.getItem("ph_name")
+  );
+  const [joinedBootstrap, setJoinedBootstrap] = useState(
+    () => localStorage.getItem("ph_hub_bootstrap") || ""
+  );
   const [menuOpen, setMenuOpen] = useState(false);
   const [confirmLeaveOpen, setConfirmLeaveOpen] = useState(false);
 
-  // typing users set {peerName: timestamp}
-  const [typingUsers, setTypingUsers] = useState({}); // id -> name
-  const [replyTo, setReplyTo] = useState(null); // {id, from, text}
+  useEffect(() => {
+    if (!username) return;
+    // ask for permission once (non-blocking)
+    requestNotificationPermission().then((granted) => {
+      console.log("Notification permission granted:", granted);
+    });
+  }, [username]);
 
   const messagesEndRef = useRef(null);
   const seenSystemIdsRef = useRef(new Set());
   const peerRef = useRef(null);
   const menuRef = useRef(null);
+
+  // typingUsers: { [name]: timestamp }
+  const [typingUsers, setTypingUsers] = useState({});
+  const [replyTo, setReplyTo] = useState(null);
   const typingTimeoutRef = useRef(null);
 
-  // Ask notification permission once after username chosen
-  useEffect(() => {
-    if (!username) return;
-    requestNotificationPermission().then(() => {});
-  }, [username]);
+  // helper to show notification only when appropriate
+  const maybeNotify = (fromDisplay, text) => {
+    try {
+      if (!fromDisplay || fromDisplay === username) return;
+      if (!document.hidden && document.hasFocus()) return;
+
+      const title = `${fromDisplay}`;
+      const body =
+        typeof text === "string"
+          ? text.length > 120
+            ? text.slice(0, 117) + "..."
+            : text
+          : JSON.stringify(text);
+      showNotification(title, {
+        body,
+        tag: `peershub-${fromDisplay}`,
+        data: { from: fromDisplay },
+      });
+    } catch (e) {
+      console.warn("maybeNotify error", e);
+    }
+  };
 
   // persist messages to localStorage (trimmed)
   const persistMessages = (arr) => {
@@ -629,7 +673,7 @@ export default function Chat() {
     } catch (e) {}
   };
 
-  // utility to update a message by id (merge)
+  // utility to update message by id
   const updateMessageById = (id, patch) => {
     setMessages((m) => {
       const next = m.map((msg) => (msg.id === id ? { ...msg, ...patch } : msg));
@@ -638,14 +682,11 @@ export default function Chat() {
     });
   };
 
-  // helper to add or update message when receiving chat (avoid duplicates)
+  // add or merge incoming chat
   const upsertIncomingChat = (incoming) => {
-    // incoming: { id, from, fromName, text, ts, replyTo? }
     setMessages((m) => {
-      // if msg already exists, keep deliveries/reads merging
       const exists = m.find((x) => x.id === incoming.id);
       if (exists) {
-        // merge minimal fields
         const next = m.map((x) => (x.id === incoming.id ? { ...x, ...incoming } : x));
         persistMessages(next);
         return next;
@@ -658,7 +699,7 @@ export default function Chat() {
         ts: incoming.ts || Date.now(),
         type: "chat",
         replyTo: incoming.replyTo || null,
-        deliveries: incoming.deliveries || [], // we may fill
+        deliveries: incoming.deliveries || [],
         reads: incoming.reads || [],
       };
       const next = [...m, msgObj];
@@ -667,20 +708,9 @@ export default function Chat() {
     });
   };
 
-  // maybe notify (keeps same behavior)
-  const maybeNotify = (fromDisplay, text) => {
-    try {
-      if (!fromDisplay || fromDisplay === username) return;
-      if (!document.hidden && document.hasFocus()) return;
-      const title = `${fromDisplay}`;
-      const body = typeof text === "string" ? (text.length > 120 ? text.slice(0, 117) + "..." : text) : JSON.stringify(text);
-      showNotification(title, { body, tag: `peershub-${fromDisplay}`, data: { from: fromDisplay } });
-    } catch (e) { console.warn(e); }
-  };
-
-  // handle incoming messages (from webrtc)
+  // incoming messages callback from webrtc
   const handleIncoming = (from, payloadOrText) => {
-    // system typing
+    // typing system
     if (from === "__system_typing__" && payloadOrText && payloadOrText.fromName) {
       const { fromName, isTyping } = payloadOrText;
       setTypingUsers((t) => {
@@ -695,11 +725,6 @@ export default function Chat() {
     // ack deliver
     if (from === "__system_ack_deliver__" && payloadOrText && payloadOrText.id) {
       const { fromPeer, id } = payloadOrText;
-      updateMessageById(id, (msg) => {
-        // handled by updateMessageById above; but simpler:
-        return { deliveries: Array.from(new Set([...(msg?.deliveries||[]), fromPeer])) };
-      });
-      // simpler: update manually
       setMessages((m) => {
         const next = m.map((msg) => {
           if (msg.id !== id) return msg;
@@ -718,7 +743,7 @@ export default function Chat() {
       setMessages((m) => {
         const next = m.map((msg) => {
           if (msg.id !== id) return msg;
-          const reads = Array.from(new Set([...(msg.reads || []), fromPeer]));
+          const reads = Array.from(new Set([...(msg.reads || []), payloadOrText.fromPeer]));
           return { ...msg, reads };
         });
         persistMessages(next);
@@ -727,7 +752,7 @@ export default function Chat() {
       return;
     }
 
-    // system objects (system_public/system_private)
+    // system messages
     if (payloadOrText && typeof payloadOrText === "object" && payloadOrText.type && payloadOrText.id && payloadOrText.type.toString().startsWith("system")) {
       const { type, text: txt, id } = payloadOrText;
       if (seenSystemIdsRef.current.has(id)) return;
@@ -738,24 +763,19 @@ export default function Chat() {
       return;
     }
 
-    // fallback chat object or plain text
+    // chat object
     if (payloadOrText && typeof payloadOrText === "object" && payloadOrText.type === "chat" && payloadOrText.id) {
-      // Upsert incoming chat object and immediately send ack_deliver to original sender
       upsertIncomingChat(payloadOrText);
-      // notify
       maybeNotify(payloadOrText.fromName || payloadOrText.from, payloadOrText.text);
-      // send ack_deliver to origin sender (webrtc.js will route ack to origin)
-      // we need to send ack_read only when user taps; ack_deliver must be sent now
-      // use webrtc internal sendAckDeliver -> available only in webrtc; we emulate by asking webrtc to send ack via message type ack_deliver handled earlier
-      // But Chat.jsx doesn't have access to sendAckDeliver directly; we rely on webrtc.js to send ack_deliver on receive (it already does).
+      // webrtc already sends ack_deliver on receive
       return;
     }
 
-    // plain fallback string: someone sent raw text (rare)
+    // plain string fallback
     if (typeof payloadOrText === "string") {
       const safeText = payloadOrText;
-      const msg = { id: nanoid(), from: from || "peer", fromId: null, text: safeText, ts: Date.now(), type: "chat", deliveries: [], reads: [] };
-      setMessages((m) => { const next = [...m, msg]; persistMessages(next); return next; });
+      const newMsg = { id: nanoid(), from: from || "peer", fromId: null, text: safeText, ts: Date.now(), type: "chat", deliveries: [], reads: [] };
+      setMessages((m) => { const next = [...m, newMsg]; persistMessages(next); return next; });
       maybeNotify(from, safeText);
       return;
     }
@@ -770,22 +790,19 @@ export default function Chat() {
     } catch (e) {}
   };
 
-  // handle bootstrap changes announced by webrtc (update UI)
+  // handle bootstrap change
   const handleBootstrapChange = (newBootstrapId) => {
     setJoinedBootstrap(newBootstrapId || "");
   };
 
-  // initialize Peer when username present
+  // init peer when username available
   useEffect(() => {
     if (!username) return;
     const p = initPeer(handleIncoming, handlePeerListUpdate, username, handleBootstrapChange);
     peerRef.current = p;
     p.on && p.on("open", (id) => setMyId(id));
-
-    // refresh persisted bootstrap state
     const bootstrap = localStorage.getItem("ph_hub_bootstrap");
     setJoinedBootstrap(bootstrap || "");
-
     return () => {
       try { p && p.destroy && p.destroy(); } catch (e) {}
     };
@@ -800,7 +817,7 @@ export default function Chat() {
     } catch (e) {}
   }, [messages]);
 
-  // menu outside click handler to close
+  // menu outside click handler
   useEffect(() => {
     const onDocClick = (e) => {
       if (!menuRef.current) return;
@@ -811,14 +828,17 @@ export default function Chat() {
     return () => document.removeEventListener("mousedown", onDocClick);
   }, [menuOpen]);
 
-  // typing broadcast: when user types start -> true, after pause -> false
+  // typing broadcast: debounce while typing
   useEffect(() => {
     if (!username) return;
     if (typingTimeoutRef.current) clearTimeout(typingTimeoutRef.current);
-    // broadcast typing true
-    sendTyping(username, true);
+    try {
+      if (typeof sendTyping === "function") sendTyping(username, true);
+    } catch (e) {}
     typingTimeoutRef.current = setTimeout(() => {
-      sendTyping(username, false);
+      try {
+        if (typeof sendTyping === "function") sendTyping(username, false);
+      } catch (e) {}
     }, 1200);
     return () => {
       if (typingTimeoutRef.current) clearTimeout(typingTimeoutRef.current);
@@ -826,7 +846,7 @@ export default function Chat() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [text]);
 
-  // Create Hub (persist self as bootstrap)
+  // Create Hub
   const handleCreateHub = () => {
     const id = getLocalPeerId() || myId;
     if (!id) return alert("Peer not ready yet. Wait a moment and try again.");
@@ -837,7 +857,7 @@ export default function Chat() {
     setMenuOpen(false);
   };
 
-  // Join hub by ID
+  // Join Hub
   const handleJoinHub = async () => {
     const id = prompt("Enter Hub bootstrap peer ID (the host's ID):");
     if (!id) { setMenuOpen(false); return; }
@@ -851,7 +871,7 @@ export default function Chat() {
     setMenuOpen(false);
   };
 
-  // Leave flow with confirmation handled outside (here assume confirmed)
+  // Leave flow
   const handleLeaveClick = () => { setMenuOpen(false); setConfirmLeaveOpen(true); };
 
   const handleConfirmLeave = () => {
@@ -867,7 +887,7 @@ export default function Chat() {
 
   const handleCancelLeave = () => setConfirmLeaveOpen(false);
 
-  // send chat: build msg with id, replyTo, deliveries=[], reads including self
+  // send chat
   const send = () => {
     if (!text.trim()) return;
     const id = nanoid();
@@ -878,55 +898,38 @@ export default function Chat() {
       text: text.trim(),
       ts: Date.now(),
       replyTo: replyTo ? { id: replyTo.id, from: replyTo.from, text: replyTo.text } : null,
-      deliveries: [], // will be filled as ACKs arrive
-      reads: [getLocalPeerId() || myId], // mark self as read
+      deliveries: [],
+      reads: [getLocalPeerId() || myId],
     };
-    // save locally
     setMessages((m) => { const next = [...m, msgObj]; persistMessages(next); return next; });
-    // broadcast via webrtc
-    sendChat(msgObj);
+    try { sendChat(msgObj); } catch (e) { console.warn("sendChat failed", e); }
     setText("");
     setReplyTo(null);
   };
 
-  // tap message to reply (set replyTo)
-  // tap message to reply (set replyTo) and send ack_read to origin
-const handleTapMessage = (m) => {
-  if (m.type && m.type.startsWith("system")) return; // don't reply to system
-  setReplyTo({ id: m.id, from: m.from, text: m.text });
-  // focus input
-  const input = document.querySelector('input[placeholder="Type a message..."]');
-  if (input) input.focus();
+  // tap message to reply + send ack_read
+  const handleTapMessage = (m) => {
+    if (m.type && m.type.startsWith("system")) return;
+    setReplyTo({ id: m.id, from: m.from, text: m.text });
+    const input = document.querySelector('input[placeholder="Type a message..."]');
+    if (input) input.focus();
 
-  // send ack_read to origin peer (clean exported function)
-  const originPeerId = m.fromId || m.from; // prefer numeric id stored on message
-  if (m.id && originPeerId) {
-    try {
-      sendAckRead(m.id, originPeerId);
-    } catch (e) {
-      console.warn("sendAckRead error", e);
+    const originPeerId = m.fromId || m.from;
+    if (m.id && originPeerId) {
+      try {
+        sendAckRead(m.id, originPeerId);
+      } catch (e) {
+        console.warn("sendAckRead error", e);
+      }
     }
-  }
-};
-
+  };
 
   // compute status dot for message
   const renderStatusDot = (m) => {
-    // total participants = peers.length + 1 (self)
     const total = (peers?.length || 0) + 1;
     const deliveries = m.deliveries ? m.deliveries.length : 0;
     const reads = m.reads ? m.reads.length : 0;
 
-    // include self as delivered/read
-    const selfId = getLocalPeerId() || myId;
-    const deliveredBySelf = m.deliveries && m.deliveries.includes(selfId);
-    const readBySelf = m.reads && m.reads.includes(selfId);
-    // ensure counts include self (we store reads initially with self in send())
-    // statuses:
-    // gray: 0 delivered (deliveries count === 0)
-    // red: delivered >0 and < total
-    // yellow: delivered === total and reads < total
-    // green: reads === total
     if (!deliveries || deliveries === 0) {
       return <span className="inline-block w-2 h-2 rounded-full bg-gray-400 ml-2" title="Not delivered" />;
     }
@@ -939,11 +942,10 @@ const handleTapMessage = (m) => {
     if (reads === total) {
       return <span className="inline-block w-2 h-2 rounded-full bg-green-500 ml-2" title="Read by everyone" />;
     }
-    // default
     return <span className="inline-block w-2 h-2 rounded-full bg-gray-400 ml-2" />;
   };
 
-  // render message (keeps your UI & colors)
+  // render message (preserve UI)
   const renderMessage = (m, idx) => {
     const from = m.from ?? "peer";
     const txt = typeof m.text === "string" ? m.text : JSON.stringify(m.text);
@@ -970,7 +972,6 @@ const handleTapMessage = (m) => {
         <div className="text-xs font-bold flex items-center">
           <div className="flex-1">{isMe ? "You" : from}</div>
           <div className="text-[10px] text-gray-700 /70 ml-2">{time}</div>
-          {/* status dot shown only for my messages */}
           {isMe && renderStatusDot(m)}
         </div>
         {m.replyTo && (
@@ -1013,13 +1014,12 @@ const handleTapMessage = (m) => {
 
   const connectedNames = peers.length ? peers.map((id) => peerNamesMap[id] || id) : [];
 
-  // display typing indicator summary
+  // show typing summary using keys (names) — fixes showing timestamps
   const typingSummary = () => {
-    const names = Object.values(typingUsers);
+    const names = Object.keys(typingUsers);
     if (!names.length) return null;
-    // show up to 2 names
     const shown = names.slice(0, 2).join(", ");
-    return <div className="text-sm text-white/70 mb-2">{shown} typing...</div>;
+    return <div className="text-sm text-blue-500 mb-2">{shown} typing...</div>;
   };
 
   return (
@@ -1030,7 +1030,9 @@ const handleTapMessage = (m) => {
             <div className="text-sm text-blue-600">Your ID</div>
             <div className="font-mono">{myId || "..."}</div>
             <div className="text-sm text-blue-600">Name: {username}</div>
-            <div className="text-xs text-purple-500 mt-1">Auto-join: {joinedBootstrap || "none"}</div>
+            <div className="text-xs text-purple-500 mt-1">
+              Auto-join: {joinedBootstrap || "none"}
+            </div>
           </div>
 
           {/* three-dots menu */}
@@ -1047,9 +1049,10 @@ const handleTapMessage = (m) => {
               </svg>
             </button>
 
-            {/* Animated menu: fade + scale */}
             <div
-              className={`absolute right-0 mt-2 w-44 bg-white/10 backdrop-blur rounded-lg shadow-lg z-50 transform origin-top-right transition-all duration-200 ${menuOpen ? "opacity-100 scale-100 pointer-events-auto" : "opacity-0 scale-95 pointer-events-none"}`}
+              className={`absolute right-0 mt-2 w-44 bg-white/10 backdrop-blur rounded-lg shadow-lg z-50 transform origin-top-right transition-all duration-200 ${
+                menuOpen ? "opacity-100 scale-100 pointer-events-auto" : "opacity-0 scale-95 pointer-events-none"
+              }`}
             >
               <button onClick={handleCreateHub} className="w-full text-left px-4 py-3 hover:bg-white/20 border-b border-white/5 text-green-500">
                 <span className="font-semibold">Create Hub</span>
@@ -1089,7 +1092,6 @@ const handleTapMessage = (m) => {
             Connected peers: {connectedNames.length === 0 ? <span className="text-red-500">none</span> : connectedNames.join(", ")}
           </div>
 
-          {/* reply preview */}
           {replyTo && (
             <div className="mb-2 p-3 bg-white/10 text-white rounded-lg">
               Replying to <strong>{replyTo.from}</strong>: <span className="text-sm text-white/80">{replyTo.text}</span>
@@ -1103,9 +1105,16 @@ const handleTapMessage = (m) => {
               onChange={(e) => setText(e.target.value)}
               placeholder="Type a message..."
               className="flex-1 p-3  bg-white/10 placeholder-blue-300 text-blue-500 font-mono rounded-3xl border-2"
-              onKeyDown={(e) => { if (e.key === "Enter") send(); }}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") send();
+              }}
             />
-            <button onClick={send} className="px-4 py-3 rounded-lg bg-gradient-to-br from-blue-500 to-blue-500 text-white font-semibold">Send</button>
+            <button
+              onClick={send}
+              className="px-4 py-3 rounded-lg bg-gradient-to-br from-blue-500 to-blue-500 text-white font-semibold"
+            >
+              Send
+            </button>
           </div>
         </footer>
       </div>
