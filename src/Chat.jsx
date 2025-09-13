@@ -1959,6 +1959,31 @@ export default function Chat() {
                   Leave and clear local history
                 </div>
               </button>
+
+              <button
+                onClick={() => {
+                  if (joinedBootstrap) return; // do nothing if connected
+                  try {
+                    localStorage.removeItem("ph_peer_id"); // wipe Peer ID
+                    window.location.reload(); // reload with fresh one
+                  } catch (e) {
+                    console.warn("Reset failed", e);
+                  }
+                }}
+                disabled={!!joinedBootstrap}
+                className={`w-full text-left px-4 py-3 border-t border-white/5 rounded-b-lg ${
+                  joinedBootstrap
+                    ? "text-gray-400 cursor-not-allowed"
+                    : "text-orange-500 hover:bg-white/20"
+                }`}
+              >
+                <span className="font-semibold">Reset</span>
+                <div className="text-xs text-gray-400">
+                  {joinedBootstrap
+                    ? "Leave hub first to reset Peer ID"
+                    : "Reset your Peer ID"}
+                </div>
+              </button>
             </div>
           </div>
         </header>
