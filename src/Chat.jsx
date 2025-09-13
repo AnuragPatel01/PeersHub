@@ -1,5 +1,3 @@
-
-
 // src/components/Chat.jsx
 
 // import "./App.css";
@@ -560,9 +558,6 @@
 //   );
 // }
 
-
-
-
 // New testing
 
 // src/components/Chat.jsx
@@ -579,6 +574,8 @@ import {
   leaveHub,
   getLocalPeerId,
   connectToPeer,
+  broadcastSystem,
+  
 } from "./webrtc";
 // notification helpers
 import { requestNotificationPermission, showNotification } from "./notify";
@@ -615,14 +612,13 @@ export default function Chat() {
   const [showNamePrompt, setShowNamePrompt] = useState(
     () => !localStorage.getItem("ph_name")
   );
- const [joinedBootstrap, setJoinedBootstrap] = useState(() => {
-  const id = localStorage.getItem("ph_hub_bootstrap") || "";
-  const should = localStorage.getItem("ph_should_autojoin") === "true";
-  return should ? id : "";
-});
+  const [joinedBootstrap, setJoinedBootstrap] = useState(() => {
+    const id = localStorage.getItem("ph_hub_bootstrap") || "";
+    const should = localStorage.getItem("ph_should_autojoin") === "true";
+    return should ? id : "";
+  });
   const [menuOpen, setMenuOpen] = useState(false);
   const [confirmLeaveOpen, setConfirmLeaveOpen] = useState(false);
-  
 
   useEffect(() => {
     if (!username) return;
@@ -881,7 +877,10 @@ export default function Chat() {
   useEffect(() => {
     if (!messagesEndRef.current) return;
     try {
-      messagesEndRef.current.scrollIntoView({ behavior: "smooth", block: "end" });
+      messagesEndRef.current.scrollIntoView({
+        behavior: "smooth",
+        block: "end",
+      });
     } catch (e) {}
   }, [messages]);
 
@@ -895,7 +894,8 @@ export default function Chat() {
           // only for messages from other peers and not already read by me
           const origin = m.fromId || m.from;
           if (!origin || origin === localId) return;
-          const alreadyRead = Array.isArray(m.reads) && m.reads.includes(localId);
+          const alreadyRead =
+            Array.isArray(m.reads) && m.reads.includes(localId);
           if (!alreadyRead) {
             try {
               sendAckRead(m.id, origin);
@@ -943,31 +943,41 @@ export default function Chat() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [text]);
 
-   // Create Hub
+  // Create Hub
   const handleCreateHub = () => {
-    const id = getLocalPeerId() || myId;
-    if (!id) return alert("Peer not ready yet. Wait a moment and try again.");
-    joinHub(id);
-    setJoinedBootstrap(id);
+  const id = getLocalPeerId() || myId;
+  if (!id) return alert("Peer not ready yet. Wait a moment and try again.");
+  joinHub(id);
+  setJoinedBootstrap(id);
 
-    // persist hub + autojoin flag
-    localStorage.setItem("ph_hub_bootstrap", id);
-    localStorage.setItem("ph_should_autojoin", "true");
+  // persist hub + autojoin flag
+  localStorage.setItem("ph_hub_bootstrap", id);
+  localStorage.setItem("ph_should_autojoin", "true");
 
-    const sysPlain = {
-      id: `sys-create-${Date.now()}`,
-      from: "System",
-      text: `You created the hub. Share this ID: ${id}`,
-      ts: Date.now(),
-      type: "system",
-    };
-    setMessages((m) => {
-      const next = [...m, sysPlain];
-      persistMessages(next);
-      return next;
-    });
-    setMenuOpen(false);
+  // local system message for the creator
+  const sysPlain = {
+    id: `sys-create-${Date.now()}`,
+    from: "System",
+    text: `You created the hub. Share this ID: ${id}`,
+    ts: Date.now(),
+    type: "system",
   };
+  setMessages((m) => {
+    const next = [...m, sysPlain];
+    persistMessages(next);
+    return next;
+  });
+
+  // BROADCAST public system announcement so others know who the host is
+  try {
+    const publicText = `[${username || "Host"}] is the host`;
+    broadcastSystem("system_public", publicText, `sys-host-${id}`);
+  } catch (e) {
+    console.warn("broadcastSystem failed", e);
+  }
+
+  setMenuOpen(false);
+};
 
   // Join Hub
   const handleJoinHub = async () => {
@@ -1051,7 +1061,9 @@ export default function Chat() {
       fromName: username,
       text: text.trim(),
       ts: Date.now(),
-      replyTo: replyTo ? { id: replyTo.id, from: replyTo.from, text: replyTo.text } : null,
+      replyTo: replyTo
+        ? { id: replyTo.id, from: replyTo.from, text: replyTo.text }
+        : null,
       deliveries: [], // peers who acknowledged delivery
       reads: [getLocalPeerId() || myId], // mark self as read
     };
@@ -1073,7 +1085,9 @@ export default function Chat() {
   const handleTapMessage = (m) => {
     if (m.type && m.type.startsWith("system")) return;
     setReplyTo({ id: m.id, from: m.from, text: m.text });
-    const input = document.querySelector('input[placeholder="Type a message..."]');
+    const input = document.querySelector(
+      'input[placeholder="Type a message..."]'
+    );
     if (input) input.focus();
 
     const originPeerId = m.fromId || m.from;
@@ -1090,39 +1104,69 @@ export default function Chat() {
 
   // compute status dot for message using WhatsApp-like rules
   const renderStatusDot = (m) => {
-    const totalPeers = (peers?.length || 0); // recipients count (excluding self)
+    const totalPeers = peers?.length || 0; // recipients count (excluding self)
     if (totalPeers === 0) {
-      return <span className="inline-block w-2 h-2 rounded-full bg-gray-400 ml-2" title="No recipients (offline)" />;
+      return (
+        <span
+          className="inline-block w-2 h-2 rounded-full bg-gray-400 ml-2"
+          title="No recipients (offline)"
+        />
+      );
     }
 
-    const deliveries = (m.deliveries || []).filter((id) => id !== (getLocalPeerId() || myId)).length;
-    const reads = (m.reads || []).filter((id) => id !== (getLocalPeerId() || myId)).length;
+    const deliveries = (m.deliveries || []).filter(
+      (id) => id !== (getLocalPeerId() || myId)
+    ).length;
+    const reads = (m.reads || []).filter(
+      (id) => id !== (getLocalPeerId() || myId)
+    ).length;
 
     // single tick (red) when not delivered to all recipients
     if (deliveries < totalPeers) {
-      return <span className="inline-block w-2 h-2 rounded-full bg-red-500 ml-2" title={`Single tick — delivered to ${deliveries}/${totalPeers}`} />;
+      return (
+        <span
+          className="inline-block w-2 h-2 rounded-full bg-red-500 ml-2"
+          title={`Single tick — delivered to ${deliveries}/${totalPeers}`}
+        />
+      );
     }
 
     // double tick (yellow) when delivered to everyone but not read by all
     if (deliveries === totalPeers && reads < totalPeers) {
-      return <span className="inline-block w-2 h-2 rounded-full bg-yellow-400 ml-2" title={`Double tick — delivered to all (${totalPeers}), reads ${reads}/${totalPeers}`} />;
+      return (
+        <span
+          className="inline-block w-2 h-2 rounded-full bg-yellow-400 ml-2"
+          title={`Double tick — delivered to all (${totalPeers}), reads ${reads}/${totalPeers}`}
+        />
+      );
     }
 
     // double-blue (green) when read by everyone
     if (reads === totalPeers) {
-      return <span className="inline-block w-2 h-2 rounded-full bg-green-500 ml-2" title="Double-blue — read by everyone" />;
+      return (
+        <span
+          className="inline-block w-2 h-2 rounded-full bg-green-500 ml-2"
+          title="Double-blue — read by everyone"
+        />
+      );
     }
 
-    return <span className="inline-block w-2 h-2 rounded-full bg-gray-400 ml-2" />;
+    return (
+      <span className="inline-block w-2 h-2 rounded-full bg-gray-400 ml-2" />
+    );
   };
 
   // render message (preserve UI)
   const renderMessage = (m, idx) => {
     const from = m.from ?? "peer";
     const txt = typeof m.text === "string" ? m.text : JSON.stringify(m.text);
-    const time = new Date(m.ts).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+    const time = new Date(m.ts).toLocaleTimeString([], {
+      hour: "2-digit",
+      minute: "2-digit",
+    });
     const isSystem = m.type && m.type.toString().startsWith("system");
-    const isMe = (m.fromId || m.from) === (getLocalPeerId() || myId) || from === username;
+    const isMe =
+      (m.fromId || m.from) === (getLocalPeerId() || myId) || from === username;
 
     if (isSystem) {
       return (
@@ -1138,7 +1182,9 @@ export default function Chat() {
       <div
         onClick={() => handleTapMessage(m)}
         key={`${m.id ?? m.ts}-${idx}`}
-        className={`p-2 rounded-2xl max-w-[50%] mb-2 cursor-pointer ${isMe ? "ml-auto bg-blue-500 text-white" : "bg-white/100  text-black"}`}
+        className={`p-2 rounded-2xl max-w-[50%] mb-2 cursor-pointer ${
+          isMe ? "ml-auto bg-blue-500 text-white" : "bg-white/100  text-black"
+        }`}
       >
         <div className="text-xs font-bold flex items-center">
           <div className="flex-1">{isMe ? "You" : from}</div>
@@ -1147,7 +1193,10 @@ export default function Chat() {
         </div>
         {m.replyTo && (
           <div className="mt-2 mb-2 p-2 rounded border border-white/5 text-xs text-gray-600 bg-white/10">
-            <strong className="text-xs text-white/80">Reply to {m.replyTo.from}:</strong> {m.replyTo.text}
+            <strong className="text-xs text-white/80">
+              Reply to {m.replyTo.from}:
+            </strong>{" "}
+            {m.replyTo.text}
           </div>
         )}
         <div className="break-words">{txt}</div>
@@ -1183,7 +1232,9 @@ export default function Chat() {
     );
   }
 
-  const connectedNames = peers.length ? peers.map((id) => peerNamesMap[id] || id) : [];
+  const connectedNames = peers.length
+    ? peers.map((id) => peerNamesMap[id] || id)
+    : [];
 
   // show typing summary using keys (names)
   const typingSummary = () => {
@@ -1213,7 +1264,12 @@ export default function Chat() {
               className="p-2 rounded-full bg-white/10 text-white"
               aria-label="Menu"
             >
-              <svg width="18" height="18" viewBox="0 0 24 24" className="inline-block">
+              <svg
+                width="18"
+                height="18"
+                viewBox="0 0 24 24"
+                className="inline-block"
+              >
                 <circle cx="12" cy="5" r="2" fill="blue" />
                 <circle cx="12" cy="12" r="2" fill="blue" />
                 <circle cx="12" cy="19" r="2" fill="blue" />
@@ -1222,22 +1278,39 @@ export default function Chat() {
 
             <div
               className={`absolute right-0 mt-2 w-44 bg-white/10 backdrop-blur rounded-lg shadow-lg z-50 transform origin-top-right transition-all duration-200 ${
-                menuOpen ? "opacity-100 scale-100 pointer-events-auto" : "opacity-0 scale-95 pointer-events-none"
+                menuOpen
+                  ? "opacity-100 scale-100 pointer-events-auto"
+                  : "opacity-0 scale-95 pointer-events-none"
               }`}
             >
-              <button onClick={handleCreateHub} className="w-full text-left px-4 py-3 hover:bg-white/20 border-b border-white/5 text-green-500">
+              <button
+                onClick={handleCreateHub}
+                className="w-full text-left px-4 py-3 hover:bg-white/20 border-b border-white/5 text-green-500"
+              >
                 <span className="font-semibold">Create Hub</span>
-                <div className="text-xs text-gray-400">Make this device the host</div>
+                <div className="text-xs text-gray-400">
+                  Make this device the host
+                </div>
               </button>
 
-              <button onClick={handleJoinHub} className="w-full text-left px-4 py-3 hover:bg-white/20 border-b border-white/5 text-blue-500">
+              <button
+                onClick={handleJoinHub}
+                className="w-full text-left px-4 py-3 hover:bg-white/20 border-b border-white/5 text-blue-500"
+              >
                 <span className="font-semibold">Join Hub</span>
-                <div className="text-xs text-gray-400">Enter a host ID to join</div>
+                <div className="text-xs text-gray-400">
+                  Enter a host ID to join
+                </div>
               </button>
 
-              <button onClick={handleLeaveClick} className="w-full text-left px-4 py-3 hover:bg-white/20 text-red-500 rounded-b-lg">
+              <button
+                onClick={handleLeaveClick}
+                className="w-full text-left px-4 py-3 hover:bg-white/20 text-red-500 rounded-b-lg"
+              >
                 <span className="font-semibold">Leave</span>
-                <div className="text-xs text-gray-400">Leave and clear local history</div>
+                <div className="text-xs text-gray-400">
+                  Leave and clear local history
+                </div>
               </button>
             </div>
           </div>
@@ -1248,7 +1321,9 @@ export default function Chat() {
 
         <main className="flex-1 overflow-auto mb-4">
           <div style={{ paddingBottom: 8 }}>
-            {messages.length === 0 && <div className="text-sm text-white/60">No messages yet</div>}
+            {messages.length === 0 && (
+              <div className="text-sm text-white/60">No messages yet</div>
+            )}
             {messages.map((m, i) => renderMessage(m, i))}
             <div ref={messagesEndRef} />
           </div>
@@ -1260,13 +1335,24 @@ export default function Chat() {
         <footer className="mt-auto">
           {typingSummary()}
           <div className="mb-3 text-sm text-blue-600">
-            Connected peers: {connectedNames.length === 0 ? <span className="text-red-500">none</span> : connectedNames.join(", ")}
+            Connected peers:{" "}
+            {connectedNames.length === 0 ? (
+              <span className="text-red-500">none</span>
+            ) : (
+              connectedNames.join(", ")
+            )}
           </div>
 
           {replyTo && (
             <div className="mb-2 p-3 bg-white/10 text-gray-500 rounded-lg">
-              Replying to <strong>{replyTo.from}</strong>: <span className="text-sm text-blue-400">{replyTo.text}</span>
-              <button onClick={() => setReplyTo(null)} className="ml-4 text-xs text-red-500">x</button>
+              Replying to <strong>{replyTo.from}</strong>:{" "}
+              <span className="text-sm text-blue-400">{replyTo.text}</span>
+              <button
+                onClick={() => setReplyTo(null)}
+                className="ml-4 text-xs text-red-500"
+              >
+                x
+              </button>
             </div>
           )}
 
@@ -1293,13 +1379,28 @@ export default function Chat() {
       {/* Leave confirmation modal */}
       {confirmLeaveOpen && (
         <div className="fixed inset-0 z-60 flex items-center justify-center">
-          <div className="absolute inset-0 bg-black/50" onClick={handleCancelLeave} />
+          <div
+            className="absolute inset-0 bg-black/50"
+            onClick={handleCancelLeave}
+          />
           <div className="relative bg-white/10 p-6 rounded-lg backdrop-blur text-white w-80 z-70">
             <h3 className="text-lg font-bold mb-2">Leave Hub?</h3>
-            <p className="text-sm text-white/80 mb-4">Leaving will clear your local chat history. Are you sure?</p>
+            <p className="text-sm text-white/80 mb-4">
+              Leaving will clear your local chat history. Are you sure?
+            </p>
             <div className="flex justify-center gap-2">
-              <button onClick={handleCancelLeave} className="px-3 py-2 rounded bg-gradient-to-br from-green-500 to-green-600 text-white">Cancel</button>
-              <button onClick={handleConfirmLeave} className="px-3 py-2 rounded bg-gradient-to-br from-red-500 to-red-600 text-white">Leave & Clear</button>
+              <button
+                onClick={handleCancelLeave}
+                className="px-3 py-2 rounded bg-gradient-to-br from-green-500 to-green-600 text-white"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={handleConfirmLeave}
+                className="px-3 py-2 rounded bg-gradient-to-br from-red-500 to-red-600 text-white"
+              >
+                Leave & Clear
+              </button>
             </div>
           </div>
         </div>

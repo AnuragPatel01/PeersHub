@@ -297,12 +297,25 @@
 //   if (reconnectInterval) { clearInterval(reconnectInterval); reconnectInterval = null; }
 // };
 
+// new integration
 
 
 
 
 
-// new integration 
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 
@@ -328,6 +341,8 @@ const LS_PEER_ID = "ph_peer_id";
 const LS_HUB_BOOTSTRAP = "ph_hub_bootstrap";
 const LS_KNOWN_PEERS = "ph_known_peers";
 const LS_LOCAL_NAME = "ph_name";
+// NEW: control whether client should auto-join stored hub after refresh
+const LS_SHOULD_AUTOJOIN = "ph_should_autojoin";
 
 let reconnectInterval = null;
 const RECONNECT_INTERVAL_MS = 3000;
@@ -376,7 +391,9 @@ const sendToConn = (conn, payload) => {
 
 const broadcastRaw = (payload) => {
   Object.values(connections).forEach((conn) => {
-    try { sendToConn(conn, payload); } catch (e) {}
+    try {
+      sendToConn(conn, payload);
+    } catch (e) {}
   });
 };
 
@@ -399,7 +416,12 @@ const sendAckDeliver = (toPeerId, msgId) => {
     sendToConn(conn, { type: "ack_deliver", id: msgId, from: peer.id });
   } else {
     // route fallback — include to so only the origin processes it
-    broadcastRaw({ type: "ack_deliver", id: msgId, from: peer.id, to: toPeerId });
+    broadcastRaw({
+      type: "ack_deliver",
+      id: msgId,
+      from: peer.id,
+      to: toPeerId,
+    });
   }
 };
 
@@ -408,25 +430,52 @@ export const sendAckRead = (msgId, originPeerId) => {
   if (!msgId) return;
   try {
     if (originPeerId && connections[originPeerId]) {
-      sendToConn(connections[originPeerId], { type: "ack_read", id: msgId, from: peer.id });
+      sendToConn(connections[originPeerId], {
+        type: "ack_read",
+        id: msgId,
+        from: peer.id,
+      });
       return;
     }
     // fallback route
-    broadcastRaw({ type: "ack_read", id: msgId, from: peer.id, to: originPeerId || null });
+    broadcastRaw({
+      type: "ack_read",
+      id: msgId,
+      from: peer.id,
+      to: originPeerId || null,
+    });
   } catch (e) {
     console.warn("sendAckRead failed", e);
   }
 };
 
+// broadcast a system-type message to all connected peers
+export const broadcastSystem = (type, text, id = null) => {
+  try {
+    const payload = { type: type || "system_public", text: text || "", id: id || `sys-${Date.now()}-${Math.random().toString(36).slice(2,7)}`, origin: peer ? peer.id : null };
+    // reuse existing raw broadcast helper which serializes for us
+    broadcastRaw(payload);
+  } catch (e) {
+    console.warn("broadcastSystem failed", e);
+  }
+};
+
+
 /* ---------- helper getters ---------- */
 export const getPeers = () => [...peersList];
 export const getPeerNames = () => ({ ...peerNames });
-export const getLocalPeerId = () => (peer ? peer.id : localStorage.getItem(LS_PEER_ID) || null);
+export const getLocalPeerId = () =>
+  peer ? peer.id : localStorage.getItem(LS_PEER_ID) || null;
 export const getKnownPeers = () => Array.from(loadKnownPeers());
 
 /* ---------- connection management ---------- */
 
-export const connectToPeer = (peerId, onMessage, onPeerListUpdate, localName = "Anonymous") => {
+export const connectToPeer = (
+  peerId,
+  onMessage,
+  onPeerListUpdate,
+  localName = "Anonymous"
+) => {
   if (!peer) {
     console.warn("connectToPeer: peer not initialized yet");
     return;
@@ -446,19 +495,26 @@ export const connectToPeer = (peerId, onMessage, onPeerListUpdate, localName = "
 export const joinHub = (bootstrapPeerId) => {
   if (!bootstrapPeerId) return;
   localStorage.setItem(LS_HUB_BOOTSTRAP, bootstrapPeerId);
+  // set the explicit autojoin flag so refresh will reconnect
+  localStorage.setItem(LS_SHOULD_AUTOJOIN, "true");
   if (onBootstrapChangedGlobal) onBootstrapChangedGlobal(bootstrapPeerId);
 };
 
 export const leaveHub = () => {
   stopReconnectLoop();
   Object.values(connections).forEach((conn) => {
-    try { conn.close && conn.close(); } catch (e) {}
+    try {
+      conn.close && conn.close();
+    } catch (e) {}
   });
   connections = {};
   peersList = [];
   peerNames = {};
+  // clear bootstrap AND autojoin flag on leave
   localStorage.removeItem(LS_HUB_BOOTSTRAP);
-  // do NOT remove known peers here — keep them for reconnection convenience
+  localStorage.removeItem(LS_SHOULD_AUTOJOIN);
+  // keep known-peers (so user can rejoin later if they want),
+  // but we will not auto-connect without the autojoin flag.
   if (onPeerListUpdateGlobal) onPeerListUpdateGlobal([...peersList]);
   if (onBootstrapChangedGlobal) onBootstrapChangedGlobal(null);
 };
@@ -466,14 +522,23 @@ export const leaveHub = () => {
 /* ---------- parse incoming raw data ---------- */
 const parseMessage = (raw) => {
   if (typeof raw === "string") {
-    try { return JSON.parse(raw); } catch (e) { return { type: "chat", text: raw }; }
+    try {
+      return JSON.parse(raw);
+    } catch (e) {
+      return { type: "chat", text: raw };
+    }
   }
   if (typeof raw === "object" && raw !== null) return raw;
   return { type: "chat", text: String(raw) };
 };
 
 /* ---------- setup per-connection handlers ---------- */
-const setupConnection = (conn, onMessage, onPeerListUpdate, localName = "Anonymous") => {
+const setupConnection = (
+  conn,
+  onMessage,
+  onPeerListUpdate,
+  localName = "Anonymous"
+) => {
   conn.on("open", () => {
     // store
     connections[conn.peer] = conn;
@@ -508,7 +573,14 @@ const setupConnection = (conn, onMessage, onPeerListUpdate, localName = "Anonymo
           if (!connections[p]) {
             // try connect after a tiny delay to avoid thundering
             setTimeout(() => {
-              try { connectToPeer(p, onMessageGlobal, onPeerListUpdateGlobal, peerNames[peer.id] || localName); } catch (e) {}
+              try {
+                connectToPeer(
+                  p,
+                  onMessageGlobal,
+                  onPeerListUpdateGlobal,
+                  peerNames[peer.id] || localName
+                );
+              } catch (e) {}
             }, 100);
           }
         }
@@ -519,7 +591,11 @@ const setupConnection = (conn, onMessage, onPeerListUpdate, localName = "Anonymo
     }
 
     if (data.type === "typing") {
-      if (onMessage) onMessage("__system_typing__", { fromName: data.fromName, isTyping: data.isTyping });
+      if (onMessage)
+        onMessage("__system_typing__", {
+          fromName: data.fromName,
+          isTyping: data.isTyping,
+        });
       return;
     }
 
@@ -535,12 +611,17 @@ const setupConnection = (conn, onMessage, onPeerListUpdate, localName = "Anonymo
     }
 
     if (data.type === "ack_deliver") {
-      if (onMessage) onMessage("__system_ack_deliver__", { fromPeer: data.from, id: data.id });
+      if (onMessage)
+        onMessage("__system_ack_deliver__", {
+          fromPeer: data.from,
+          id: data.id,
+        });
       return;
     }
 
     if (data.type === "ack_read") {
-      if (onMessage) onMessage("__system_ack_read__", { fromPeer: data.from, id: data.id });
+      if (onMessage)
+        onMessage("__system_ack_read__", { fromPeer: data.from, id: data.id });
       return;
     }
 
@@ -549,45 +630,71 @@ const setupConnection = (conn, onMessage, onPeerListUpdate, localName = "Anonymo
   });
 
   conn.on("close", () => {
-    try { delete connections[conn.peer]; } catch (e) {}
+    try {
+      delete connections[conn.peer];
+    } catch (e) {}
     peersList = peersList.filter((p) => p !== conn.peer);
     delete peerNames[conn.peer];
     if (onPeerListUpdate) onPeerListUpdate([...peersList]);
     // add to known peers (so we try to re-establish)
     addKnownPeer(conn.peer);
     // start reconnect loop so any dropped connections are attempted
-    startReconnectLoop(onMessageGlobal, onPeerListUpdateGlobal, peerNames[peer.id]);
+    startReconnectLoop(
+      onMessageGlobal,
+      onPeerListUpdateGlobal,
+      peerNames[peer.id]
+    );
   });
 
   conn.on("error", (err) => {
     console.warn("Connection error with", conn.peer, err);
     // schedule reconnect attempts
     addKnownPeer(conn.peer);
-    startReconnectLoop(onMessageGlobal, onPeerListUpdateGlobal, peerNames[peer.id]);
+    startReconnectLoop(
+      onMessageGlobal,
+      onPeerListUpdateGlobal,
+      peerNames[peer.id]
+    );
   });
 };
 
 /* ---------- reconnect loop ---------- */
 const startReconnectLoop = (onMessage, onPeerListUpdate, localName) => {
+  // if user opted out of auto-join, do not start reconnect attempts
+  const shouldAutoNow = localStorage.getItem(LS_SHOULD_AUTOJOIN) === "true";
+  if (!shouldAutoNow) return;
+
   stopReconnectLoop();
   reconnectInterval = setInterval(() => {
+    // check flag every tick — stop if user disabled it in the meantime
+    const shouldAuto = localStorage.getItem(LS_SHOULD_AUTOJOIN) === "true";
+    if (!shouldAuto) {
+      stopReconnectLoop();
+      return;
+    }
+
     // attempt connect to bootstrap
     const bootstrap = localStorage.getItem(LS_HUB_BOOTSTRAP);
-    if (bootstrap && bootstrap !== getLocalPeerId() && !connections[bootstrap]) {
-      try { connectToPeer(bootstrap, onMessage, onPeerListUpdate, localName); } catch (e) {}
+    if (
+      bootstrap &&
+      bootstrap !== getLocalPeerId() &&
+      !connections[bootstrap]
+    ) {
+      try {
+        connectToPeer(bootstrap, onMessage, onPeerListUpdate, localName);
+      } catch (e) {}
     }
-    // attempt connect to known peers
+
+    // attempt connect to known peers (only when autojoin enabled)
     const known = loadKnownPeers();
     known.forEach((p) => {
       if (!p || p === getLocalPeerId()) return;
       if (!connections[p]) {
-        try { connectToPeer(p, onMessage, onPeerListUpdate, localName); } catch (e) {}
+        try {
+          connectToPeer(p, onMessage, onPeerListUpdate, localName);
+        } catch (e) {}
       }
     });
-    // if we've connected to someone, and no bootstrap configured, stop loop after first success
-    if (Object.keys(connections).length > 0) {
-      // keep loop running to handle future dropouts — but you can choose to stop here if you want
-    }
   }, RECONNECT_INTERVAL_MS);
 };
 
@@ -599,7 +706,12 @@ const stopReconnectLoop = () => {
 };
 
 /* ---------- initPeer: create Peer & set handlers ---------- */
-export const initPeer = (onMessage, onPeerListUpdate, localName = "Anonymous", onBootstrapChange = null) => {
+export const initPeer = (
+  onMessage,
+  onPeerListUpdate,
+  localName = "Anonymous",
+  onBootstrapChange = null
+) => {
   onMessageGlobal = onMessage || null;
   onPeerListUpdateGlobal = onPeerListUpdate || null;
   onBootstrapChangedGlobal = onBootstrapChange || null;
@@ -620,27 +732,57 @@ export const initPeer = (onMessage, onPeerListUpdate, localName = "Anonymous", o
         localStorage.setItem(LS_PEER_ID, idOpen);
         peerNames[idOpen] = localName;
 
-        // immediately try to reconnect to bootstrap and known peers
-        const bootstrap = localStorage.getItem(LS_HUB_BOOTSTRAP);
-        if (bootstrap && bootstrap !== idOpen) {
-          try { connectToPeer(bootstrap, onMessageGlobal, onPeerListUpdateGlobal, localName); } catch (e) {}
-        }
-
-        // try known peers quickly
-        const known = loadKnownPeers();
-        known.forEach((p) => {
-          if (!p || p === idOpen) return;
-          if (!connections[p]) {
-            try { connectToPeer(p, onMessageGlobal, onPeerListUpdateGlobal, localName); } catch (e) {}
+        // only auto-connect if user previously opted to autojoin
+        const shouldAuto = localStorage.getItem(LS_SHOULD_AUTOJOIN) === "true";
+        if (shouldAuto) {
+          // attempt immediate connect to bootstrap (if set)
+          const bootstrap = localStorage.getItem(LS_HUB_BOOTSTRAP);
+          if (bootstrap && bootstrap !== idOpen) {
+            try {
+              connectToPeer(
+                bootstrap,
+                onMessageGlobal,
+                onPeerListUpdateGlobal,
+                localName
+              );
+            } catch (e) {}
           }
-        });
 
-        // always start reconnect loop to be resilient
-        startReconnectLoop(onMessageGlobal, onPeerListUpdateGlobal, localName);
+          // try known peers quickly
+          const known = loadKnownPeers();
+          known.forEach((p) => {
+            if (!p || p === idOpen) return;
+            if (!connections[p]) {
+              try {
+                connectToPeer(
+                  p,
+                  onMessageGlobal,
+                  onPeerListUpdateGlobal,
+                  localName
+                );
+              } catch (e) {}
+            }
+          });
+
+          // start reconnect loop to be resilient
+          startReconnectLoop(
+            onMessageGlobal,
+            onPeerListUpdateGlobal,
+            localName
+          );
+        } else {
+          // user has explicitly disabled auto-join -> ensure no reconnect loop runs
+          stopReconnectLoop();
+        }
       });
 
       peer.on("connection", (conn) => {
-        setupConnection(conn, onMessageGlobal, onPeerListUpdateGlobal, localName);
+        setupConnection(
+          conn,
+          onMessageGlobal,
+          onPeerListUpdateGlobal,
+          localName
+        );
       });
 
       peer.on("error", (err) => {
@@ -652,7 +794,9 @@ export const initPeer = (onMessage, onPeerListUpdate, localName = "Anonymous", o
             const newId = nanoid(6);
             localStorage.setItem(LS_PEER_ID, newId);
             // destroy old peer then recreate
-            try { peer.destroy && peer.destroy(); } catch (e) {}
+            try {
+              peer.destroy && peer.destroy();
+            } catch (e) {}
             createPeerWithId(newId);
           }
         } catch (e) {}
@@ -671,4 +815,3 @@ export const initPeer = (onMessage, onPeerListUpdate, localName = "Anonymous", o
 
   return createPeerWithId(storedId);
 };
-
