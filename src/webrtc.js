@@ -344,6 +344,9 @@ const LS_LOCAL_NAME = "ph_name";
 // NEW: control whether client should auto-join stored hub after refresh
 const LS_SHOULD_AUTOJOIN = "ph_should_autojoin";
 
+// NEW: timestamp marker that user intentionally left (prevents auto-rejoin for a while)
+const LS_LEFT_AT = "ph_left_at";
+
 let reconnectInterval = null;
 const RECONNECT_INTERVAL_MS = 3000;
 
@@ -351,6 +354,21 @@ const RECONNECT_INTERVAL_MS = 3000;
 let onMessageGlobal = null;
 let onPeerListUpdateGlobal = null;
 let onBootstrapChangedGlobal = null;
+
+
+window.__PH_debug = () => ({
+  peerId: peer ? peer.id : null,
+  connections: Object.keys(connections || {}),
+  peersList,
+  localStorageKeys: {
+    ph_hub_bootstrap: localStorage.getItem("ph_hub_bootstrap"),
+    ph_should_autojoin: localStorage.getItem("ph_should_autojoin"),
+    ph_known_peers: localStorage.getItem("ph_known_peers"),
+    ph_left_at: localStorage.getItem("ph_left_at"),
+  },
+  reconnectIntervalActive: !!reconnectInterval
+});
+
 
 /* ---------- util for knownPeers persistence ---------- */
 const loadKnownPeers = () => {
@@ -497,38 +515,53 @@ export const joinHub = (bootstrapPeerId) => {
   localStorage.setItem(LS_HUB_BOOTSTRAP, bootstrapPeerId);
   // set the explicit autojoin flag so refresh will reconnect
   localStorage.setItem(LS_SHOULD_AUTOJOIN, "true");
+  // clear any left marker because user is explicitly joining again
+  localStorage.removeItem(LS_LEFT_AT);
   if (onBootstrapChangedGlobal) onBootstrapChangedGlobal(bootstrapPeerId);
 };
 
 
+
 export const leaveHub = () => {
+  // stop reconnect loop immediately
   stopReconnectLoop();
 
-  // close all active connections
+  // close all active DataConnections
   Object.values(connections).forEach((conn) => {
     try {
       conn.close && conn.close();
-    } catch (e) {}
+    } catch (e) {
+      console.warn("error closing conn on leaveHub", e);
+    }
   });
 
-  // reset memory
+  // clear in-memory connection state
   connections = {};
   peersList = [];
   peerNames = {};
 
   // clear all persistence: bootstrap, autojoin, known peers
-  localStorage.removeItem(LS_HUB_BOOTSTRAP);
-  localStorage.removeItem(LS_SHOULD_AUTOJOIN);
-  localStorage.removeItem(LS_KNOWN_PEERS);
+  try {
+    localStorage.removeItem(LS_HUB_BOOTSTRAP);
+    localStorage.removeItem(LS_SHOULD_AUTOJOIN);
+    localStorage.removeItem(LS_KNOWN_PEERS);
+    // mark left time so no auto-join will happen accidentally
+    localStorage.setItem(LS_LEFT_AT, Date.now().toString());
+  } catch (e) {
+    console.warn("Error clearing leaveHub storage keys", e);
+  }
 
-  // also optional: clear peer id if you want a "fresh identity" on next load
-  // localStorage.removeItem(LS_PEER_ID);
+  // notify UI callbacks
+  if (onPeerListUpdateGlobal) {
+    try { onPeerListUpdateGlobal([...peersList]); } catch (e) {}
+  }
+  if (onBootstrapChangedGlobal) {
+    try { onBootstrapChangedGlobal(null); } catch (e) {}
+  }
 
-  if (onPeerListUpdateGlobal) onPeerListUpdateGlobal([]);
-  if (onBootstrapChangedGlobal) onBootstrapChangedGlobal(null);
-
-  console.log("PH: leaveHub() strict -> cleared bootstrap, autojoin, and known peers");
+  console.log("PH: leaveHub() strict -> cleared bootstrap, autojoin, known peers and set left marker");
 };
+
 
 
 
@@ -672,30 +705,45 @@ const setupConnection = (
 };
 
 /* ---------- reconnect loop ---------- */
+
+
 const startReconnectLoop = (onMessage, onPeerListUpdate, localName) => {
-  // if user opted out of auto-join, do not start reconnect attempts
+  // if the user intentionally left recently, don't auto reconnect
+  const leftAt = parseInt(localStorage.getItem(LS_LEFT_AT) || "0", 10);
+  if (leftAt && !isNaN(leftAt)) {
+    // optional: treat leave as permanent until explicit join — so block reconnect
+    console.log("PH: startReconnectLoop blocked because ph_left_at present:", leftAt);
+    return;
+  }
+
+  // gate by explicit autojoin flag
   const shouldAutoNow = localStorage.getItem(LS_SHOULD_AUTOJOIN) === "true";
-  if (!shouldAutoNow) return;
+  if (!shouldAutoNow) {
+    console.log("PH: startReconnectLoop skipped because autojoin flag is false");
+    return;
+  }
 
   stopReconnectLoop();
+  console.log("PH: startReconnectLoop -> starting reconnect interval");
   reconnectInterval = setInterval(() => {
     // check flag every tick — stop if user disabled it in the meantime
     const shouldAuto = localStorage.getItem(LS_SHOULD_AUTOJOIN) === "true";
-    if (!shouldAuto) {
+    const leftNow = localStorage.getItem(LS_LEFT_AT);
+    if (!shouldAuto || leftNow) {
+      console.log("PH: reconnect loop stopping because autojoin false or left marker present", { shouldAuto, leftNow });
       stopReconnectLoop();
       return;
     }
 
     // attempt connect to bootstrap
     const bootstrap = localStorage.getItem(LS_HUB_BOOTSTRAP);
-    if (
-      bootstrap &&
-      bootstrap !== getLocalPeerId() &&
-      !connections[bootstrap]
-    ) {
+    if (bootstrap && bootstrap !== getLocalPeerId() && !connections[bootstrap]) {
       try {
+        console.log("PH: reconnect loop attempting bootstrap connect ->", bootstrap);
         connectToPeer(bootstrap, onMessage, onPeerListUpdate, localName);
-      } catch (e) {}
+      } catch (e) {
+        console.warn("PH: reconnect loop bootstrap connect failed", e);
+      }
     }
 
     // attempt connect to known peers (only when autojoin enabled)
@@ -704,12 +752,16 @@ const startReconnectLoop = (onMessage, onPeerListUpdate, localName) => {
       if (!p || p === getLocalPeerId()) return;
       if (!connections[p]) {
         try {
+          console.log("PH: reconnect loop attempting known peer connect ->", p);
           connectToPeer(p, onMessage, onPeerListUpdate, localName);
-        } catch (e) {}
+        } catch (e) {
+          console.warn("PH: reconnect loop known peer connect failed", e);
+        }
       }
     });
   }, RECONNECT_INTERVAL_MS);
 };
+
 
 const stopReconnectLoop = () => {
   if (reconnectInterval) {
