@@ -569,7 +569,7 @@
 // src/components/Chat.jsx
 
 
-// src/components/Chat.jsx
+// src/components/Chat.jsx// src/components/Chat.jsx
 import "./App.css";
 
 import React, { useEffect, useState, useRef } from "react";
@@ -590,11 +590,11 @@ import { requestNotificationPermission, showNotification } from "./notify";
 import { nanoid } from "nanoid";
 
 /**
- * Chat.jsx (fixed)
- * - imports nanoid so send() works
- * - imports sendAckRead and uses it (no global hack)
- * - typingSummary now uses Object.keys(typingUsers) so names (not timestamps) are shown
- * - preserves UI classes/colors exactly
+ * Chat.jsx
+ * - WhatsApp-like read/delivery states (gray/red/yellow/green)
+ * - auto-ack read when chat is visible (document.visibilityState === 'visible')
+ * - ack_read on tap reply as well
+ * - keeps your UI classes/colors exactly
  */
 
 const LS_MSGS = "ph_msgs_v1";
@@ -673,21 +673,14 @@ export default function Chat() {
     } catch (e) {}
   };
 
-  // utility to update message by id
-  const updateMessageById = (id, patch) => {
-    setMessages((m) => {
-      const next = m.map((msg) => (msg.id === id ? { ...msg, ...patch } : msg));
-      persistMessages(next);
-      return next;
-    });
-  };
-
   // add or merge incoming chat
   const upsertIncomingChat = (incoming) => {
     setMessages((m) => {
       const exists = m.find((x) => x.id === incoming.id);
       if (exists) {
-        const next = m.map((x) => (x.id === incoming.id ? { ...x, ...incoming } : x));
+        const next = m.map((x) =>
+          x.id === incoming.id ? { ...x, ...incoming } : x
+        );
         persistMessages(next);
         return next;
       }
@@ -699,6 +692,7 @@ export default function Chat() {
         ts: incoming.ts || Date.now(),
         type: "chat",
         replyTo: incoming.replyTo || null,
+        // deliveries & reads arrays store peer IDs who delivered/read
         deliveries: incoming.deliveries || [],
         reads: incoming.reads || [],
       };
@@ -708,10 +702,28 @@ export default function Chat() {
     });
   };
 
+  // utility used by acks to update arrays safely
+  const addUniqueToMsgArray = (msgId, field, peerId) => {
+    setMessages((m) => {
+      const next = m.map((msg) => {
+        if (msg.id !== msgId) return msg;
+        const arr = Array.isArray(msg[field]) ? [...msg[field]] : [];
+        if (!arr.includes(peerId)) arr.push(peerId);
+        return { ...msg, [field]: arr };
+      });
+      persistMessages(next);
+      return next;
+    });
+  };
+
   // incoming messages callback from webrtc
   const handleIncoming = (from, payloadOrText) => {
     // typing system
-    if (from === "__system_typing__" && payloadOrText && payloadOrText.fromName) {
+    if (
+      from === "__system_typing__" &&
+      payloadOrText &&
+      payloadOrText.fromName
+    ) {
       const { fromName, isTyping } = payloadOrText;
       setTypingUsers((t) => {
         const copy = { ...t };
@@ -723,59 +735,101 @@ export default function Chat() {
     }
 
     // ack deliver
-    if (from === "__system_ack_deliver__" && payloadOrText && payloadOrText.id) {
+    if (
+      from === "__system_ack_deliver__" &&
+      payloadOrText &&
+      payloadOrText.id
+    ) {
       const { fromPeer, id } = payloadOrText;
-      setMessages((m) => {
-        const next = m.map((msg) => {
-          if (msg.id !== id) return msg;
-          const deliveries = Array.from(new Set([...(msg.deliveries || []), payloadOrText.fromPeer]));
-          return { ...msg, deliveries };
-        });
-        persistMessages(next);
-        return next;
-      });
+      addUniqueToMsgArray(id, "deliveries", fromPeer);
       return;
     }
 
     // ack read
     if (from === "__system_ack_read__" && payloadOrText && payloadOrText.id) {
       const { fromPeer, id } = payloadOrText;
-      setMessages((m) => {
-        const next = m.map((msg) => {
-          if (msg.id !== id) return msg;
-          const reads = Array.from(new Set([...(msg.reads || []), payloadOrText.fromPeer]));
-          return { ...msg, reads };
-        });
-        persistMessages(next);
-        return next;
-      });
+      addUniqueToMsgArray(id, "reads", fromPeer);
       return;
     }
 
     // system messages
-    if (payloadOrText && typeof payloadOrText === "object" && payloadOrText.type && payloadOrText.id && payloadOrText.type.toString().startsWith("system")) {
+    if (
+      payloadOrText &&
+      typeof payloadOrText === "object" &&
+      payloadOrText.type &&
+      payloadOrText.id &&
+      payloadOrText.type.toString().startsWith("system")
+    ) {
       const { type, text: txt, id } = payloadOrText;
       if (seenSystemIdsRef.current.has(id)) return;
       seenSystemIdsRef.current.add(id);
-      const msg = { id, from: "System", text: txt, ts: Date.now(), type, deliveries: [], reads: [] };
-      setMessages((m) => { const next = [...m, msg]; persistMessages(next); return next; });
+      const msg = {
+        id,
+        from: "System",
+        text: txt,
+        ts: Date.now(),
+        type,
+        deliveries: [],
+        reads: [],
+      };
+      setMessages((m) => {
+        const next = [...m, msg];
+        persistMessages(next);
+        return next;
+      });
       if (type === "system_public") maybeNotify("System", txt);
       return;
     }
 
     // chat object
-    if (payloadOrText && typeof payloadOrText === "object" && payloadOrText.type === "chat" && payloadOrText.id) {
+    if (
+      payloadOrText &&
+      typeof payloadOrText === "object" &&
+      payloadOrText.type === "chat" &&
+      payloadOrText.id
+    ) {
       upsertIncomingChat(payloadOrText);
-      maybeNotify(payloadOrText.fromName || payloadOrText.from, payloadOrText.text);
-      // webrtc already sends ack_deliver on receive
+      maybeNotify(
+        payloadOrText.fromName || payloadOrText.from,
+        payloadOrText.text
+      );
+
+      // Auto-read: if user currently has the tab visible consider it "read" immediately
+      // i.e., WhatsApp logic: delivered when device receives; read when chat open/visible
+      try {
+        const origin = payloadOrText.from || payloadOrText.origin || null;
+        if (document.visibilityState === "visible" && payloadOrText.id && origin) {
+          // notify origin that we read
+          sendAckRead(payloadOrText.id, origin);
+          // also locally record that we read this message (so counts are consistent on this client)
+          addUniqueToMsgArray(payloadOrText.id, "reads", getLocalPeerId() || myId);
+        }
+      } catch (e) {
+        console.warn("auto ack_read failed", e);
+      }
+
+      // webrtc.js already sends ack_deliver back to origin when it receives chat
       return;
     }
 
     // plain string fallback
     if (typeof payloadOrText === "string") {
       const safeText = payloadOrText;
-      const newMsg = { id: nanoid(), from: from || "peer", fromId: null, text: safeText, ts: Date.now(), type: "chat", deliveries: [], reads: [] };
-      setMessages((m) => { const next = [...m, newMsg]; persistMessages(next); return next; });
+      const newMsg = {
+        id: nanoid(),
+        from: from || "peer",
+        fromId: null,
+        text: safeText,
+        ts: Date.now(),
+        type: "chat",
+        deliveries: [],
+        reads: [],
+      };
+      setMessages((m) => {
+        const next = [...m, newMsg];
+        persistMessages(next);
+        return next;
+      });
       maybeNotify(from, safeText);
       return;
     }
@@ -798,13 +852,20 @@ export default function Chat() {
   // init peer when username available
   useEffect(() => {
     if (!username) return;
-    const p = initPeer(handleIncoming, handlePeerListUpdate, username, handleBootstrapChange);
+    const p = initPeer(
+      handleIncoming,
+      handlePeerListUpdate,
+      username,
+      handleBootstrapChange
+    );
     peerRef.current = p;
     p.on && p.on("open", (id) => setMyId(id));
     const bootstrap = localStorage.getItem("ph_hub_bootstrap");
     setJoinedBootstrap(bootstrap || "");
     return () => {
-      try { p && p.destroy && p.destroy(); } catch (e) {}
+      try {
+        p && p.destroy && p.destroy();
+      } catch (e) {}
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [username]);
@@ -852,36 +913,78 @@ export default function Chat() {
     if (!id) return alert("Peer not ready yet. Wait a moment and try again.");
     joinHub(id);
     setJoinedBootstrap(id);
-    const sysPlain = { id: `sys-create-${Date.now()}`, from: "System", text: `You created the hub. Share this ID: ${id}`, ts: Date.now(), type: "system" };
-    setMessages((m) => { const next = [...m, sysPlain]; persistMessages(next); return next; });
+    const sysPlain = {
+      id: `sys-create-${Date.now()}`,
+      from: "System",
+      text: `You created the hub. Share this ID: ${id}`,
+      ts: Date.now(),
+      type: "system",
+    };
+    setMessages((m) => {
+      const next = [...m, sysPlain];
+      persistMessages(next);
+      return next;
+    });
     setMenuOpen(false);
   };
 
   // Join Hub
   const handleJoinHub = async () => {
     const id = prompt("Enter Hub bootstrap peer ID (the host's ID):");
-    if (!id) { setMenuOpen(false); return; }
+    if (!id) {
+      setMenuOpen(false);
+      return;
+    }
     const trimmed = id.trim();
     joinHub(trimmed);
     setJoinedBootstrap(trimmed);
-    try { connectToPeer(trimmed, handleIncoming, handlePeerListUpdate, username); } catch (e) {}
+    try {
+      connectToPeer(trimmed, handleIncoming, handlePeerListUpdate, username);
+    } catch (e) {}
     const friendly = getPeerNames()[trimmed] || trimmed;
-    const sys = { id: `sys-join-${Date.now()}`, from: "System", text: `Join requested for hub: ${friendly}`, ts: Date.now(), type: "system" };
-    setMessages((m) => { const next = [...m, sys]; persistMessages(next); return next; });
+    const sys = {
+      id: `sys-join-${Date.now()}`,
+      from: "System",
+      text: `Join requested for hub: ${friendly}`,
+      ts: Date.now(),
+      type: "system",
+    };
+    setMessages((m) => {
+      const next = [...m, sys];
+      persistMessages(next);
+      return next;
+    });
     setMenuOpen(false);
   };
 
   // Leave flow
-  const handleLeaveClick = () => { setMenuOpen(false); setConfirmLeaveOpen(true); };
+  const handleLeaveClick = () => {
+    setMenuOpen(false);
+    setConfirmLeaveOpen(true);
+  };
 
   const handleConfirmLeave = () => {
-    try { leaveHub(); } catch (e) {}
+    try {
+      leaveHub();
+    } catch (e) {}
     setJoinedBootstrap("");
-    try { localStorage.removeItem(LS_MSGS); } catch (e) {}
+    try {
+      localStorage.removeItem(LS_MSGS);
+    } catch (e) {}
     seenSystemIdsRef.current.clear();
     setMessages([]);
-    const sys = { id: `sys-left-${Date.now()}`, from: "System", text: "You left the hub. Auto-join cleared.", ts: Date.now(), type: "system" };
-    setMessages((m) => { const next = [...m, sys]; persistMessages(next); return next; });
+    const sys = {
+      id: `sys-left-${Date.now()}`,
+      from: "System",
+      text: "You left the hub. Auto-join cleared.",
+      ts: Date.now(),
+      type: "system",
+    };
+    setMessages((m) => {
+      const next = [...m, sys];
+      persistMessages(next);
+      return next;
+    });
     setConfirmLeaveOpen(false);
   };
 
@@ -898,11 +1001,19 @@ export default function Chat() {
       text: text.trim(),
       ts: Date.now(),
       replyTo: replyTo ? { id: replyTo.id, from: replyTo.from, text: replyTo.text } : null,
-      deliveries: [],
-      reads: [getLocalPeerId() || myId],
+      deliveries: [], // peers who acknowledged delivery
+      reads: [getLocalPeerId() || myId], // mark self as read
     };
-    setMessages((m) => { const next = [...m, msgObj]; persistMessages(next); return next; });
-    try { sendChat(msgObj); } catch (e) { console.warn("sendChat failed", e); }
+    setMessages((m) => {
+      const next = [...m, msgObj];
+      persistMessages(next);
+      return next;
+    });
+    try {
+      sendChat(msgObj);
+    } catch (e) {
+      console.warn("sendChat failed", e);
+    }
     setText("");
     setReplyTo(null);
   };
@@ -918,30 +1029,44 @@ export default function Chat() {
     if (m.id && originPeerId) {
       try {
         sendAckRead(m.id, originPeerId);
+        // locally add read
+        addUniqueToMsgArray(m.id, "reads", getLocalPeerId() || myId);
       } catch (e) {
         console.warn("sendAckRead error", e);
       }
     }
   };
 
-  // compute status dot for message
+  // compute status dot for message using WhatsApp-like rules
   const renderStatusDot = (m) => {
-    const total = (peers?.length || 0) + 1;
-    const deliveries = m.deliveries ? m.deliveries.length : 0;
-    const reads = m.reads ? m.reads.length : 0;
+    const total = (peers?.length || 0);
+    // group semantics: total is number of other peers, sender excluded.
+    // If no peers (total === 0) -> gray (no recipients)
+    if (total === 0) {
+      return <span className="inline-block w-2 h-2 rounded-full bg-gray-400 ml-2" title="No recipients (offline)" />;
+    }
 
-    if (!deliveries || deliveries === 0) {
-      return <span className="inline-block w-2 h-2 rounded-full bg-gray-400 ml-2" title="Not delivered" />;
+    // count deliveries and reads among recipients
+    const deliveries = (m.deliveries || []).filter((id) => id !== (getLocalPeerId() || myId)).length;
+    const reads = (m.reads || []).filter((id) => id !== (getLocalPeerId() || myId)).length;
+
+    // deliveredCount & readCount are among recipients (exclude self)
+    // single tick (red) when not delivered to everyone (some or all missing)
+    if (deliveries < total) {
+      return <span className="inline-block w-2 h-2 rounded-full bg-red-500 ml-2" title={`Single tick — delivered to ${deliveries}/${total}`} />;
     }
-    if (deliveries > 0 && deliveries < total) {
-      return <span className="inline-block w-2 h-2 rounded-full bg-red-500 ml-2" title={`Delivered to ${deliveries}/${total}`} />;
+
+    // delivered to all, but not read by all => yellow (double tick)
+    if (deliveries === total && reads < total) {
+      return <span className="inline-block w-2 h-2 rounded-full bg-yellow-400 ml-2" title={`Double tick — delivered to all (${total}), reads ${reads}/${total}`} />;
     }
-    if (deliveries === total && (!reads || reads < total)) {
-      return <span className="inline-block w-2 h-2 rounded-full bg-yellow-400 ml-2" title={`Delivered to all (${total}) — reads ${reads}/${total}`} />;
-    }
+
+    // read by all => green (double-blue)
     if (reads === total) {
-      return <span className="inline-block w-2 h-2 rounded-full bg-green-500 ml-2" title="Read by everyone" />;
+      return <span className="inline-block w-2 h-2 rounded-full bg-green-500 ml-2" title="Double-blue — read by everyone" />;
     }
+
+    // fallback
     return <span className="inline-block w-2 h-2 rounded-full bg-gray-400 ml-2" />;
   };
 
@@ -1014,11 +1139,12 @@ export default function Chat() {
 
   const connectedNames = peers.length ? peers.map((id) => peerNamesMap[id] || id) : [];
 
-  // show typing summary using keys (names) — fixes showing timestamps
+  // show typing summary using keys (names)
   const typingSummary = () => {
     const names = Object.keys(typingUsers);
     if (!names.length) return null;
     const shown = names.slice(0, 2).join(", ");
+    // kept your color classes
     return <div className="text-sm text-blue-500 mb-2">{shown} typing...</div>;
   };
 
@@ -1027,7 +1153,7 @@ export default function Chat() {
       <div className="h-screen md:h-[80vh] bg-gray-50 text-purple-600 p-6 flex flex-col rounded-4xl">
         <header className="flex items-center justify-between mb-4">
           <div className="flex gap-2.5">
-            <div className="text-sm text-blue-600">Your ID</div>
+            <div className="text-sm text-blue-600">YourID</div>
             <div className="font-mono">{myId || "..."}</div>
             <div className="text-sm text-blue-600">Name: {username}</div>
             <div className="text-xs text-purple-500 mt-1">
@@ -1093,9 +1219,9 @@ export default function Chat() {
           </div>
 
           {replyTo && (
-            <div className="mb-2 p-3 bg-white/10 text-white rounded-lg">
-              Replying to <strong>{replyTo.from}</strong>: <span className="text-sm text-white/80">{replyTo.text}</span>
-              <button onClick={() => setReplyTo(null)} className="ml-4 text-xs text-white/60">Cancel</button>
+            <div className="mb-2 p-3 bg-white/10 text-gray-500 rounded-lg">
+              Replying to <strong>{replyTo.from}</strong>: <span className="text-sm text-blue-400">{replyTo.text}</span>
+              <button onClick={() => setReplyTo(null)} className="ml-4 text-xs text-red-500">x</button>
             </div>
           )}
 
