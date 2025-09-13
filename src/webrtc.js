@@ -298,9 +298,58 @@
 // };
 
 // new integration
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 // src/webrtc.js
-
-
 import Peer from "peerjs";
 import { nanoid } from "nanoid";
 
@@ -310,7 +359,7 @@ import { nanoid } from "nanoid";
  * - keeps a persisted known-peers list so clients retry connects after refresh
  * - robust reconnect loop to bootstrap + known peers
  * - intro message propagates known peers
- * - new: stronger stop logic + per-peer retry/backoff + window control hooks
+ * - stronger stop logic + per-peer retry/backoff + window control hooks
  */
 
 let peer = null;
@@ -336,6 +385,7 @@ const retryCounts = {}; // peerId -> number
 const LAST_ATTEMPT = {}; // peerId -> timestamp
 const MAX_RETRY_PER_PEER = 6; // after this many attempts, skip until next interval
 const BACKOFF_BASE_MS = 2000; // additional exponential backoff per retry
+const COOLDOWN_AFTER_MAX = 5 * 60 * 1000; // 5 minutes cooldown once max reached
 
 // global callbacks (set in initPeer)
 let onMessageGlobal = null;
@@ -363,7 +413,9 @@ window.__PH_stopReconnect = () => {
   try {
     stopReconnectLoop();
     localStorage.setItem(LS_SHOULD_AUTOJOIN, "false");
-    console.log("Called window.__PH_stopReconnect(): reconnect loop stopped and autojoin disabled.");
+    console.log(
+      "Called window.__PH_stopReconnect(): reconnect loop stopped and autojoin disabled."
+    );
   } catch (e) {
     console.warn("window.__PH_stopReconnect error", e);
   }
@@ -376,9 +428,15 @@ window.__PH_resumeReconnect = () => {
     localStorage.setItem(LS_SHOULD_AUTOJOIN, "true");
     // start loop if peer exists
     if (peer) {
-      startReconnectLoop(onMessageGlobal, onPeerListUpdateGlobal, peerNames[peer.id]);
+      startReconnectLoop(
+        onMessageGlobal,
+        onPeerListUpdateGlobal,
+        peerNames[peer.id]
+      );
     }
-    console.log("Called window.__PH_resumeReconnect(): left marker cleared, autojoin enabled.");
+    console.log(
+      "Called window.__PH_resumeReconnect(): left marker cleared, autojoin enabled."
+    );
   } catch (e) {
     console.warn("window.__PH_resumeReconnect error", e);
   }
@@ -520,7 +578,15 @@ export const connectToPeer = (
   // refuse to initiate outbound connects if user explicitly left
   try {
     if (localStorage.getItem(LS_LEFT_AT)) {
-      console.log("PH: connectToPeer aborted because ph_left_at present. peerId:", peerId);
+      // mark cooldown for this peer so reconnect loop won't hammer it
+      try {
+        retryCounts[peerId] = MAX_RETRY_PER_PEER;
+        LAST_ATTEMPT[peerId] = Date.now();
+      } catch (e) {}
+      console.log(
+        "PH: connectToPeer aborted because ph_left_at present. peerId:",
+        peerId
+      );
       return;
     }
   } catch (e) {}
@@ -537,15 +603,27 @@ export const connectToPeer = (
   const now = Date.now();
   const last = LAST_ATTEMPT[peerId] || 0;
   const tries = retryCounts[peerId] || 0;
+
   if (tries >= MAX_RETRY_PER_PEER) {
-    // if max retries reached, skip this tick (next interval may allow new attempts after reset)
-    console.log("PH: skipping connectToPeer - max retries reached for", peerId, tries);
-    return;
+    // check if cooldown expired
+    if (now - last < COOLDOWN_AFTER_MAX) {
+      console.log(
+        "PH: cooling down retries for",
+        peerId,
+        "until",
+        new Date(last + COOLDOWN_AFTER_MAX).toLocaleTimeString()
+      );
+      return;
+    } else {
+      console.log("PH: cooldown expired, resetting retry counter for", peerId);
+      retryCounts[peerId] = 0;
+    }
   }
-  // impose minimal backoff based on tries
-  const backoff = BACKOFF_BASE_MS * tries;
+
+  // impose exponential backoff
+  const backoff = BACKOFF_BASE_MS * Math.pow(2, tries);
   if (now - last < backoff) {
-    // too soon since last attempt
+    // not enough time passed for this peer yet
     return;
   }
 
@@ -581,6 +659,19 @@ export const leaveHub = () => {
       console.warn("error closing conn on leaveHub", e);
     }
   });
+
+  // try to broadcast a public leave notice so others can reduce attempts sooner
+  try {
+    const myId = getLocalPeerId();
+    const myName = peerNames[myId] || localStorage.getItem(LS_LOCAL_NAME) || "Unknown";
+    broadcastSystem(
+      "system_leave",
+      `${myName} left the hub`,
+      `sys-leave-${myId || "unknown"}`
+    );
+  } catch (e) {
+    console.warn("PH: failed to broadcast leave", e);
+  }
 
   // clear in-memory connection state
   connections = {};
@@ -639,8 +730,15 @@ const setupConnection = (
   try {
     const leftAt = localStorage.getItem(LS_LEFT_AT);
     if (leftAt) {
-      console.log("PH: refusing setupConnection for incoming conn because ph_left_at present:", leftAt, "from:", conn.peer);
-      try { conn.close && conn.close(); } catch (e) {}
+      console.log(
+        "PH: refusing setupConnection for incoming conn because ph_left_at present:",
+        leftAt,
+        "from:",
+        conn.peer
+      );
+      try {
+        conn.close && conn.close();
+      } catch (e) {}
       return;
     }
   } catch (e) {
@@ -652,19 +750,33 @@ const setupConnection = (
     try {
       const leftAt = localStorage.getItem(LS_LEFT_AT);
       if (leftAt) {
-        console.log("PH: setupConnection closing conn on open because ph_left_at present:", leftAt, "peer:", conn.peer);
-        try { conn.close && conn.close(); } catch (e) {}
+        console.log(
+          "PH: setupConnection closing conn on open because ph_left_at present:",
+          leftAt,
+          "peer:",
+          conn.peer
+        );
+        try {
+          conn.close && conn.close();
+        } catch (e) {}
         return;
       }
     } catch (e) {
-      console.warn("PH: error reading ph_left_at in setupConnection open handler", e);
+      console.warn(
+        "PH: error reading ph_left_at in setupConnection open handler",
+        e
+      );
     }
 
     // store connection and update peer list
     connections[conn.peer] = conn;
     if (!peersList.includes(conn.peer)) peersList.push(conn.peer);
     if (onPeerListUpdate) {
-      try { onPeerListUpdate([...peersList]); } catch (e) { console.warn(e); }
+      try {
+        onPeerListUpdate([...peersList]);
+      } catch (e) {
+        console.warn(e);
+      }
     }
 
     // reset retry bookkeeping on success
@@ -683,6 +795,19 @@ const setupConnection = (
   conn.on("data", (raw) => {
     const data = parseMessage(raw);
     if (!data || typeof data !== "object") return;
+
+    // special: handle public leave signal so we reduce retries for that origin
+    if (data.type === "system_leave") {
+      // origin may be present in payload.origin (we set it in broadcastSystem)
+      const origin = data.origin || null;
+      console.log("PH: received leave notice from", origin, "-", data.text);
+      if (origin) {
+        retryCounts[origin] = MAX_RETRY_PER_PEER;
+        LAST_ATTEMPT[origin] = Date.now();
+      }
+      if (onMessage) onMessage("__system_leave__", data);
+      return;
+    }
 
     // routing: if 'to' present and not for me, ignore
     if (data.to && data.to !== peer.id) return;
@@ -704,11 +829,19 @@ const setupConnection = (
           const leftAt = localStorage.getItem(LS_LEFT_AT);
           if (leftAt) {
             // user left — do not initiate outbound connects
-            console.log("PH: skipping connectToPeer for known peer because ph_left_at present:", leftAt, "peer:", p);
+            console.log(
+              "PH: skipping connectToPeer for known peer because ph_left_at present:",
+              leftAt,
+              "peer:",
+              p
+            );
             return;
           }
         } catch (e) {
-          console.warn("PH: error checking ph_left_at before connecting to known peer", e);
+          console.warn(
+            "PH: error checking ph_left_at before connecting to known peer",
+            e
+          );
         }
 
         if (!connections[p]) {
@@ -729,7 +862,11 @@ const setupConnection = (
       });
 
       if (onPeerListUpdate) {
-        try { onPeerListUpdate([...peersList]); } catch (e) { console.warn(e); }
+        try {
+          onPeerListUpdate([...peersList]);
+        } catch (e) {
+          console.warn(e);
+        }
       }
       return;
     }
@@ -755,7 +892,12 @@ const setupConnection = (
         } catch (e) {
           // fallback: broadcast ack so the origin sees it via the mesh
           try {
-            broadcastRaw({ type: "ack_deliver", id: data.id, from: peer.id, to: origin });
+            broadcastRaw({
+              type: "ack_deliver",
+              id: data.id,
+              from: peer.id,
+              to: origin,
+            });
           } catch (err) {
             console.warn("PH: sendAckDeliver fallback failed", err);
           }
@@ -790,7 +932,11 @@ const setupConnection = (
     peersList = peersList.filter((p) => p !== conn.peer);
     delete peerNames[conn.peer];
     if (onPeerListUpdate) {
-      try { onPeerListUpdate([...peersList]); } catch (e) { console.warn(e); }
+      try {
+        onPeerListUpdate([...peersList]);
+      } catch (e) {
+        console.warn(e);
+      }
     }
 
     // persist this peer so we can attempt reconnects later (unless user left)
@@ -954,11 +1100,7 @@ export const initPeer = (
           });
 
           // start reconnect loop to be resilient
-          startReconnectLoop(
-            onMessageGlobal,
-            onPeerListUpdateGlobal,
-            localName
-          );
+          startReconnectLoop(onMessageGlobal, onPeerListUpdateGlobal, localName);
         } else {
           // user has explicitly disabled auto-join -> ensure no reconnect loop runs
           stopReconnectLoop();
@@ -989,12 +1131,7 @@ export const initPeer = (
         }
 
         // otherwise proceed as usual
-        setupConnection(
-          conn,
-          onMessageGlobal,
-          onPeerListUpdateGlobal,
-          localName
-        );
+        setupConnection(conn, onMessageGlobal, onPeerListUpdateGlobal, localName);
       });
 
       peer.on("error", (err) => {
@@ -1027,4 +1164,3 @@ export const initPeer = (
 
   return createPeerWithId(storedId);
 };
-
