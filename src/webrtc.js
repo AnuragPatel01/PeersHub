@@ -500,24 +500,47 @@ export const joinHub = (bootstrapPeerId) => {
   if (onBootstrapChangedGlobal) onBootstrapChangedGlobal(bootstrapPeerId);
 };
 
+
 export const leaveHub = () => {
+  // stop any reconnect attempts immediately
   stopReconnectLoop();
+
+  // close all active DataConnections
   Object.values(connections).forEach((conn) => {
     try {
       conn.close && conn.close();
-    } catch (e) {}
+    } catch (e) {
+      console.warn("error closing conn on leaveHub", e);
+    }
   });
+
+  // clear in-memory connection state
   connections = {};
   peersList = [];
   peerNames = {};
-  // clear bootstrap AND autojoin flag on leave
-  localStorage.removeItem(LS_HUB_BOOTSTRAP);
-  localStorage.removeItem(LS_SHOULD_AUTOJOIN);
-  // keep known-peers (so user can rejoin later if they want),
-  // but we will not auto-connect without the autojoin flag.
-  if (onPeerListUpdateGlobal) onPeerListUpdateGlobal([...peersList]);
-  if (onBootstrapChangedGlobal) onBootstrapChangedGlobal(null);
+
+  // remove all bootstrap / autojoin / known-peers data so we NEVER auto-reconnect
+  try {
+    localStorage.removeItem(LS_HUB_BOOTSTRAP);
+    localStorage.removeItem(LS_SHOULD_AUTOJOIN);
+    localStorage.removeItem(LS_KNOWN_PEERS);
+  } catch (e) {
+    console.warn("Error clearing leaveHub storage keys", e);
+  }
+
+  // Optionally we leave the local peer instance alive so the UI still works;
+  // If you prefer to fully reset the PeerJS instance on leave, uncomment:
+  // try { peer && peer.destroy && peer.destroy(); } catch (e) {}
+
+  // notify UI
+  if (onPeerListUpdateGlobal) {
+    try { onPeerListUpdateGlobal([...peersList]); } catch (e) {}
+  }
+  if (onBootstrapChangedGlobal) {
+    try { onBootstrapChangedGlobal(null); } catch (e) {}
+  }
 };
+
 
 /* ---------- parse incoming raw data ---------- */
 const parseMessage = (raw) => {

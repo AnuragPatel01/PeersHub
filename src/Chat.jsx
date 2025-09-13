@@ -575,7 +575,7 @@ import {
   getLocalPeerId,
   connectToPeer,
   broadcastSystem,
-  
+
 } from "./webrtc";
 // notification helpers
 import { requestNotificationPermission, showNotification } from "./notify";
@@ -1193,7 +1193,7 @@ export default function Chat() {
         </div>
         {m.replyTo && (
           <div className="mt-2 mb-2 p-2 rounded border border-white/5 text-xs text-gray-600 bg-white/10">
-            <strong className="text-xs text-white/80">
+            <strong className="text-xs text-blue-400">
               Reply to {m.replyTo.from}:
             </strong>{" "}
             {m.replyTo.text}
