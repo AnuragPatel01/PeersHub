@@ -196,7 +196,6 @@ import "./App.css";
 
 // new testing
 
-
 // src/components/Chat.jsx
 import "./App.css";
 
@@ -210,6 +209,8 @@ import {
   getLocalPeerId,
   connectToPeer,
 } from "./webrtc";
+// add these imports near top of Chat.jsx
+import { requestNotificationPermission, showNotification } from "./notify";
 
 /**
  * Chat.jsx (updated)
@@ -239,16 +240,55 @@ export default function Chat() {
     return [];
   });
   const [text, setText] = useState("");
-  const [username, setUsername] = useState(() => localStorage.getItem("ph_name") || "");
-  const [showNamePrompt, setShowNamePrompt] = useState(() => !localStorage.getItem("ph_name"));
-  const [joinedBootstrap, setJoinedBootstrap] = useState(() => localStorage.getItem("ph_hub_bootstrap") || "");
+  const [username, setUsername] = useState(
+    () => localStorage.getItem("ph_name") || ""
+  );
+  const [showNamePrompt, setShowNamePrompt] = useState(
+    () => !localStorage.getItem("ph_name")
+  );
+  const [joinedBootstrap, setJoinedBootstrap] = useState(
+    () => localStorage.getItem("ph_hub_bootstrap") || ""
+  );
   const [menuOpen, setMenuOpen] = useState(false);
   const [confirmLeaveOpen, setConfirmLeaveOpen] = useState(false);
 
+  useEffect(() => {
+    if (!username) return;
+    // ask for permission once (non-blocking)
+    requestNotificationPermission().then((granted) => {
+      // optional: log or show small system message
+      console.log("Notification permission granted:", granted);
+    });
+  }, [username]);
   const messagesEndRef = useRef(null);
   const seenSystemIdsRef = useRef(new Set());
   const peerRef = useRef(null);
   const menuRef = useRef(null);
+
+  // helper to show notification only when appropriate
+  const maybeNotify = (fromDisplay, text) => {
+    try {
+      // don't notify for your own messages or for system messages
+      if (!fromDisplay || fromDisplay === username) return;
+      // only notify when the page is hidden or not focused
+      if (!document.hidden && document.hasFocus()) return;
+
+      const title = `${fromDisplay}`;
+      const body =
+        typeof text === "string"
+          ? text.length > 120
+            ? text.slice(0, 117) + "..."
+            : text
+          : JSON.stringify(text);
+      showNotification(title, {
+        body,
+        tag: `peershub-${fromDisplay}`,
+        data: { from: fromDisplay },
+      });
+    } catch (e) {
+      console.warn("maybeNotify error", e);
+    }
+  };
 
   // persist messages to localStorage (trimmed)
   const persistMessages = (arr) => {
@@ -259,9 +299,15 @@ export default function Chat() {
   };
 
   // incoming messages callback from webrtc
+  // updated handleIncoming - replace your current one
   const handleIncoming = (from, payloadOrText) => {
     // payloadOrText may be a string OR an object { type, text, id, ... }
-    if (payloadOrText && typeof payloadOrText === "object" && payloadOrText.type && payloadOrText.id) {
+    if (
+      payloadOrText &&
+      typeof payloadOrText === "object" &&
+      payloadOrText.type &&
+      payloadOrText.id
+    ) {
       // system or typed payload with id — use dedupe
       const { type, text: txt, id } = payloadOrText;
       if (seenSystemIdsRef.current.has(id)) {
@@ -280,18 +326,34 @@ export default function Chat() {
         persistMessages(next);
         return next;
       });
+
+      // notify for public system messages (optional)
+      if (type === "system_public") {
+        maybeNotify("System", txt);
+      }
       return;
     }
 
     // fallback: treat as normal chat text
-    const safeText = typeof payloadOrText === "string" ? payloadOrText : JSON.stringify(payloadOrText);
+    const safeText =
+      typeof payloadOrText === "string"
+        ? payloadOrText
+        : JSON.stringify(payloadOrText);
     const fromDisplay = from || "peer";
-    const msg = { from: fromDisplay, text: safeText, ts: Date.now(), type: "chat" };
+    const msg = {
+      from: fromDisplay,
+      text: safeText,
+      ts: Date.now(),
+      type: "chat",
+    };
     setMessages((m) => {
       const next = [...m, msg];
       persistMessages(next);
       return next;
     });
+
+    // show notification if appropriate (only for chat messages and not for my own)
+    maybeNotify(fromDisplay, safeText);
   };
 
   // peer list update callback
@@ -312,7 +374,12 @@ export default function Chat() {
   // initialize Peer when username present
   useEffect(() => {
     if (!username) return;
-    const p = initPeer(handleIncoming, handlePeerListUpdate, username, handleBootstrapChange);
+    const p = initPeer(
+      handleIncoming,
+      handlePeerListUpdate,
+      username,
+      handleBootstrapChange
+    );
     peerRef.current = p;
     p.on && p.on("open", (id) => setMyId(id));
 
@@ -332,7 +399,10 @@ export default function Chat() {
   useEffect(() => {
     if (!messagesEndRef.current) return;
     try {
-      messagesEndRef.current.scrollIntoView({ behavior: "smooth", block: "end" });
+      messagesEndRef.current.scrollIntoView({
+        behavior: "smooth",
+        block: "end",
+      });
     } catch (e) {}
   }, [messages]);
 
@@ -360,7 +430,12 @@ export default function Chat() {
     setJoinedBootstrap(id);
 
     // show local system message
-    const sysPlain = { from: "System", text: `You created the hub. Share this ID: ${id}`, ts: Date.now(), type: "system" };
+    const sysPlain = {
+      from: "System",
+      text: `You created the hub. Share this ID: ${id}`,
+      ts: Date.now(),
+      type: "system",
+    };
     setMessages((m) => {
       const next = [...m, sysPlain];
       persistMessages(next);
@@ -385,8 +460,13 @@ export default function Chat() {
     try {
       connectToPeer(trimmed, handleIncoming, handlePeerListUpdate, username);
     } catch (e) {}
-    const friendly = (getPeerNames()[trimmed] || trimmed);
-    const sys = { from: "System", text: `Join requested for hub: ${friendly}`, ts: Date.now(), type: "system" };
+    const friendly = getPeerNames()[trimmed] || trimmed;
+    const sys = {
+      from: "System",
+      text: `Join requested for hub: ${friendly}`,
+      ts: Date.now(),
+      type: "system",
+    };
     setMessages((m) => {
       const next = [...m, sys];
       persistMessages(next);
@@ -418,7 +498,12 @@ export default function Chat() {
     setMessages([]);
 
     // show ephemeral local system message in UI (won't persist because LS was cleared)
-    const sys = { from: "System", text: "You left the hub. Auto-join cleared.", ts: Date.now(), type: "system" };
+    const sys = {
+      from: "System",
+      text: "You left the hub. Auto-join cleared.",
+      ts: Date.now(),
+      type: "system",
+    };
     setMessages((m) => {
       const next = [...m, sys];
       persistMessages(next);
@@ -435,7 +520,12 @@ export default function Chat() {
   // send chat
   const send = () => {
     if (!text.trim()) return;
-    const msgObj = { from: username, text: text.trim(), ts: Date.now(), type: "chat" };
+    const msgObj = {
+      from: username,
+      text: text.trim(),
+      ts: Date.now(),
+      type: "chat",
+    };
     setMessages((m) => {
       const next = [...m, msgObj];
       persistMessages(next);
@@ -449,7 +539,10 @@ export default function Chat() {
   const renderMessage = (m, idx) => {
     const from = m.from ?? "peer";
     const txt = typeof m.text === "string" ? m.text : JSON.stringify(m.text);
-    const time = new Date(m.ts).toLocaleTimeString();
+    const time = new Date(m.ts).toLocaleTimeString([], {
+      hour: "2-digit",
+      minute: "2-digit",
+    });
     const isSystem = m.type && m.type.toString().startsWith("system");
     const isMe = from === username;
 
@@ -467,13 +560,12 @@ export default function Chat() {
       <div
         key={`${m.ts}-${idx}`}
         className={`p-2 rounded-2xl max-w-[40%] mb-2 ${
-          isMe
-            ? "ml-auto bg-blue-500 text-white"
-            : "bg-white text-black"
+          isMe ? "ml-auto bg-blue-500 text-white" : "bg-white/100  text-black"
         }`}
       >
         <div className="text-xs font-bold">
-          {isMe ? "You" : from} <span className="text-[10px] text-white/70 ml-2">{time}</span>
+          {isMe ? "You" : from}{" "}
+          <span className="text-[10px] text-gray-700 /70 ml-2">{time}</span>
         </div>
         <div className="break-words">{txt}</div>
       </div>
@@ -508,7 +600,9 @@ export default function Chat() {
     );
   }
 
-  const connectedNames = peers.length ? peers.map((id) => peerNamesMap[id] || id) : [];
+  const connectedNames = peers.length
+    ? peers.map((id) => peerNamesMap[id] || id)
+    : [];
 
   return (
     <>
@@ -518,7 +612,9 @@ export default function Chat() {
             <div className="text-sm text-blue-600">Your ID</div>
             <div className="font-mono">{myId || "..."}</div>
             <div className="text-sm text-blue-600">Name: {username}</div>
-            <div className="text-xs text-purple-500 mt-1">Auto-join: {joinedBootstrap || "none"}</div>
+            <div className="text-xs text-purple-500 mt-1">
+              Auto-join: {joinedBootstrap || "none"}
+            </div>
           </div>
 
           {/* three-dots menu */}
@@ -528,7 +624,12 @@ export default function Chat() {
               className="p-2 rounded-full bg-white/10 text-white"
               aria-label="Menu"
             >
-              <svg width="18" height="18" viewBox="0 0 24 24" className="inline-block">
+              <svg
+                width="18"
+                height="18"
+                viewBox="0 0 24 24"
+                className="inline-block"
+              >
                 <circle cx="12" cy="5" r="2" fill="blue" />
                 <circle cx="12" cy="12" r="2" fill="blue" />
                 <circle cx="12" cy="19" r="2" fill="blue" />
@@ -538,7 +639,9 @@ export default function Chat() {
             {/* Animated menu: fade + scale */}
             <div
               className={`absolute right-0 mt-2 w-44 bg-white/10 backdrop-blur rounded-lg shadow-lg z-50 transform origin-top-right transition-all duration-200 ${
-                menuOpen ? "opacity-100 scale-100 pointer-events-auto" : "opacity-0 scale-95 pointer-events-none"
+                menuOpen
+                  ? "opacity-100 scale-100 pointer-events-auto"
+                  : "opacity-0 scale-95 pointer-events-none"
               }`}
             >
               <button
@@ -546,7 +649,9 @@ export default function Chat() {
                 className="w-full text-left px-4 py-3 hover:bg-white/20 border-b border-white/5 text-green-500"
               >
                 <span className="font-semibold">Create Hub</span>
-                <div className="text-xs text-gray-400">Make this device the host</div>
+                <div className="text-xs text-gray-400">
+                  Make this device the host
+                </div>
               </button>
 
               <button
@@ -554,7 +659,9 @@ export default function Chat() {
                 className="w-full text-left px-4 py-3 hover:bg-white/20 border-b border-white/5 text-blue-500"
               >
                 <span className="font-semibold">Join Hub</span>
-                <div className="text-xs text-gray-400">Enter a host ID to join</div>
+                <div className="text-xs text-gray-400">
+                  Enter a host ID to join
+                </div>
               </button>
 
               <button
@@ -562,7 +669,9 @@ export default function Chat() {
                 className="w-full text-left px-4 py-3 hover:bg-white/20 text-red-500 rounded-b-lg"
               >
                 <span className="font-semibold">Leave</span>
-                <div className="text-xs text-gray-400">Leave and clear local history</div>
+                <div className="text-xs text-gray-400">
+                  Leave and clear local history
+                </div>
               </button>
             </div>
           </div>
@@ -588,7 +697,7 @@ export default function Chat() {
           <div className="mb-3 text-sm text-blue-600">
             Connected peers:{" "}
             {connectedNames.length === 0 ? (
-              <span className="text-green-500">none</span>
+              <span className="text-red-500">none</span>
             ) : (
               connectedNames.join(", ")
             )}
@@ -617,11 +726,16 @@ export default function Chat() {
       {/* Leave confirmation modal */}
       {confirmLeaveOpen && (
         <div className="fixed inset-0 z-60 flex items-center justify-center">
-          <div className="absolute inset-0 bg-black/50" onClick={handleCancelLeave} />
+          <div
+            className="absolute inset-0 bg-black/50"
+            onClick={handleCancelLeave}
+          />
           <div className="relative bg-white/10 p-6 rounded-lg backdrop-blur text-white w-80 z-70">
             <h3 className="text-lg font-bold mb-2">Leave Hub?</h3>
-            <p className="text-sm text-white/80 mb-4">Leaving will clear your local chat history. Are you sure?</p>
-            <div className="flex justify-end gap-2">
+            <p className="text-sm text-white/80 mb-4">
+              Leaving will clear your local chat history. Are you sure?
+            </p>
+            <div className="flex justify-center gap-2">
               <button
                 onClick={handleCancelLeave}
                 className="px-3 py-2 rounded bg-gradient-to-br from-green-500 to-green-600 text-white"
