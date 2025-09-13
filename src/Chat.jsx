@@ -1894,7 +1894,7 @@ export default function Chat() {
   return (
     <>
       {/* Adjusted container: narrower and taller */}
-      <div className="min-h-[92vh] md:h-[92vh] max-w-[380px] w-full mx-auto bg-gray-50 text-purple-600 p-6 flex flex-col rounded-4xl">
+      <div className="min-h-[92vh] md:h-[92vh] max-w-[400px] w-full mx-auto bg-gray-50 text-purple-600 p-6 flex flex-col rounded-4xl">
         <header className="flex items-center justify-between mb-4">
           <div className="flex gap-2.5">
             <div className="text-sm text-blue-600">YourID</div>
