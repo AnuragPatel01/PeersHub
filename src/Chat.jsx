@@ -2259,78 +2259,7 @@
 //   );
 // }
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 // Round Video Streaming
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 // src/components/Chat.jsx - FIXED VERSION
 import "./App.css";
@@ -2416,6 +2345,12 @@ export default function Chat() {
 
   // transfers map for progress UI
   const [transfers, setTransfers] = useState({});
+  const [now, setNow] = useState(Date.now());
+  useEffect(() => {
+    if (!Object.keys(incomingFileOffers).length) return;
+    const id = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(id);
+  }, [incomingFileOffers]);
 
   // refs & timers
   const messagesEndRef = useRef(null);
@@ -2453,9 +2388,23 @@ export default function Chat() {
   }, [username]);
 
   // persist messages
+  // persist messages (DO NOT store blob data in localStorage)
   const persistMessages = useCallback((arr) => {
     try {
-      const tail = arr.slice(-MAX_MSGS);
+      const tail = arr.slice(-MAX_MSGS).map((m) => {
+        // shallow copy
+        const copy = { ...m };
+        if (copy.media) {
+          // only persist small, safe metadata — DO NOT include the blob
+          copy.media = {
+            name: copy.media.name,
+            mime: copy.media.mime || copy.media.mimeType || null,
+            size: copy.media.size || null,
+            url: copy.media.url || null, // ephemeral object URL (won't survive reload reliably)
+          };
+        }
+        return copy;
+      });
       localStorage.setItem(LS_MSGS, JSON.stringify(tail));
     } catch (e) {
       console.warn("Failed to persist messages:", e);
@@ -2463,47 +2412,53 @@ export default function Chat() {
   }, []);
 
   // add/merge chat message
-  const upsertIncomingChat = useCallback((incoming) => {
-    setMessages((m) => {
-      const exists = m.find((x) => x.id === incoming.id);
-      if (exists) {
-        const next = m.map((x) =>
-          x.id === incoming.id ? { ...x, ...incoming } : x
-        );
+  const upsertIncomingChat = useCallback(
+    (incoming) => {
+      setMessages((m) => {
+        const exists = m.find((x) => x.id === incoming.id);
+        if (exists) {
+          const next = m.map((x) =>
+            x.id === incoming.id ? { ...x, ...incoming } : x
+          );
+          persistMessages(next);
+          return next;
+        }
+        const msgObj = {
+          id: incoming.id,
+          from: incoming.fromName || incoming.from || "peer",
+          fromId: incoming.from,
+          text: incoming.text,
+          ts: incoming.ts || Date.now(),
+          type: "chat",
+          replyTo: incoming.replyTo || null,
+          deliveries: incoming.deliveries || [],
+          reads: incoming.reads || [],
+          media: incoming.media || null,
+        };
+        const next = [...m, msgObj];
         persistMessages(next);
         return next;
-      }
-      const msgObj = {
-        id: incoming.id,
-        from: incoming.fromName || incoming.from || "peer",
-        fromId: incoming.from,
-        text: incoming.text,
-        ts: incoming.ts || Date.now(),
-        type: "chat",
-        replyTo: incoming.replyTo || null,
-        deliveries: incoming.deliveries || [],
-        reads: incoming.reads || [],
-        media: incoming.media || null,
-      };
-      const next = [...m, msgObj];
-      persistMessages(next);
-      return next;
-    });
-  }, [persistMessages]);
+      });
+    },
+    [persistMessages]
+  );
 
   // FIXED: Improved read receipt handling
-  const addUniqueToMsgArray = useCallback((msgId, field, peerId) => {
-    setMessages((m) => {
-      const next = m.map((msg) => {
-        if (msg.id !== msgId) return msg;
-        const arr = Array.isArray(msg[field]) ? [...msg[field]] : [];
-        if (!arr.includes(peerId)) arr.push(peerId);
-        return { ...msg, [field]: arr };
+  const addUniqueToMsgArray = useCallback(
+    (msgId, field, peerId) => {
+      setMessages((m) => {
+        const next = m.map((msg) => {
+          if (msg.id !== msgId) return msg;
+          const arr = Array.isArray(msg[field]) ? [...msg[field]] : [];
+          if (!arr.includes(peerId)) arr.push(peerId);
+          return { ...msg, [field]: arr };
+        });
+        persistMessages(next);
+        return next;
       });
-      persistMessages(next);
-      return next;
-    });
-  }, [persistMessages]);
+    },
+    [persistMessages]
+  );
 
   // transfers helpers
   const setTransfer = useCallback((id, patchOrFn) => {
@@ -2734,7 +2689,7 @@ export default function Chat() {
         const copy = { ...s };
         copy[offerId] = {
           offer,
-          expiresAt: Date.now() + 10000,
+          expiresAt: Date.now() + 20000,
           origin: offer.from,
         };
         return copy;
@@ -2759,7 +2714,7 @@ export default function Chat() {
           removeTransfer(offerId);
           return copy;
         });
-      }, 10000);
+      }, 20000);
 
       maybeNotify(
         peerNamesMap[offer.from] || offer.from,
@@ -2964,12 +2919,12 @@ export default function Chat() {
   // FIXED: Better typing broadcast with proper cleanup
   useEffect(() => {
     if (!username) return;
-    
+
     // Clear existing timeouts
     if (typingTimeoutRef.current) {
       clearTimeout(typingTimeoutRef.current);
     }
-    
+
     if (text.trim()) {
       // Send typing start if not already typing
       if (!isTyping) {
@@ -2980,7 +2935,7 @@ export default function Chat() {
           console.warn("sendTyping start failed", e);
         }
       }
-      
+
       // Set timeout to stop typing
       typingTimeoutRef.current = setTimeout(() => {
         try {
@@ -3001,7 +2956,7 @@ export default function Chat() {
         }
       }
     }
-    
+
     return () => {
       if (typingTimeoutRef.current) {
         clearTimeout(typingTimeoutRef.current);
@@ -3012,7 +2967,7 @@ export default function Chat() {
   // send chat text (non-media)
   const send = () => {
     if (!text.trim()) return;
-    
+
     // Stop typing indicator immediately
     if (isTyping) {
       try {
@@ -3020,7 +2975,7 @@ export default function Chat() {
         setIsTyping(false);
       } catch (e) {}
     }
-    
+
     const id = nanoid();
     const localId = getLocalPeerId() || myId;
     const msgObj = {
@@ -3346,7 +3301,7 @@ export default function Chat() {
       'input[placeholder="Type a message..."]'
     );
     if (input) input.focus();
-    
+
     // Send read receipt for incoming messages
     const localId = getLocalPeerId() || myId;
     const originPeerId = m.fromId || m.from;
@@ -3364,36 +3319,39 @@ export default function Chat() {
   const onClipPointerDown = useCallback((e) => {
     e.preventDefault();
     e.stopPropagation();
-    
+
     // Clear any existing timer
     if (recordPressTimerRef.current) {
       clearTimeout(recordPressTimerRef.current);
     }
-    
+
     // Start timer for long press detection
     recordPressTimerRef.current = setTimeout(() => {
       startRecording();
     }, RECORD_PRESS_MS);
   }, []);
 
-  const onClipPointerUp = useCallback((e) => {
-    e.preventDefault();
-    e.stopPropagation();
-    
-    // Cancel pending press timer
-    if (recordPressTimerRef.current) {
-      clearTimeout(recordPressTimerRef.current);
-      recordPressTimerRef.current = null;
-    }
-    
-    if (isRecording) {
-      // If currently recording, stop it
-      stopRecording();
-    } else {
-      // Short press: open file picker
-      handleFileInputClick();
-    }
-  }, [isRecording]);
+  const onClipPointerUp = useCallback(
+    (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+
+      // Cancel pending press timer
+      if (recordPressTimerRef.current) {
+        clearTimeout(recordPressTimerRef.current);
+        recordPressTimerRef.current = null;
+      }
+
+      if (isRecording) {
+        // If currently recording, stop it
+        stopRecording();
+      } else {
+        // Short press: open file picker
+        handleFileInputClick();
+      }
+    },
+    [isRecording]
+  );
 
   // Prevent context menu on long press
   const onClipContextMenu = useCallback((e) => {
@@ -3493,14 +3451,26 @@ export default function Chat() {
         }
 
         // cleanup preview element srcObject & revoke URL later
-        try {
-          if (previewVideoRef.current) previewVideoRef.current.srcObject = null;
-        } catch (_) {}
-        setTimeout(() => {
+        if (previewVideoRef.current) {
           try {
-            URL.revokeObjectURL(localUrl);
-          } catch (er) {}
-        }, 30000);
+            previewVideoRef.current.srcObject = stream;
+            previewVideoRef.current.muted = true;
+            previewVideoRef.current.playsInline = true;
+            // make sure autoplay DOM prop is set
+            previewVideoRef.current.autoplay = true;
+
+            // play after metadata is ready
+            previewVideoRef.current.onloadedmetadata = async () => {
+              try {
+                await previewVideoRef.current.play();
+              } catch (err) {
+                console.warn("preview play failed (onloadedmetadata)", err);
+              }
+            };
+          } catch (e) {
+            console.warn("preview setup failed", e);
+          }
+        }
       };
 
       recorder.start(1000);
@@ -3517,7 +3487,9 @@ export default function Chat() {
       }, 1000);
     } catch (e) {
       console.warn("startRecording failed", e);
-      alert(`Recording failed: ${e.message}. Please check camera/microphone permissions.`);
+      alert(
+        `Recording failed: ${e.message}. Please check camera/microphone permissions.`
+      );
       try {
         if (mediaStreamRef.current)
           mediaStreamRef.current.getTracks().forEach((t) => t.stop());
@@ -3553,15 +3525,16 @@ export default function Chat() {
   useEffect(() => {
     return () => {
       // Clean up recording timers
-      if (recordPressTimerRef.current) clearTimeout(recordPressTimerRef.current);
+      if (recordPressTimerRef.current)
+        clearTimeout(recordPressTimerRef.current);
       if (recordTimerRef.current) clearInterval(recordTimerRef.current);
       if (typingTimeoutRef.current) clearTimeout(typingTimeoutRef.current);
-      
+
       // Clean up typing cleanup timeouts
       if (typingCleanupTimeoutRef.current) {
         Object.values(typingCleanupTimeoutRef.current).forEach(clearTimeout);
       }
-      
+
       // Stop media stream
       if (mediaStreamRef.current) {
         mediaStreamRef.current.getTracks().forEach((t) => t.stop());
@@ -3699,17 +3672,22 @@ export default function Chat() {
                 muted
                 playsInline
               />
-              
+
               {/* Play button overlay */}
               <div className="absolute inset-0 flex items-center justify-center bg-black/30">
                 <div className="w-8 h-8 bg-white/90 rounded-full flex items-center justify-center">
-                  <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor">
-                    <path d="M8 5v14l11-7z"/>
+                  <svg
+                    width="12"
+                    height="12"
+                    viewBox="0 0 24 24"
+                    fill="currentColor"
+                  >
+                    <path d="M8 5v14l11-7z" />
                   </svg>
                 </div>
               </div>
             </div>
-            
+
             {/* Download button */}
             <a
               href={m.media.url}
@@ -3775,16 +3753,20 @@ export default function Chat() {
           </div>
         )}
         <div className="break-words">{txt}</div>
-        
+
         {/* FIXED: Read receipt indicators for sent messages */}
         {isMe && (
           <div className="flex items-center justify-end gap-1 mt-1 text-xs opacity-70">
             {Array.isArray(m.reads) && m.reads.length > 1 && (
-              <span className="text-blue-300">✓✓ Read by {m.reads.length - 1}</span>
+              <span className="text-blue-300">
+                ✓✓ Read by {m.reads.length - 1}
+              </span>
             )}
-            {Array.isArray(m.deliveries) && m.deliveries.length > 0 && !m.reads?.length && (
-              <span className="text-gray-300">✓ Delivered</span>
-            )}
+            {Array.isArray(m.deliveries) &&
+              m.deliveries.length > 0 &&
+              !m.reads?.length && (
+                <span className="text-gray-300">✓ Delivered</span>
+              )}
           </div>
         )}
       </div>
@@ -3794,11 +3776,11 @@ export default function Chat() {
   // FIXED: Better typing summary with cleanup
   const typingSummary = () => {
     const now = Date.now();
-    const activeTypers = Object.keys(typingUsers).filter(name => {
+    const activeTypers = Object.keys(typingUsers).filter((name) => {
       const lastTyping = typingUsers[name];
       return now - lastTyping < 3000; // Only show recent typing
     });
-    
+
     if (!activeTypers.length) return null;
     const shown = activeTypers.slice(0, 2).join(", ");
     return <div className="text-sm text-blue-500 mb-2">{shown} typing...</div>;
@@ -3858,7 +3840,7 @@ export default function Chat() {
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/90">
           <div className="relative">
             {/* FIXED: Large circular preview like Telegram */}
-            <div 
+            <div
               style={{ width: 240, height: 240 }}
               className="rounded-4xl overflow-hidden bg-black relative border-4 border-white/20"
             >
@@ -3869,19 +3851,19 @@ export default function Chat() {
                 playsInline
                 autoplay
               />
-              
+
               {/* Recording indicator */}
               <div className="absolute top-4 left-4 flex items-center gap-2">
                 <div className="w-3 h-3 bg-red-500 rounded-full animate-pulse"></div>
                 <span className="text-white text-sm font-medium">REC</span>
               </div>
-              
+
               {/* Timer */}
               <div className="absolute top-4 right-4 bg-black/50 text-white px-2 py-1 rounded text-sm">
                 {recordRemaining}s
               </div>
             </div>
-            
+
             {/* Stop button */}
             <button
               onClick={stopRecording}
@@ -3895,7 +3877,7 @@ export default function Chat() {
 
       {/* FIXED: Video player overlay */}
       {expandedVideo && (
-        <div 
+        <div
           className="fixed inset-0 z-50 flex items-center justify-center bg-black/90"
           onClick={() => setExpandedVideo(null)}
         >
@@ -3908,7 +3890,7 @@ export default function Chat() {
               className="max-w-full max-h-full rounded-lg"
               onClick={(e) => e.stopPropagation()}
             />
-            
+
             {/* Close button */}
             <button
               onClick={() => setExpandedVideo(null)}
@@ -3916,7 +3898,7 @@ export default function Chat() {
             >
               ✕
             </button>
-            
+
             {/* Download button */}
             <a
               href={expandedVideo.url}
@@ -4057,9 +4039,13 @@ export default function Chat() {
               strokeLinecap="round"
               strokeLinejoin="round"
               className={`absolute left-3 top-1/2 -translate-y-1/2 w-5 h-5 cursor-pointer hover:text-blue-700 select-none ${
-                isRecording ? 'text-red-500 animate-pulse' : 'text-blue-500'
+                isRecording ? "text-red-500 animate-pulse" : "text-blue-500"
               }`}
-              title={isRecording ? "Recording... (release to stop)" : "Hold to record video, tap for files"}
+              title={
+                isRecording
+                  ? "Recording... (release to stop)"
+                  : "Hold to record video, tap for files"
+              }
               style={{ display: "block", fill: "none", touchAction: "none" }}
               aria-hidden="true"
             >

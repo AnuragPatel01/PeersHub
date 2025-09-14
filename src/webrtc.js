@@ -861,9 +861,12 @@ let onBootstrapChangedGlobal = null;
 let onFileProgressGlobal = null;
 let onFileCompleteGlobal = null;
 
-export const setOnFileProgress = (fn) => { onFileProgressGlobal = fn; };
-export const setOnFileComplete = (fn) => { onFileCompleteGlobal = fn; };
-
+export const setOnFileProgress = (fn) => {
+  onFileProgressGlobal = fn;
+};
+export const setOnFileComplete = (fn) => {
+  onFileCompleteGlobal = fn;
+};
 
 window.__PH_debug = () => ({
   peerId: peer ? peer.id : null,
@@ -1061,8 +1064,29 @@ const streamFileToConn = async (conn, file, offerId) => {
       if (done) break;
 
       // value is typically a Uint8Array chunk
-      const arrBuf = value && value.buffer ? value.buffer : value;
+      // value is typically a Uint8Array chunk or an ArrayBuffer
+      let arrBuf;
       try {
+        if (value instanceof Uint8Array) {
+          // Send only the exact bytes for this chunk (respect byteOffset / byteLength)
+          arrBuf = value.buffer.slice(
+            value.byteOffset,
+            value.byteOffset + value.byteLength
+          );
+        } else if (
+          value &&
+          typeof value === "object" &&
+          value.buffer instanceof ArrayBuffer
+        ) {
+          // handle other typed views defensively
+          const offset = value.byteOffset || 0;
+          const length = value.byteLength || value.buffer.byteLength;
+          arrBuf = value.buffer.slice(offset, offset + length);
+        } else {
+          // already an ArrayBuffer (or fallback)
+          arrBuf = value;
+        }
+
         sendToConn(conn, {
           type: "file_chunk",
           id: offerId,
@@ -1133,7 +1157,6 @@ const streamFileToConn = async (conn, file, offerId) => {
       } catch (err) {}
     }
     // -----------------------------------------------------------------
-
   } catch (e) {
     console.warn("streamFileToConn error", e);
     try {
