@@ -851,37 +851,7 @@
 //   );
 // }
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-// Stable File Sharing 
+// Stable File Sharing
 
 // // src/components/Chat.jsx
 // import "./App.css";
@@ -2340,12 +2310,13 @@
 
 
 
+// Round Video Streaming
 
 
 
 
 
-// Round Video Streaming 
+
 
 
 
@@ -2363,7 +2334,7 @@
 
 // src/components/Chat.jsx
 import "./App.css";
-import React, { useEffect, useRef, useState } from "react";
+import React, { useEffect, useRef, useState, useCallback } from "react";
 import {
   initPeer,
   sendChat,
@@ -2384,11 +2355,11 @@ import { requestNotificationPermission, showNotification } from "./notify";
 import { nanoid } from "nanoid";
 
 /*
-  Chat.jsx
-  - long-press clip -> record video (3s threshold). live circular thumbnail while recording.
-  - recordings sent inline to everyone (via sendChat with Blob attached).
-  - file offers flow preserved for arbitrary files (offer/accept).
-  - floating progress bars on top for active transfers (sender & receiver).
+  Chat.jsx - Fixed Version
+  - Fixed long-press recording on clip icon
+  - Added missing preview video element
+  - Fixed event handler connections
+  - Improved cleanup and state management
 */
 
 const LS_MSGS = "ph_msgs_v1";
@@ -2438,11 +2409,10 @@ export default function Chat() {
   // file offers and save handles
   const [incomingFileOffers, setIncomingFileOffers] = useState({});
   const saveHandlesRef = useRef({});
-  const fileWriteStatusRef = useRef({}); // offerId -> bytesReceived
-  const outgoingPendingOffers = useRef({}); // offerId -> { file, acceptingPeers:Set }
+  const fileWriteStatusRef = useRef({});
+  const outgoingPendingOffers = useRef({});
 
-  // transfers map for progress UI (both sender & receiver)
-  // shape: { [offerIdOrMsgId]: { label, name, transferred, total, ts } }
+  // transfers map for progress UI
   const [transfers, setTransfers] = useState({});
 
   // refs & timers
@@ -2460,14 +2430,13 @@ export default function Chat() {
   const recordTimerRef = useRef(null);
   const [isRecording, setIsRecording] = useState(false);
   const [recordRemaining, setRecordRemaining] = useState(MAX_RECORD_SECONDS);
-  const previewVideoRef = useRef(null); // live preview element
+  const previewVideoRef = useRef(null);
 
-  // helper: format bytes adaptively (KB / MB)
+  // helper: format bytes adaptively
   const formatBytesAdaptive = (bytes, decimals = 2) => {
     if (bytes == null || isNaN(bytes)) return "0 B";
     if (bytes < 1024) return `${bytes} B`;
-    if (bytes < 1024 * 1024)
-      return `${(bytes / 1024).toFixed(decimals)} KB`;
+    if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(decimals)} KB`;
     return `${(bytes / 1024 / 1024).toFixed(decimals)} MB`;
   };
 
@@ -2478,19 +2447,23 @@ export default function Chat() {
   }, [username]);
 
   // persist messages
-  const persistMessages = (arr) => {
+  const persistMessages = useCallback((arr) => {
     try {
       const tail = arr.slice(-MAX_MSGS);
       localStorage.setItem(LS_MSGS, JSON.stringify(tail));
-    } catch (e) {}
-  };
+    } catch (e) {
+      console.warn("Failed to persist messages:", e);
+    }
+  }, []);
 
   // add/merge chat message
-  const upsertIncomingChat = (incoming) => {
+  const upsertIncomingChat = useCallback((incoming) => {
     setMessages((m) => {
       const exists = m.find((x) => x.id === incoming.id);
       if (exists) {
-        const next = m.map((x) => (x.id === incoming.id ? { ...x, ...incoming } : x));
+        const next = m.map((x) =>
+          x.id === incoming.id ? { ...x, ...incoming } : x
+        );
         persistMessages(next);
         return next;
       }
@@ -2510,10 +2483,10 @@ export default function Chat() {
       persistMessages(next);
       return next;
     });
-  };
+  }, [persistMessages]);
 
   // add unique id to deliveries/reads
-  const addUniqueToMsgArray = (msgId, field, peerId) => {
+  const addUniqueToMsgArray = useCallback((msgId, field, peerId) => {
     setMessages((m) => {
       const next = m.map((msg) => {
         if (msg.id !== msgId) return msg;
@@ -2524,34 +2497,41 @@ export default function Chat() {
       persistMessages(next);
       return next;
     });
-  };
+  }, [persistMessages]);
 
   // transfers helpers
-  const setTransfer = (id, patchOrFn) => {
+  const setTransfer = useCallback((id, patchOrFn) => {
     setTransfers((prev) => {
       const copy = { ...prev };
       const cur = copy[id] || {};
-      const next = typeof patchOrFn === "function" ? patchOrFn(cur) : { ...cur, ...patchOrFn };
+      const next =
+        typeof patchOrFn === "function"
+          ? patchOrFn(cur)
+          : { ...cur, ...patchOrFn };
       copy[id] = { ...cur, ...next };
       return copy;
     });
-  };
+  }, []);
 
-  const removeTransfer = (id) => {
+  const removeTransfer = useCallback((id) => {
     setTransfers((t) => {
       const copy = { ...t };
       delete copy[id];
       return copy;
     });
-  };
+  }, []);
 
   // handle incoming file chunk and write to disk using saved handle
   const handleIncomingFileChunk = async (data) => {
-    // defensive unwraps for PeerJS wrapper variants
     let { id: offerId, seq, chunk, final } = data || {};
     try {
-      // some runtimes wrap chunk under .data
-      if (chunk && chunk.data && (chunk.data instanceof ArrayBuffer || ArrayBuffer.isView(chunk.data) || chunk.data instanceof Blob)) {
+      if (
+        chunk &&
+        chunk.data &&
+        (chunk.data instanceof ArrayBuffer ||
+          ArrayBuffer.isView(chunk.data) ||
+          chunk.data instanceof Blob)
+      ) {
         chunk = chunk.data;
       }
 
@@ -2561,20 +2541,24 @@ export default function Chat() {
         return;
       }
 
-      // chunk may be Blob, ArrayBuffer, or TypedArray
       if (chunk instanceof Blob) {
         await writer.write(chunk);
-        fileWriteStatusRef.current[offerId] = (fileWriteStatusRef.current[offerId] || 0) + (chunk.size || 0);
+        fileWriteStatusRef.current[offerId] =
+          (fileWriteStatusRef.current[offerId] || 0) + (chunk.size || 0);
       } else if (chunk instanceof ArrayBuffer || ArrayBuffer.isView(chunk)) {
-        const buf = chunk instanceof ArrayBuffer ? new Uint8Array(chunk) : new Uint8Array(chunk.buffer || chunk);
+        const buf =
+          chunk instanceof ArrayBuffer
+            ? new Uint8Array(chunk)
+            : new Uint8Array(chunk.buffer || chunk);
         await writer.write(buf);
-        fileWriteStatusRef.current[offerId] = (fileWriteStatusRef.current[offerId] || 0) + buf.byteLength;
+        fileWriteStatusRef.current[offerId] =
+          (fileWriteStatusRef.current[offerId] || 0) + buf.byteLength;
       } else {
         console.warn("Unknown chunk type for offer", offerId, seq, chunk);
       }
 
-      // update receiver progress UI if we have total known
-      const meta = incomingFileOffers[offerId] && incomingFileOffers[offerId].offer;
+      const meta =
+        incomingFileOffers[offerId] && incomingFileOffers[offerId].offer;
       if (meta && meta.size) {
         setTransfer(offerId, (prev) => ({
           name: meta.name,
@@ -2592,16 +2576,13 @@ export default function Chat() {
           console.warn("Error closing writer for offer", offerId, e);
         }
 
-        // finalize receiver transfer UI -> 100%
-        try {
-          setTransfer(offerId, (prev) => ({
-            ...(prev || {}),
-            transferred: (prev && prev.total) || fileWriteStatusRef.current[offerId] || 0,
-          }));
-          setTimeout(() => removeTransfer(offerId), 1500);
-        } catch (e) {}
+        setTransfer(offerId, (prev) => ({
+          ...(prev || {}),
+          transferred:
+            (prev && prev.total) || fileWriteStatusRef.current[offerId] || 0,
+        }));
+        setTimeout(() => removeTransfer(offerId), 1500);
 
-        // cleanup
         delete saveHandlesRef.current[offerId];
         delete fileWriteStatusRef.current[offerId];
         setIncomingFileOffers((s) => {
@@ -2610,7 +2591,6 @@ export default function Chat() {
           return cp;
         });
 
-        // notify user in UI (append system message)
         setMessages((m) => {
           const sys = {
             id: `sys-file-done-${offerId}`,
@@ -2639,11 +2619,10 @@ export default function Chat() {
         return next;
       });
 
-      // cleanup UI record & handle
-      try { removeTransfer(offerId); } catch (_) {}
+      removeTransfer(offerId);
       try {
         if (saveHandlesRef.current[offerId]) {
-          try { await saveHandlesRef.current[offerId].close(); } catch (_) {}
+          await saveHandlesRef.current[offerId].close();
           delete saveHandlesRef.current[offerId];
         }
       } catch (_) {}
@@ -2653,7 +2632,11 @@ export default function Chat() {
   // incoming message handler
   const handleIncoming = async (from, payloadOrText) => {
     // typing
-    if (from === "__system_typing__" && payloadOrText && payloadOrText.fromName) {
+    if (
+      from === "__system_typing__" &&
+      payloadOrText &&
+      payloadOrText.fromName
+    ) {
       const { fromName, isTyping } = payloadOrText;
       setTypingUsers((t) => {
         const copy = { ...t };
@@ -2665,7 +2648,11 @@ export default function Chat() {
     }
 
     // ack deliver
-    if (from === "__system_ack_deliver__" && payloadOrText && payloadOrText.id) {
+    if (
+      from === "__system_ack_deliver__" &&
+      payloadOrText &&
+      payloadOrText.id
+    ) {
       const { fromPeer, id } = payloadOrText;
       addUniqueToMsgArray(id, "deliveries", fromPeer);
       return;
@@ -2710,29 +2697,44 @@ export default function Chat() {
     // file offer (receiver)
     if (from === "__system_file_offer__" && payloadOrText) {
       const offer = payloadOrText;
-      const offerId = offer.id || `offer-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+      const offerId =
+        offer.id ||
+        `offer-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
       setIncomingFileOffers((s) => {
         const copy = { ...s };
-        copy[offerId] = { offer, expiresAt: Date.now() + 10000, origin: offer.from };
+        copy[offerId] = {
+          offer,
+          expiresAt: Date.now() + 10000,
+          origin: offer.from,
+        };
         return copy;
       });
 
-      // add transfer placeholder (receiver) with known total if present
-      setTransfer(offerId, { name: offer.name, label: "Offered", transferred: 0, total: offer.size || null, ts: Date.now() });
+      setTransfer(offerId, {
+        name: offer.name,
+        label: "Offered",
+        transferred: 0,
+        total: offer.size || null,
+        ts: Date.now(),
+      });
 
-      // auto-expire after 10s (ignore)
       setTimeout(() => {
         setIncomingFileOffers((s) => {
           const copy = { ...s };
           if (!copy[offerId]) return s;
-          try { respondToFileOffer(offerId, offer.from, false); } catch (e) {}
+          try {
+            respondToFileOffer(offerId, offer.from, false);
+          } catch (e) {}
           delete copy[offerId];
           removeTransfer(offerId);
           return copy;
         });
       }, 10000);
 
-      maybeNotify(peerNamesMap[offer.from] || offer.from, `File offer: ${offer.name}`);
+      maybeNotify(
+        peerNamesMap[offer.from] || offer.from,
+        `File offer: ${offer.name}`
+      );
       return;
     }
 
@@ -2744,7 +2746,6 @@ export default function Chat() {
         if (!pending) return;
         if (accept) {
           pending.acceptingPeers.add(responder);
-          // create/update sender transfer UI
           setTransfer(offerId, (prev) => ({
             ...(prev || {}),
             name: pending.file.name,
@@ -2753,14 +2754,11 @@ export default function Chat() {
             total: pending.file.size || 0,
             ts: Date.now(),
           }));
-          // trigger sending to that peer only (webrtc handles stream)
           try {
             startSendingFile(pending.file, offerId, [responder]);
           } catch (e) {
             console.warn("startSendingFile failed", e);
           }
-        } else {
-          // if nobody accepted after some time, we will cleanup elsewhere
         }
       } catch (e) {
         console.warn("file_offer_response handling failed", e);
@@ -2777,8 +2775,10 @@ export default function Chat() {
     // file transfer done/cancel
     if (from === "__system_file_transfer_done__" && payloadOrText) {
       const { id: offerId } = payloadOrText;
-      // mark sender-side transfer complete (someone reported done)
-      setTransfer(offerId, (prev) => ({ ...(prev || {}), transferred: prev?.total || prev?.transferred || 0 }));
+      setTransfer(offerId, (prev) => ({
+        ...(prev || {}),
+        transferred: prev?.total || prev?.transferred || 0,
+      }));
       setTimeout(() => removeTransfer(offerId), 1500);
 
       setMessages((m) => {
@@ -2797,29 +2797,49 @@ export default function Chat() {
     }
 
     // chat object (including media/blobs)
-    if (payloadOrText && typeof payloadOrText === "object" && payloadOrText.type === "chat" && payloadOrText.id) {
-      // If media Blob present, ensure it has url property (create objectURL for blob for playback)
-      if (payloadOrText.media && payloadOrText.media.blob && !payloadOrText.media.url) {
+    if (
+      payloadOrText &&
+      typeof payloadOrText === "object" &&
+      payloadOrText.type === "chat" &&
+      payloadOrText.id
+    ) {
+      if (
+        payloadOrText.media &&
+        payloadOrText.media.blob &&
+        !payloadOrText.media.url
+      ) {
         try {
-          payloadOrText.media.url = URL.createObjectURL(payloadOrText.media.blob);
+          payloadOrText.media.url = URL.createObjectURL(
+            payloadOrText.media.blob
+          );
         } catch (e) {
           console.warn("createObjectURL for received blob failed", e);
         }
       }
       upsertIncomingChat(payloadOrText);
-      maybeNotify(payloadOrText.fromName || payloadOrText.from, payloadOrText.text);
+      maybeNotify(
+        payloadOrText.fromName || payloadOrText.from,
+        payloadOrText.text
+      );
 
-      // auto-ack read if visible
       try {
         const origin = payloadOrText.from || payloadOrText.origin || null;
         const localId = getLocalPeerId() || myId;
-        if (origin && origin !== localId && document.visibilityState === "visible") {
+        if (
+          origin &&
+          origin !== localId &&
+          document.visibilityState === "visible"
+        ) {
           try {
             sendAckRead(payloadOrText.id, origin);
-          } catch (e) { console.warn("sendAckRead error (auto on receive):", e); }
+          } catch (e) {
+            console.warn("sendAckRead error (auto on receive):", e);
+          }
           addUniqueToMsgArray(payloadOrText.id, "reads", localId);
         }
-      } catch (e) { console.warn("auto ack_read failed", e); }
+      } catch (e) {
+        console.warn("auto ack_read failed", e);
+      }
 
       return;
     }
@@ -2853,9 +2873,20 @@ export default function Chat() {
       if (!fromDisplay || fromDisplay === username) return;
       if (!document.hidden && document.hasFocus()) return;
       const title = `${fromDisplay}`;
-      const body = typeof text === "string" ? (text.length > 120 ? text.slice(0, 117) + "..." : text) : JSON.stringify(text);
-      showNotification(title, { body, tag: `peershub-${fromDisplay}`, data: { from: fromDisplay } });
-    } catch (e) { console.warn("maybeNotify error", e); }
+      const body =
+        typeof text === "string"
+          ? text.length > 120
+            ? text.slice(0, 117) + "..."
+            : text
+          : JSON.stringify(text);
+      showNotification(title, {
+        body,
+        tag: `peershub-${fromDisplay}`,
+        data: { from: fromDisplay },
+      });
+    } catch (e) {
+      console.warn("maybeNotify error", e);
+    }
   };
 
   // peer list update
@@ -2875,7 +2906,12 @@ export default function Chat() {
   // init peer when username available
   useEffect(() => {
     if (!username) return;
-    const p = initPeer(handleIncoming, handlePeerListUpdate, username, handleBootstrapChange);
+    const p = initPeer(
+      handleIncoming,
+      handlePeerListUpdate,
+      username,
+      handleBootstrapChange
+    );
     peerRef.current = p;
     p.on && p.on("open", (id) => setMyId(id));
     const bootstrap = localStorage.getItem("ph_hub_bootstrap");
@@ -2885,23 +2921,33 @@ export default function Chat() {
         p && p.destroy && p.destroy();
       } catch (e) {}
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [username]);
 
   // autoscroll
   useEffect(() => {
-    if (messagesEndRef.current) messagesEndRef.current.scrollIntoView({ behavior: "smooth" });
+    if (messagesEndRef.current)
+      messagesEndRef.current.scrollIntoView({ behavior: "smooth" });
   }, [messages]);
 
-  // typing broadcast (debounced)
+  // typing broadcast (debounced) - FIXED: Single effect
   useEffect(() => {
-    if (!username) return;
+    if (!username || !text) return;
+    
     if (typingTimeoutRef.current) clearTimeout(typingTimeoutRef.current);
-    try { if (typeof sendTyping === "function") sendTyping(username, true); } catch (e) {}
+    
+    try {
+      if (typeof sendTyping === "function") sendTyping(username, true);
+    } catch (e) {}
+    
     typingTimeoutRef.current = setTimeout(() => {
-      try { if (typeof sendTyping === "function") sendTyping(username, false); } catch (e) {}
+      try {
+        if (typeof sendTyping === "function") sendTyping(username, false);
+      } catch (e) {}
     }, 1200);
-    return () => clearTimeout(typingTimeoutRef.current);
+    
+    return () => {
+      if (typingTimeoutRef.current) clearTimeout(typingTimeoutRef.current);
+    };
   }, [text, username]);
 
   // send chat text (non-media)
@@ -2914,7 +2960,9 @@ export default function Chat() {
       fromName: username,
       text: text.trim(),
       ts: Date.now(),
-      replyTo: replyTo ? { id: replyTo.id, from: replyTo.from, text: replyTo.text } : null,
+      replyTo: replyTo
+        ? { id: replyTo.id, from: replyTo.from, text: replyTo.text }
+        : null,
       deliveries: [],
       reads: [getLocalPeerId() || myId],
     };
@@ -2923,7 +2971,11 @@ export default function Chat() {
       persistMessages(next);
       return next;
     });
-    try { sendChat(msgObj); } catch (e) { console.warn("sendChat failed", e); }
+    try {
+      sendChat(msgObj);
+    } catch (e) {
+      console.warn("sendChat failed", e);
+    }
     setText("");
     setReplyTo(null);
   };
@@ -2941,30 +2993,60 @@ export default function Chat() {
 
   const onFileSelected = (file) => {
     if (!file) return;
-    const offerId = `offer-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
-    outgoingPendingOffers.current[offerId] = { file, acceptingPeers: new Set() };
-    const meta = { id: offerId, name: file.name, size: file.size, mime: file.type, from: getLocalPeerId() || myId };
-    try { offerFileToPeers(meta); } catch (e) { console.warn("offerFileToPeers failed", e); }
+    const offerId = `offer-${Date.now()}-${Math.random()
+      .toString(36)
+      .slice(2, 7)}`;
+    outgoingPendingOffers.current[offerId] = {
+      file,
+      acceptingPeers: new Set(),
+    };
+    const meta = {
+      id: offerId,
+      name: file.name,
+      size: file.size,
+      mime: file.type,
+      from: getLocalPeerId() || myId,
+    };
+    try {
+      offerFileToPeers(meta);
+    } catch (e) {
+      console.warn("offerFileToPeers failed", e);
+    }
 
-    // local system message
     setMessages((m) => {
-      const sys = { id: `sys-offer-${offerId}`, from: "System", text: `Offered file: ${file.name} (${formatBytesAdaptive(file.size)})`, ts: Date.now(), type: "system" };
+      const sys = {
+        id: `sys-offer-${offerId}`,
+        from: "System",
+        text: `Offered file: ${file.name} (${formatBytesAdaptive(file.size)})`,
+        ts: Date.now(),
+        type: "system",
+      };
       const next = [...m, sys];
       persistMessages(next);
       return next;
     });
 
-    // create sender transfer entry (waiting)
-    setTransfer(offerId, { name: file.name, label: "Offered", transferred: 0, total: file.size, ts: Date.now() });
+    setTransfer(offerId, {
+      name: file.name,
+      label: "Offered",
+      transferred: 0,
+      total: file.size,
+      ts: Date.now(),
+    });
 
-    // cleanup after 10s if nobody accepted
     setTimeout(() => {
       try {
         const pending = outgoingPendingOffers.current[offerId];
         if (!pending) return;
         if (pending.acceptingPeers.size === 0) {
           setMessages((m) => {
-            const sys = { id: `sys-offer-expire-${offerId}`, from: "System", text: `No one accepted the file: ${file.name}`, ts: Date.now(), type: "system" };
+            const sys = {
+              id: `sys-offer-expire-${offerId}`,
+              from: "System",
+              text: `No one accepted the file: ${file.name}`,
+              ts: Date.now(),
+              type: "system",
+            };
             const next = [...m, sys];
             persistMessages(next);
             return next;
@@ -2972,11 +3054,13 @@ export default function Chat() {
           removeTransfer(offerId);
           delete outgoingPendingOffers.current[offerId];
         }
-      } catch (e) { console.warn("post-offer cleanup failed", e); }
+      } catch (e) {
+        console.warn("post-offer cleanup failed", e);
+      }
     }, 10000);
   };
 
-  // accept incoming file offer: prompt save location then respond
+  // accept incoming file offer
   const acceptFileOffer = async (offerId) => {
     const entry = incomingFileOffers[offerId];
     if (!entry) return;
@@ -2985,15 +3069,32 @@ export default function Chat() {
       if (supportsNativeFileSystem()) {
         const opts = {
           suggestedName: offer.name,
-          types: [{
-            description: offer.mime || "file",
-            accept: { [offer.mime || "application/octet-stream"]: [ "." + (offer.name.split(".").pop() || "") ] }
-          }]
+          types: [
+            {
+              description: offer.mime || "file",
+              accept: {
+                [offer.mime || "application/octet-stream"]: [
+                  "." + (offer.name.split(".").pop() || ""),
+                ],
+              },
+            },
+          ],
         };
-        const handle = await (window.showSaveFilePicker ? window.showSaveFilePicker(opts) : (window.chooseFileSystemEntries ? window.chooseFileSystemEntries({ type: "save-file", accepts: opts.types }) : null));
+        const handle = await (window.showSaveFilePicker
+          ? window.showSaveFilePicker(opts)
+          : window.chooseFileSystemEntries
+          ? window.chooseFileSystemEntries({
+              type: "save-file",
+              accepts: opts.types,
+            })
+          : null);
         if (!handle) {
           respondToFileOffer(offerId, offer.from, false);
-          setIncomingFileOffers((s) => { const c = { ...s }; delete c[offerId]; return c; });
+          setIncomingFileOffers((s) => {
+            const c = { ...s };
+            delete c[offerId];
+            return c;
+          });
           removeTransfer(offerId);
           return;
         }
@@ -3001,20 +3102,44 @@ export default function Chat() {
         saveHandlesRef.current[offerId] = writable;
         fileWriteStatusRef.current[offerId] = 0;
         respondToFileOffer(offerId, offer.from, true);
-        setIncomingFileOffers((s) => { const c = { ...s }; delete c[offerId]; return c; });
+        setIncomingFileOffers((s) => {
+          const c = { ...s };
+          delete c[offerId];
+          return c;
+        });
         setMessages((m) => {
-          const sys = { id: `sys-accept-${offerId}`, from: "System", text: `Accepted file: ${offer.name}`, ts: Date.now(), type: "system" };
+          const sys = {
+            id: `sys-accept-${offerId}`,
+            from: "System",
+            text: `Accepted file: ${offer.name}`,
+            ts: Date.now(),
+            type: "system",
+          };
           const next = [...m, sys];
           persistMessages(next);
           return next;
         });
-        // progress UI already set by earlier offer handler
-        setTransfer(offerId, (prev) => ({ ...(prev || {}), label: "Receiving", transferred: 0, total: offer.size || null }));
+        setTransfer(offerId, (prev) => ({
+          ...(prev || {}),
+          label: "Receiving",
+          transferred: 0,
+          total: offer.size || null,
+        }));
       } else {
         respondToFileOffer(offerId, offer.from, true);
-        setIncomingFileOffers((s) => { const c = { ...s }; delete c[offerId]; return c; });
+        setIncomingFileOffers((s) => {
+          const c = { ...s };
+          delete c[offerId];
+          return c;
+        });
         setMessages((m) => {
-          const sys = { id: `sys-accept-${offerId}`, from: "System", text: `Accepted file: ${offer.name} — browser may not support direct disk writes.`, ts: Date.now(), type: "system" };
+          const sys = {
+            id: `sys-accept-${offerId}`,
+            from: "System",
+            text: `Accepted file: ${offer.name} — browser may not support direct disk writes.`,
+            ts: Date.now(),
+            type: "system",
+          };
           const next = [...m, sys];
           persistMessages(next);
           return next;
@@ -3022,8 +3147,14 @@ export default function Chat() {
       }
     } catch (e) {
       console.warn("acceptFileOffer failed", e);
-      try { respondToFileOffer(offerId, offer.from, false); } catch (er) {}
-      setIncomingFileOffers((s) => { const c = { ...s }; delete c[offerId]; return c; });
+      try {
+        respondToFileOffer(offerId, offer.from, false);
+      } catch (er) {}
+      setIncomingFileOffers((s) => {
+        const c = { ...s };
+        delete c[offerId];
+        return c;
+      });
       removeTransfer(offerId);
     }
   };
@@ -3031,8 +3162,16 @@ export default function Chat() {
   const ignoreFileOffer = (offerId) => {
     const entry = incomingFileOffers[offerId];
     if (!entry) return;
-    try { respondToFileOffer(offerId, entry.offer.from, false); } catch (e) { console.warn("ignoreFileOffer failed", e); }
-    setIncomingFileOffers((s) => { const copy = { ...s }; delete copy[offerId]; return copy; });
+    try {
+      respondToFileOffer(offerId, entry.offer.from, false);
+    } catch (e) {
+      console.warn("ignoreFileOffer failed", e);
+    }
+    setIncomingFileOffers((s) => {
+      const copy = { ...s };
+      delete copy[offerId];
+      return copy;
+    });
     removeTransfer(offerId);
   };
 
@@ -3044,39 +3183,87 @@ export default function Chat() {
     setJoinedBootstrap(id);
     localStorage.setItem("ph_hub_bootstrap", id);
     localStorage.setItem("ph_should_autojoin", "true");
-    const sysPlain = { id: `sys-create-${Date.now()}`, from: "System", text: `You created the hub. Share this ID: ${id}`, ts: Date.now(), type: "system" };
-    setMessages((m) => { const next = [...m, sysPlain]; persistMessages(next); return next; });
-    try { broadcastSystem("system_public", `[${username || "Host"}] is the host`, `sys-host-${id}`); } catch (e) {}
+    const sysPlain = {
+      id: `sys-create-${Date.now()}`,
+      from: "System",
+      text: `You created the hub. Share this ID: ${id}`,
+      ts: Date.now(),
+      type: "system",
+    };
+    setMessages((m) => {
+      const next = [...m, sysPlain];
+      persistMessages(next);
+      return next;
+    });
+    try {
+      broadcastSystem(
+        "system_public",
+        `[${username || "Host"}] is the host`,
+        `sys-host-${id}`
+      );
+    } catch (e) {}
     setMenuOpen(false);
   };
 
   const handleJoinHub = async () => {
     const id = prompt("Enter Hub bootstrap peer ID (the host's ID):");
-    if (!id) { setMenuOpen(false); return; }
+    if (!id) {
+      setMenuOpen(false);
+      return;
+    }
     const trimmed = id.trim();
     joinHub(trimmed);
     setJoinedBootstrap(trimmed);
     localStorage.setItem("ph_hub_bootstrap", trimmed);
     localStorage.setItem("ph_should_autojoin", "true");
-    try { connectToPeer(trimmed, handleIncoming, handlePeerListUpdate, username); } catch (e) {}
+    try {
+      connectToPeer(trimmed, handleIncoming, handlePeerListUpdate, username);
+    } catch (e) {}
     const friendly = getPeerNames()[trimmed] || trimmed;
-    const sys = { id: `sys-join-${Date.now()}`, from: "System", text: `Join requested for hub: ${friendly}`, ts: Date.now(), type: "system" };
-    setMessages((m) => { const next = [...m, sys]; persistMessages(next); return next; });
+    const sys = {
+      id: `sys-join-${Date.now()}`,
+      from: "System",
+      text: `Join requested for hub: ${friendly}`,
+      ts: Date.now(),
+      type: "system",
+    };
+    setMessages((m) => {
+      const next = [...m, sys];
+      persistMessages(next);
+      return next;
+    });
     setMenuOpen(false);
   };
 
-  const handleLeaveClick = () => { setMenuOpen(false); setConfirmLeaveOpen(true); };
+  const handleLeaveClick = () => {
+    setMenuOpen(false);
+    setConfirmLeaveOpen(true);
+  };
 
   const handleConfirmLeave = () => {
-    try { leaveHub(); } catch (e) {}
+    try {
+      leaveHub();
+    } catch (e) {}
     setJoinedBootstrap("");
     localStorage.removeItem("ph_hub_bootstrap");
     localStorage.removeItem("ph_should_autojoin");
-    try { localStorage.removeItem(LS_MSGS); } catch (e) {}
+    try {
+      localStorage.removeItem(LS_MSGS);
+    } catch (e) {}
     seenSystemIdsRef.current.clear();
     setMessages([]);
-    const sys = { id: `sys-left-${Date.now()}`, from: "System", text: "You left the hub. Auto-join cleared.", ts: Date.now(), type: "system" };
-    setMessages((m) => { const next = [...m, sys]; persistMessages(next); return next; });
+    const sys = {
+      id: `sys-left-${Date.now()}`,
+      from: "System",
+      text: "You left the hub. Auto-join cleared.",
+      ts: Date.now(),
+      type: "system",
+    };
+    setMessages((m) => {
+      const next = [...m, sys];
+      persistMessages(next);
+      return next;
+    });
     setConfirmLeaveOpen(false);
   };
 
@@ -3086,48 +3273,74 @@ export default function Chat() {
   const handleTapMessage = (m) => {
     if (m.type && m.type.toString().startsWith("system")) return;
     setReplyTo({ id: m.id, from: m.from, text: m.text });
-    const input = document.querySelector('input[placeholder="Type a message..."]');
+    const input = document.querySelector(
+      'input[placeholder="Type a message..."]'
+    );
     if (input) input.focus();
     const originPeerId = m.fromId || m.from;
     if (m.id && originPeerId) {
-      try { sendAckRead(m.id, originPeerId); addUniqueToMsgArray(m.id, "reads", getLocalPeerId() || myId); } catch (e) { console.warn("sendAckRead error", e); }
+      try {
+        sendAckRead(m.id, originPeerId);
+        addUniqueToMsgArray(m.id, "reads", getLocalPeerId() || myId);
+      } catch (e) {
+        console.warn("sendAckRead error", e);
+      }
     }
   };
 
-  // recording: long-press logic on clip button (press & hold 3s to start)
-  const onClipPointerDown = (e) => {
-    // start a timer; if pointer still down after RECORD_PRESS_MS -> begin recording
-    if (recordPressTimerRef.current) clearTimeout(recordPressTimerRef.current);
+  // FIXED: Recording event handlers
+  const onClipPointerDown = useCallback((e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    
+    // Clear any existing timer
+    if (recordPressTimerRef.current) {
+      clearTimeout(recordPressTimerRef.current);
+    }
+    
+    // Start timer for long press detection
     recordPressTimerRef.current = setTimeout(() => {
-      // start recording
       startRecording();
     }, RECORD_PRESS_MS);
-  };
+  }, []);
 
-  const onClipPointerUp = (e) => {
-    // cancel pending press -> if recording, stop recording
+  const onClipPointerUp = useCallback((e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    
+    // Cancel pending press timer
     if (recordPressTimerRef.current) {
       clearTimeout(recordPressTimerRef.current);
       recordPressTimerRef.current = null;
     }
+    
     if (isRecording) {
+      // If currently recording, stop it
       stopRecording();
     } else {
-      // short press: open file picker (default attach)
+      // Short press: open file picker
       handleFileInputClick();
     }
-  };
+  }, [isRecording]);
+
+  // Prevent context menu on long press
+  const onClipContextMenu = useCallback((e) => {
+    e.preventDefault();
+  }, []);
 
   // start recording (MediaRecorder)
   const startRecording = async () => {
     if (isRecording) return;
     try {
       recordedChunksRef.current = [];
-      const constraints = { audio: true, video: { width: { ideal: 640 }, height: { ideal: 480 } } };
+      const constraints = {
+        audio: true,
+        video: { width: { ideal: 640 }, height: { ideal: 480 } },
+      };
       const stream = await navigator.mediaDevices.getUserMedia(constraints);
       mediaStreamRef.current = stream;
 
-      // show live preview via srcObject (safe)
+      // show live preview via srcObject
       try {
         if (previewVideoRef.current) {
           previewVideoRef.current.srcObject = stream;
@@ -3135,23 +3348,35 @@ export default function Chat() {
           previewVideoRef.current.playsInline = true;
           previewVideoRef.current.play().catch(() => {});
         }
-      } catch (e) { console.warn("preview play failed", e); }
+      } catch (e) {
+        console.warn("preview play failed", e);
+      }
 
       let options = { mimeType: "video/webm; codecs=vp8,opus" };
       let recorder;
-      try { recorder = new MediaRecorder(stream, options); } catch (_) { recorder = new MediaRecorder(stream); }
+      try {
+        recorder = new MediaRecorder(stream, options);
+      } catch (_) {
+        recorder = new MediaRecorder(stream);
+      }
       mediaRecorderRef.current = recorder;
 
       recorder.ondataavailable = (ev) => {
-        if (ev && ev.data && ev.data.size > 0) recordedChunksRef.current.push(ev.data);
+        if (ev && ev.data && ev.data.size > 0)
+          recordedChunksRef.current.push(ev.data);
       };
 
       recorder.onstop = async () => {
         // stop media tracks
-        try { mediaStreamRef.current && mediaStreamRef.current.getTracks().forEach((t) => t.stop()); } catch (e) {}
+        try {
+          mediaStreamRef.current &&
+            mediaStreamRef.current.getTracks().forEach((t) => t.stop());
+        } catch (e) {}
 
         // blob from chunks
-        const blob = new Blob(recordedChunksRef.current, { type: "video/webm" });
+        const blob = new Blob(recordedChunksRef.current, {
+          type: "video/webm",
+        });
         const size = blob.size || 0;
         const name = `recording-${Date.now()}.webm`;
         const localUrl = URL.createObjectURL(blob);
@@ -3168,15 +3393,24 @@ export default function Chat() {
           reads: [getLocalPeerId() || myId],
           media: { blob, mime: blob.type, size, name, url: localUrl },
         };
-        setMessages((m) => { const next = [...m, msgObj]; persistMessages(next); return next; });
+        setMessages((m) => {
+          const next = [...m, msgObj];
+          persistMessages(next);
+          return next;
+        });
 
         // sender progress UI
-        setTransfer(id, { name, label: "Sending", transferred: 0, total: size, ts: Date.now() });
+        setTransfer(id, {
+          name,
+          label: "Sending",
+          transferred: 0,
+          total: size,
+          ts: Date.now(),
+        });
 
         // send chat (structured clone of object with blob)
         try {
           sendChat(msgObj);
-          // without fine-grained sender progress we mark done after we receive a file_transfer_done or simply mark as sent
           setTransfer(id, (prev) => ({ ...(prev || {}), transferred: size }));
           setTimeout(() => removeTransfer(id), 1500);
         } catch (e) {
@@ -3185,17 +3419,22 @@ export default function Chat() {
         }
 
         // cleanup preview element srcObject & revoke URL later
-        try { if (previewVideoRef.current) previewVideoRef.current.srcObject = null; } catch (_) {}
-        setTimeout(() => { try { URL.revokeObjectURL(localUrl); } catch (er) {} }, 30000);
+        try {
+          if (previewVideoRef.current) previewVideoRef.current.srcObject = null;
+        } catch (_) {}
+        setTimeout(() => {
+          try {
+            URL.revokeObjectURL(localUrl);
+          } catch (er) {}
+        }, 30000);
       };
 
-      recorder.start(1000); // ondataevery
+      recorder.start(1000);
       setIsRecording(true);
       setRecordRemaining(MAX_RECORD_SECONDS);
       recordTimerRef.current = setInterval(() => {
         setRecordRemaining((s) => {
           if (s <= 1) {
-            // time's up -> stop
             stopRecording();
             return 0;
           }
@@ -3204,7 +3443,11 @@ export default function Chat() {
       }, 1000);
     } catch (e) {
       console.warn("startRecording failed", e);
-      try { if (mediaStreamRef.current) mediaStreamRef.current.getTracks().forEach((t) => t.stop()); } catch (er) {}
+      alert(`Recording failed: ${e.message}. Please check camera/microphone permissions.`);
+      try {
+        if (mediaStreamRef.current)
+          mediaStreamRef.current.getTracks().forEach((t) => t.stop());
+      } catch (er) {}
       setIsRecording(false);
     }
   };
@@ -3213,37 +3456,84 @@ export default function Chat() {
   const stopRecording = async () => {
     if (!isRecording) return;
     try {
-      if (mediaRecorderRef.current && mediaRecorderRef.current.state !== "inactive") {
+      if (
+        mediaRecorderRef.current &&
+        mediaRecorderRef.current.state !== "inactive"
+      ) {
         mediaRecorderRef.current.stop();
       }
-    } catch (e) { console.warn("stopRecording failed", e); }
-    try { if (recordTimerRef.current) clearInterval(recordTimerRef.current); recordTimerRef.current = null; } catch (e) {}
+    } catch (e) {
+      console.warn("stopRecording failed", e);
+    }
+    try {
+      if (recordTimerRef.current) {
+        clearInterval(recordTimerRef.current);
+        recordTimerRef.current = null;
+      }
+    } catch (e) {}
     setIsRecording(false);
     setRecordRemaining(MAX_RECORD_SECONDS);
   };
+
+  // Cleanup on unmount
+  useEffect(() => {
+    return () => {
+      // Clean up recording timers
+      if (recordPressTimerRef.current) clearTimeout(recordPressTimerRef.current);
+      if (recordTimerRef.current) clearInterval(recordTimerRef.current);
+      if (typingTimeoutRef.current) clearTimeout(typingTimeoutRef.current);
+      
+      // Stop media stream
+      if (mediaStreamRef.current) {
+        mediaStreamRef.current.getTracks().forEach((t) => t.stop());
+      }
+    };
+  }, []);
 
   // render progress bars floating at top
   const renderProgressBars = () => {
     const ids = Object.keys(transfers);
     if (!ids.length) return null;
-    // show newest first
-    const sorted = ids.sort((a, b) => (transfers[b].ts || 0) - (transfers[a].ts || 0));
+    const sorted = ids.sort(
+      (a, b) => (transfers[b].ts || 0) - (transfers[a].ts || 0)
+    );
     return (
       <div className="fixed left-1/2 -translate-x-1/2 top-4 z-60 pointer-events-none">
         <div className="space-y-2 pointer-events-auto">
           {sorted.map((id) => {
             const t = transfers[id];
-            const pct = t.total ? Math.min(100, Math.round((t.transferred || 0) / t.total * 100)) : 0;
+            const pct = t.total
+              ? Math.min(
+                  100,
+                  Math.round(((t.transferred || 0) / t.total) * 100)
+                )
+              : 0;
             return (
-              <div key={id} className="w-[560px] max-w-[calc(100vw-40px)] bg-black/80 text-white p-3 rounded-md shadow-lg">
+              <div
+                key={id}
+                className="w-[560px] max-w-[calc(100vw-40px)] bg-black/80 text-white p-3 rounded-md shadow-lg"
+              >
                 <div className="flex items-center justify-between text-sm mb-1">
-                  <div className="truncate" style={{ maxWidth: "80%" }}>{t.label || "Transfer"}: {t.name}</div>
-                  <div className="text-xs opacity-80">{t.total ? `${formatBytesAdaptive(t.transferred)}/${formatBytesAdaptive(t.total)}` : `${formatBytesAdaptive(t.transferred)}`}</div>
+                  <div className="truncate" style={{ maxWidth: "80%" }}>
+                    {t.label || "Transfer"}: {t.name}
+                  </div>
+                  <div className="text-xs opacity-80">
+                    {t.total
+                      ? `${formatBytesAdaptive(
+                          t.transferred
+                        )}/${formatBytesAdaptive(t.total)}`
+                      : `${formatBytesAdaptive(t.transferred)}`}
+                  </div>
                 </div>
                 <div className="w-full h-2 bg-white/20 rounded overflow-hidden">
-                  <div style={{ width: `${pct}%` }} className="h-full bg-blue-500 transition-all" />
+                  <div
+                    style={{ width: `${pct}%` }}
+                    className="h-full bg-blue-500 transition-all"
+                  />
                 </div>
-                <div className="text-right text-[11px] opacity-80 mt-1">{pct}%</div>
+                <div className="text-right text-[11px] opacity-80 mt-1">
+                  {pct}%
+                </div>
               </div>
             );
           })}
@@ -3259,14 +3549,35 @@ export default function Chat() {
     return keys.map((k) => {
       const entry = incomingFileOffers[k];
       const offer = entry.offer;
-      const remaining = Math.max(0, Math.ceil((entry.expiresAt - Date.now()) / 1000));
+      const remaining = Math.max(
+        0,
+        Math.ceil((entry.expiresAt - Date.now()) / 1000)
+      );
       return (
-        <div key={k} className="mb-2 p-2 rounded bg-white/10 text-sm text-black">
-          <div className="font-semibold">File offer: {offer.name} ({formatBytesAdaptive(offer.size)})</div>
-          <div className="text-xs text-gray-600">From: {peerNamesMap[offer.from] || offer.from} — Expires in {remaining}s</div>
+        <div
+          key={k}
+          className="mb-2 p-2 rounded bg-white/10 text-sm text-black"
+        >
+          <div className="font-semibold">
+            File offer: {offer.name} ({formatBytesAdaptive(offer.size)})
+          </div>
+          <div className="text-xs text-gray-600">
+            From: {peerNamesMap[offer.from] || offer.from} — Expires in{" "}
+            {remaining}s
+          </div>
           <div className="mt-2 flex justify-center gap-2">
-            <button onClick={() => acceptFileOffer(k)} className="px-3 py-1 rounded bg-gradient-to-br from-green-500 to-green-600 text-white">Accept</button>
-            <button onClick={() => ignoreFileOffer(k)} className="px-3 py-1 rounded bg-gradient-to-br from-red-500 to-red-600 text-white">Ignore</button>
+            <button
+              onClick={() => acceptFileOffer(k)}
+              className="px-3 py-1 rounded bg-gradient-to-br from-green-500 to-green-600 text-white"
+            >
+              Accept
+            </button>
+            <button
+              onClick={() => ignoreFileOffer(k)}
+              className="px-3 py-1 rounded bg-gradient-to-br from-red-500 to-red-600 text-white"
+            >
+              Ignore
+            </button>
           </div>
         </div>
       );
@@ -3277,39 +3588,55 @@ export default function Chat() {
   const renderMessage = (m, idx) => {
     const from = m.from ?? "peer";
     const txt = typeof m.text === "string" ? m.text : JSON.stringify(m.text);
-    const time = new Date(m.ts).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+    const time = new Date(m.ts).toLocaleTimeString([], {
+      hour: "2-digit",
+      minute: "2-digit",
+    });
     const isSystem = m.type && m.type.toString().startsWith("system");
-    const isMe = (m.fromId || m.from) === (getLocalPeerId() || myId) || from === username;
+    const isMe =
+      (m.fromId || m.from) === (getLocalPeerId() || myId) || from === username;
 
     if (isSystem) {
       return (
         <div key={`${m.id ?? m.ts}-${idx}`} className="w-full text-center my-2">
-          <div className="inline-block px-3 py-1 rounded bg-white/20 text-blue-500 text-sm">{m.text}</div>
+          <div className="inline-block px-3 py-1 rounded bg-white/20 text-blue-500 text-sm">
+            {m.text}
+          </div>
         </div>
       );
     }
 
     // media handling: if message has media (blob or url) show circular preview for videos
     if (m.media && (m.media.mime || "").startsWith("video")) {
-      // media.url expected to be objectURL or created earlier
       return (
-        <div key={`${m.id ?? m.ts}-${idx}`} onClick={() => handleTapMessage(m)} className={`p-3 rounded-2xl max-w-[60%] mb-2 cursor-pointer ${isMe ? "ml-auto bg-blue-500 text-white" : "bg-white/100 text-black"}`}>
+        <div
+          key={`${m.id ?? m.ts}-${idx}`}
+          onClick={() => handleTapMessage(m)}
+          className={`p-3 rounded-2xl max-w-[60%] mb-2 cursor-pointer ${
+            isMe ? "ml-auto bg-blue-500 text-white" : "bg-white/100 text-black"
+          }`}
+        >
           <div className="text-xs font-bold flex items-center">
             <div className="flex-1">{isMe ? "You" : from}</div>
             <div className="text-[10px] text-gray-700 /70 ml-2">{time}</div>
           </div>
 
           <div className="mt-2 flex items-center justify-center">
-            {/* circular video preview */}
-            <div style={{ width: 120, height: 120 }} className="rounded-full overflow-hidden bg-black relative">
-              {/* video tag for playback (use src or url) */}
+            <div
+              style={{ width: 120, height: 120 }}
+              className="rounded-full overflow-hidden bg-black relative"
+            >
               <video
                 src={m.media.url}
                 controls
                 playsInline
-                style={{ width: "100%", height: "100%", objectFit: "cover", borderRadius: "9999px" }}
+                style={{
+                  width: "100%",
+                  height: "100%",
+                  objectFit: "cover",
+                  borderRadius: "9999px",
+                }}
               />
-              {/* download overlay center */}
               <a
                 href={m.media.url}
                 download={m.media.name}
@@ -3326,14 +3653,23 @@ export default function Chat() {
 
     // default chat bubble
     return (
-      <div onClick={() => handleTapMessage(m)} key={`${m.id ?? m.ts}-${idx}`} className={`p-2 rounded-2xl max-w-[50%] mb-2 cursor-pointer ${isMe ? "ml-auto bg-blue-500 text-white" : "bg-white/100 text-black"}`}>
+      <div
+        onClick={() => handleTapMessage(m)}
+        key={`${m.id ?? m.ts}-${idx}`}
+        className={`p-2 rounded-2xl max-w-[50%] mb-2 cursor-pointer ${
+          isMe ? "ml-auto bg-blue-500 text-white" : "bg-white/100 text-black"
+        }`}
+      >
         <div className="text-xs font-bold flex items-center">
           <div className="flex-1">{isMe ? "You" : from}</div>
           <div className="text-[10px] text-gray-700 /70 ml-2">{time}</div>
         </div>
         {m.replyTo && (
           <div className="mt-2 mb-2 p-2 rounded border border-white/5 text-xs text-gray-600 bg-gray-300">
-            <strong className="text-xs text-blue-400">Reply to {m.replyTo.from}:</strong> {m.replyTo.text}
+            <strong className="text-xs text-blue-400">
+              Reply to {m.replyTo.from}:
+            </strong>{" "}
+            {m.replyTo.text}
           </div>
         )}
         <div className="break-words">{txt}</div>
@@ -3350,7 +3686,9 @@ export default function Chat() {
   };
 
   // connected peer names
-  const connectedNames = peers.length ? peers.map((id) => peerNamesMap[id] || id) : [];
+  const connectedNames = peers.length
+    ? peers.map((id) => peerNamesMap[id] || id)
+    : [];
 
   // menu outside click handler
   useEffect(() => {
@@ -3372,9 +3710,14 @@ export default function Chat() {
           if (!m || m.type !== "chat") return;
           const origin = m.fromId || m.from;
           if (!origin || origin === localId) return;
-          const alreadyRead = Array.isArray(m.reads) && m.reads.includes(localId);
+          const alreadyRead =
+            Array.isArray(m.reads) && m.reads.includes(localId);
           if (!alreadyRead) {
-            try { sendAckRead(m.id, origin); } catch (e) { console.warn("sendAckRead error (on visibility):", e); }
+            try {
+              sendAckRead(m.id, origin);
+            } catch (e) {
+              console.warn("sendAckRead error (on visibility):", e);
+            }
             addUniqueToMsgArray(m.id, "reads", localId);
           }
         });
@@ -3383,24 +3726,34 @@ export default function Chat() {
     document.addEventListener("visibilitychange", onVisibility);
     if (document.visibilityState === "visible") onVisibility();
     return () => document.removeEventListener("visibilitychange", onVisibility);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [messages, myId]);
-
-  // send typing on input
-  useEffect(() => {
-    if (!username) return;
-    if (typingTimeoutRef.current) clearTimeout(typingTimeoutRef.current);
-    try { if (typeof sendTyping === "function") sendTyping(username, true); } catch (e) {}
-    typingTimeoutRef.current = setTimeout(() => {
-      try { if (typeof sendTyping === "function") sendTyping(username, false); } catch (e) {}
-    }, 1200);
-    return () => { if (typingTimeoutRef.current) clearTimeout(typingTimeoutRef.current); };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [text]);
+  }, [messages, myId, addUniqueToMsgArray]);
 
   // render
   return (
     <>
+      {/* FIXED: Added missing preview video element */}
+      {isRecording && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80">
+          <div className="relative">
+            <video
+              ref={previewVideoRef}
+              className="w-64 h-48 rounded-lg bg-black"
+              muted
+              playsInline
+            />
+            <div className="absolute top-2 left-2 bg-red-500 text-white px-2 py-1 rounded text-sm">
+              REC • {recordRemaining}s
+            </div>
+            <button
+              onClick={stopRecording}
+              className="absolute bottom-2 left-1/2 transform -translate-x-1/2 bg-red-600 text-white px-4 py-2 rounded"
+            >
+              Stop Recording
+            </button>
+          </div>
+        </div>
+      )}
+
       {/* floating progress bars */}
       {renderProgressBars()}
 
@@ -3410,30 +3763,62 @@ export default function Chat() {
             <div className="text-sm text-blue-600">YourID</div>
             <div className="font-mono">{myId || "..."}</div>
             <div className="text-sm text-blue-600">Name: {username}</div>
-            <div className="text-xs text-purple-500 mt-1">Auto-join: {joinedBootstrap || "none"}</div>
+            <div className="text-xs text-purple-500 mt-1">
+              Auto-join: {joinedBootstrap || "none"}
+            </div>
           </div>
 
           <div className="relative" ref={menuRef}>
-            <button onClick={() => setMenuOpen((s) => !s)} className="p-2 rounded-full bg-white/10 text-white" aria-label="Menu">
-              <svg width="18" height="18" viewBox="0 0 24 24" className="inline-block">
+            <button
+              onClick={() => setMenuOpen((s) => !s)}
+              className="p-2 rounded-full bg-white/10 text-white"
+              aria-label="Menu"
+            >
+              <svg
+                width="18"
+                height="18"
+                viewBox="0 0 24 24"
+                className="inline-block"
+              >
                 <circle cx="12" cy="5" r="2" fill="blue" />
                 <circle cx="12" cy="12" r="2" fill="blue" />
                 <circle cx="12" cy="19" r="2" fill="blue" />
               </svg>
             </button>
 
-            <div className={`absolute right-0 mt-2 w-44 bg-white/10 backdrop-blur rounded-lg shadow-lg z-50 transform origin-top-right transition-all duration-200 ${menuOpen ? "opacity-100 scale-100 pointer-events-auto" : "opacity-0 scale-95 pointer-events-none"}`}>
-              <button onClick={handleCreateHub} className="w-full text-left px-4 py-3 hover:bg-white/20 border-b border-white/5 text-green-500">
+            <div
+              className={`absolute right-0 mt-2 w-44 bg-white/10 backdrop-blur rounded-lg shadow-lg z-50 transform origin-top-right transition-all duration-200 ${
+                menuOpen
+                  ? "opacity-100 scale-100 pointer-events-auto"
+                  : "opacity-0 scale-95 pointer-events-none"
+              }`}
+            >
+              <button
+                onClick={handleCreateHub}
+                className="w-full text-left px-4 py-3 hover:bg-white/20 border-b border-white/5 text-green-500"
+              >
                 <span className="font-semibold">Create Hub</span>
-                <div className="text-xs text-gray-400">Make this device the host</div>
+                <div className="text-xs text-gray-400">
+                  Make this device the host
+                </div>
               </button>
-              <button onClick={handleJoinHub} className="w-full text-left px-4 py-3 hover:bg-white/20 border-b border-white/5 text-blue-500">
+              <button
+                onClick={handleJoinHub}
+                className="w-full text-left px-4 py-3 hover:bg-white/20 border-b border-white/5 text-blue-500"
+              >
                 <span className="font-semibold">Join Hub</span>
-                <div className="text-xs text-gray-400">Enter a host ID to join</div>
+                <div className="text-xs text-gray-400">
+                  Enter a host ID to join
+                </div>
               </button>
-              <button onClick={handleLeaveClick} className="w-full text-left px-4 py-3 hover:bg-white/20 text-red-500 rounded-b-lg">
+              <button
+                onClick={handleLeaveClick}
+                className="w-full text-left px-4 py-3 hover:bg-white/20 text-red-500 rounded-b-lg"
+              >
                 <span className="font-semibold">Leave</span>
-                <div className="text-xs text-gray-400">Leave and clear local history</div>
+                <div className="text-xs text-gray-400">
+                  Leave and clear local history
+                </div>
               </button>
             </div>
           </div>
@@ -3444,7 +3829,9 @@ export default function Chat() {
 
         <main className="flex-1 overflow-auto mb-4 min-h-0">
           <div style={{ paddingBottom: 8 }}>
-            {messages.length === 0 && <div className="text-sm text-white/60">No messages yet</div>}
+            {messages.length === 0 && (
+              <div className="text-sm text-white/60">No messages yet</div>
+            )}
             {messages.map((m, i) => renderMessage(m, i))}
             <div ref={messagesEndRef} />
           </div>
@@ -3455,76 +3842,96 @@ export default function Chat() {
 
         <footer className="mt-auto">
           {typingSummary()}
-          <div className="mb-3 text-sm text-blue-600">Connected peers: {connectedNames.length === 0 ? <span className="text-red-500">none</span> : connectedNames.join(", ")}</div>
+          <div className="mb-3 text-sm text-blue-600">
+            Connected peers:{" "}
+            {connectedNames.length === 0 ? (
+              <span className="text-red-500">none</span>
+            ) : (
+              connectedNames.join(", ")
+            )}
+          </div>
 
           {renderIncomingFileOffers()}
 
           {replyTo && (
             <div className="mb-2 p-3 bg-white/10 text-gray-500 rounded-lg">
-              Replying to <strong>{replyTo.from}</strong>: <span className="text-sm text-blue-400">{replyTo.text}</span>
-              <button onClick={() => setReplyTo(null)} className="ml-4 text-xs text-red-500">x</button>
+              Replying to <strong>{replyTo.from}</strong>:{" "}
+              <span className="text-sm text-blue-400">{replyTo.text}</span>
+              <button
+                onClick={() => setReplyTo(null)}
+                className="ml-4 text-xs text-red-500"
+              >
+                x
+              </button>
             </div>
           )}
 
-          {/* Input row with clip long-press and send */}
+          {/* FIXED: Input row with proper event handlers for long-press recording */}
           <div className="relative w-full flex items-center">
-  {/* clip icon inside input (left) */}
-  <svg
-    onClick={handleFileInputClick}
-    xmlns="http://www.w3.org/2000/svg"
-    viewBox="0 0 24 24"
-    fill="none"
-    stroke="currentColor"
-    strokeWidth="1.6"
-    strokeLinecap="round"
-    strokeLinejoin="round"
-    className="absolute left-3 top-1/2 -translate-y-1/2 w-5 h-5 text-blue-500 cursor-pointer hover:text-blue-700"
-    title="Attach File"
-    style={{ display: "block", color: "#2563EB", fill: "none" }}
-    aria-hidden="true"
-  >
-    <path d="M21.44 11.05l-9.19 9.19a5.5 5.5 0 01-7.78-7.78l9.19-9.19a3.5 3.5 0 015 5l-9.2 9.19a1.5 1.5 0 01-2.12-2.12l8.49-8.49" />
-  </svg>
+            {/* FIXED: clip icon with proper pointer events */}
+            <svg
+              onPointerDown={onClipPointerDown}
+              onPointerUp={onClipPointerUp}
+              onContextMenu={onClipContextMenu}
+              xmlns="http://www.w3.org/2000/svg"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="1.6"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              className={`absolute left-3 top-1/2 -translate-y-1/2 w-5 h-5 cursor-pointer hover:text-blue-700 select-none ${
+                isRecording ? 'text-red-500 animate-pulse' : 'text-blue-500'
+              }`}
+              title={isRecording ? "Recording... (release to stop)" : "Hold to record video, tap for files"}
+              style={{ display: "block", fill: "none", touchAction: "none" }}
+              aria-hidden="true"
+            >
+              <path d="M21.44 11.05l-9.19 9.19a5.5 5.5 0 01-7.78-7.78l9.19-9.19a3.5 3.5 0 015 5l-9.2 9.19a1.5 1.5 0 01-2.12-2.12l8.49-8.49" />
+            </svg>
 
-  <input
-    value={text}
-    onChange={(e) => setText(e.target.value)}
-    placeholder="Type a message..."
-    className="flex-1 p-3 pl-10 pr-10 bg-white/10 placeholder-blue-300 text-blue-500 font-mono rounded-3xl border-2"
-    onKeyDown={(e) => {
-      if (e.key === "Enter") send();
-    }}
-    aria-label="Type a message"
-  />
+            <input
+              value={text}
+              onChange={(e) => setText(e.target.value)}
+              placeholder="Type a message..."
+              className="flex-1 p-3 pl-10 pr-10 bg-white/10 placeholder-blue-300 text-blue-500 font-mono rounded-3xl border-2"
+              onKeyDown={(e) => {
+                if (e.key === "Enter") send();
+              }}
+              aria-label="Type a message"
+            />
 
-  {/* send icon inside input (right) - outlined paper plane */}
-  <svg
-    onClick={send}
-    xmlns="http://www.w3.org/2000/svg"
-    viewBox="0 0 24 24"
-    fill="none"
-    stroke="currentColor"
-    strokeWidth="1.7"
-    strokeLinecap="round"
-    strokeLinejoin="round"
-    className="absolute right-3 top-1/2 -translate-y-1/2 w-6 h-6 text-blue-500 cursor-pointer hover:text-blue-700"
-    title="Send"
-    style={{ display: "block", color: "#2563EB", fill: "none" }}
-    aria-hidden="true"
-  >
-    <line x1="22" y1="2" x2="11" y2="13" />
-    <polygon points="22 2 15 22 11 13 2 9 22 2" />
-  </svg>
-</div>
-
-
+            {/* send icon */}
+            <svg
+              onClick={send}
+              xmlns="http://www.w3.org/2000/svg"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="1.7"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              className="absolute right-3 top-1/2 -translate-y-1/2 w-6 h-6 text-blue-500 cursor-pointer hover:text-blue-700"
+              title="Send"
+              style={{ display: "block", color: "#2563EB", fill: "none" }}
+              aria-hidden="true"
+            >
+              <line x1="22" y1="2" x2="11" y2="13" />
+              <polygon points="22 2 15 22 11 13 2 9 22 2" />
+            </svg>
+          </div>
 
           {/* recording info row */}
           {isRecording && (
             <div className="mt-2 flex items-center justify-between text-sm text-red-500">
               <div>Recording — remaining: {recordRemaining}s</div>
               <div>
-                <button onClick={stopRecording} className="px-3 py-1 rounded bg-red-600 text-white">Stop</button>
+                <button
+                  onClick={stopRecording}
+                  className="px-3 py-1 rounded bg-red-600 text-white"
+                >
+                  Stop
+                </button>
               </div>
             </div>
           )}
@@ -3534,13 +3941,28 @@ export default function Chat() {
       {/* Leave confirmation modal */}
       {confirmLeaveOpen && (
         <div className="fixed inset-0 z-60 flex items-center justify-center">
-          <div className="absolute inset-0 bg-black/50" onClick={handleCancelLeave} />
+          <div
+            className="absolute inset-0 bg-black/50"
+            onClick={handleCancelLeave}
+          />
           <div className="relative bg-white/10 p-6 rounded-lg backdrop-blur text-white w-80 z-70">
             <h3 className="text-lg font-bold mb-2">Leave Hub?</h3>
-            <p className="text-sm text-white/80 mb-4">Leaving will clear your local chat history. Are you sure?</p>
+            <p className="text-sm text-white/80 mb-4">
+              Leaving will clear your local chat history. Are you sure?
+            </p>
             <div className="flex justify-center gap-2">
-              <button onClick={handleCancelLeave} className="px-3 py-2 rounded bg-gradient-to-br from-green-500 to-green-600 text-white">Cancel</button>
-              <button onClick={handleConfirmLeave} className="px-3 py-2 rounded bg-gradient-to-br from-red-500 to-red-600 text-white">Leave & Clear</button>
+              <button
+                onClick={handleCancelLeave}
+                className="px-3 py-2 rounded bg-gradient-to-br from-green-500 to-green-600 text-white"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={handleConfirmLeave}
+                className="px-3 py-2 rounded bg-gradient-to-br from-red-500 to-red-600 text-white"
+              >
+                Leave & Clear
+              </button>
             </div>
           </div>
         </div>
@@ -3548,4 +3970,3 @@ export default function Chat() {
     </>
   );
 }
-
