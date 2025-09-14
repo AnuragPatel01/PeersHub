@@ -683,7 +683,7 @@ export default function Chat() {
 
   return (
     <>
-      <div className="min-h-[92vh] md:h-[92vh] max-w-[400px] w-full mx-auto bg-gray-50 text-purple-600 p-6 flex flex-col rounded-4xl">
+      <div className="h-[92vh] md:h-[92vh] max-w-[400px] w-full mx-auto bg-gray-50 text-purple-600 p-6 flex flex-col rounded-4xl">
         <header className="flex items-center justify-between mb-4">
           <div className="flex gap-2.5">
             <div className="text-sm text-blue-600">YourID</div>
@@ -756,7 +756,7 @@ export default function Chat() {
         <div className="w-full text-white h-0.5 bg-white" />
         <br />
 
-        <main className="flex-1 overflow-auto mb-4">
+        <main className="flex-1 overflow-auto mb-4 min-h-0">
           <div style={{ paddingBottom: 8 }}>
             {messages.length === 0 && (
               <div className="text-sm text-white/60">No messages yet</div>
