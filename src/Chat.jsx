@@ -851,152 +851,6 @@
 //   );
 // }
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 // src/components/Chat.jsx
 import "./App.css";
 import React, { useEffect, useState, useRef } from "react";
@@ -1200,8 +1054,14 @@ export default function Chat() {
       // update receiver progress entry
       setTransfer(offerId, (prev) => {
         const total = prev?.total || 0;
-        const transferred = fileWriteStatusRef.current[offerId] || prev?.transferred || 0;
-        return { ...prev, total, transferred, direction: prev?.direction || "receiving" };
+        const transferred =
+          fileWriteStatusRef.current[offerId] || prev?.transferred || 0;
+        return {
+          ...prev,
+          total,
+          transferred,
+          direction: prev?.direction || "receiving",
+        };
       });
 
       if (final) {
@@ -1215,7 +1075,11 @@ export default function Chat() {
         try {
           setTransfer(offerId, (prev) => ({
             ...prev,
-            transferred: prev?.total ?? fileWriteStatusRef.current[offerId] ?? prev?.transferred ?? 0,
+            transferred:
+              prev?.total ??
+              fileWriteStatusRef.current[offerId] ??
+              prev?.transferred ??
+              0,
           }));
           setTimeout(() => removeTransfer(offerId), 1200);
         } catch (e) {}
@@ -1254,16 +1118,22 @@ export default function Chat() {
       });
 
       // cleanup UI record
-      try { removeTransfer(offerId); } catch (er) {}
+      try {
+        removeTransfer(offerId);
+      } catch (er) {}
       // try close writer if present
       try {
         const w = saveHandlesRef.current[offerId];
         if (w) {
-          try { await w.close(); } catch (er) {}
+          try {
+            await w.close();
+          } catch (er) {}
           delete saveHandlesRef.current[offerId];
         }
       } catch (er) {}
-      try { delete fileWriteStatusRef.current[offerId]; } catch (er) {}
+      try {
+        delete fileWriteStatusRef.current[offerId];
+      } catch (er) {}
     }
   };
 
@@ -1353,13 +1223,18 @@ export default function Chat() {
         setIncomingFileOffers((s) => {
           const copy = { ...s };
           if (!copy[offerId]) return s;
-          try { respondToFileOffer(offerId, offer.from, false); } catch (e) {}
+          try {
+            respondToFileOffer(offerId, offer.from, false);
+          } catch (e) {}
           delete copy[offerId];
           return copy;
         });
       }, 10000);
 
-      maybeNotify(peerNamesMap[offer.from] || offer.from, `File offer: ${offer.name}`);
+      maybeNotify(
+        peerNamesMap[offer.from] || offer.from,
+        `File offer: ${offer.name}`
+      );
       return;
     }
 
@@ -1432,14 +1307,23 @@ export default function Chat() {
       payloadOrText.id
     ) {
       upsertIncomingChat(payloadOrText);
-      maybeNotify(payloadOrText.fromName || payloadOrText.from, payloadOrText.text);
+      maybeNotify(
+        payloadOrText.fromName || payloadOrText.from,
+        payloadOrText.text
+      );
 
       // auto ack_read now if visible & not from self
       try {
         const origin = payloadOrText.from || payloadOrText.origin || null;
         const localId = getLocalPeerId() || myId;
-        if (origin && origin !== localId && document.visibilityState === "visible") {
-          try { sendAckRead(payloadOrText.id, origin); } catch (e) {}
+        if (
+          origin &&
+          origin !== localId &&
+          document.visibilityState === "visible"
+        ) {
+          try {
+            sendAckRead(payloadOrText.id, origin);
+          } catch (e) {}
           addUniqueToMsgArray(payloadOrText.id, "reads", localId);
         }
       } catch (e) {}
@@ -1523,7 +1407,8 @@ export default function Chat() {
           if (!m || m.type !== "chat") return;
           const origin = m.fromId || m.from;
           if (!origin || origin === localId) return;
-          const alreadyRead = Array.isArray(m.reads) && m.reads.includes(localId);
+          const alreadyRead =
+            Array.isArray(m.reads) && m.reads.includes(localId);
           if (!alreadyRead) {
             try {
               sendAckRead(m.id, origin);
@@ -1769,7 +1654,9 @@ export default function Chat() {
       );
     }
 
-    return <span className="inline-block w-2 h-2 rounded-full bg-gray-400 ml-2" />;
+    return (
+      <span className="inline-block w-2 h-2 rounded-full bg-gray-400 ml-2" />
+    );
   };
 
   // message renderer
@@ -1787,7 +1674,7 @@ export default function Chat() {
     if (isSystem) {
       return (
         <div key={`${m.id ?? m.ts}-${idx}`} className="w-full text-center my-2">
-          <div className="inline-block px-3 py-1 rounded bg-white/20 text-blue-500 text-sm">
+          <div className="inline-block px-3 py-1 rounded bg-white/20 text-blue-500 text-sm max-w-[80%] whitespace-normal break-words">
             {m.text}
           </div>
         </div>
@@ -1823,7 +1710,9 @@ export default function Chat() {
   // file input (sender) - file picker
   const onFileSelected = async (file) => {
     if (!file) return;
-    const offerId = `offer-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+    const offerId = `offer-${Date.now()}-${Math.random()
+      .toString(36)
+      .slice(2, 7)}`;
     outgoingPendingOffers.current[offerId] = {
       file,
       acceptingPeers: new Set(),
@@ -2081,16 +1970,37 @@ export default function Chat() {
       const offer = entry.offer;
       const remaining = Math.max(0, Math.ceil((entry.expiresAt - now) / 1000));
       return (
-        <div key={k} className="mb-2 p-2 rounded bg-white/10 text-sm text-black">
+        <div
+          key={k}
+          className="mb-2 p-2 rounded bg-white/10 text-sm text-black"
+        >
           <div className="font-semibold">
-            File offer: {offer.name} ({Math.round((offer.size || 0) / 1024)} KB)
+            <span className="inline-block max-w-[260px] whitespace-normal break-words">
+              File offer:&nbsp;
+              <strong className="break-words">{offer.name}</strong>
+            </span>
+            <span className="ml-2 text-xs text-gray-500">
+              ({Math.round((offer.size || 0) / 1024)} KB)
+            </span>
           </div>
+
           <div className="text-xs text-gray-600">
-            From: {peerNamesMap[offer.from] || offer.from} — Expires in {remaining}s
+            From: {peerNamesMap[offer.from] || offer.from} — Expires in{" "}
+            {remaining}s
           </div>
           <div className="mt-2 flex justify-center gap-2">
-            <button onClick={() => acceptFileOffer(k)} className="px-3 py-1 rounded bg-gradient-to-br from-green-500 to-green-600 text-white">Accept</button>
-            <button onClick={() => ignoreFileOffer(k)} className="px-3 py-1 rounded bg-gradient-to-br from-red-500 to-red-600 text-white">Ignore</button>
+            <button
+              onClick={() => acceptFileOffer(k)}
+              className="px-3 py-1 rounded bg-gradient-to-br from-green-500 to-green-600 text-white"
+            >
+              Accept
+            </button>
+            <button
+              onClick={() => ignoreFileOffer(k)}
+              className="px-3 py-1 rounded bg-gradient-to-br from-red-500 to-red-600 text-white"
+            >
+              Ignore
+            </button>
           </div>
         </div>
       );
@@ -2127,21 +2037,34 @@ export default function Chat() {
         <div className="fixed left-1/2 -translate-x-1/2 top-4 z-50">
           <div className="bg-black/80 text-white rounded-lg p-3 shadow-lg w-[min(720px,calc(100%-40px))]">
             {Object.entries(transfers).map(([id, t]) => {
-              const pct = t.total ? Math.min(100, Math.round((t.transferred / t.total) * 100)) : 0;
+              const pct = t.total
+                ? Math.min(100, Math.round((t.transferred / t.total) * 100))
+                : 0;
               const label = t.label || id;
-              const directionText = t.direction === "sending" ? "Sending" : "Receiving";
-              const humanTransferred = `${Math.round((t.transferred || 0) / 1024)} KB`;
+              const directionText =
+                t.direction === "sending" ? "Sending" : "Receiving";
+              const humanTransferred = `${Math.round(
+                (t.transferred || 0) / 1024
+              )} KB`;
               const humanTotal = `${Math.round((t.total || 0) / 1024)} KB`;
               return (
                 <div key={id} className="mb-3 last:mb-0">
                   <div className="flex justify-between items-center text-sm mb-1">
-                    <div className="font-semibold truncate max-w-[70%]">{directionText}: {label}</div>
+                    <div className="font-semibold max-w-[70%] break-words whitespace-normal">
+                      {directionText}: {label}
+                    </div>
+
                     <div className="text-xs">{pct}%</div>
                   </div>
                   <div className="w-full bg-white/10 rounded h-2 overflow-hidden mb-1">
-                    <div style={{ width: `${pct}%` }} className="h-2 bg-blue-500 transition-all" />
+                    <div
+                      style={{ width: `${pct}%` }}
+                      className="h-2 bg-blue-500 transition-all"
+                    />
                   </div>
-                  <div className="text-xs text-white/60">{humanTransferred} / {humanTotal}</div>
+                  <div className="text-xs text-white/60">
+                    {humanTransferred} / {humanTotal}
+                  </div>
                 </div>
               );
             })}
@@ -2155,32 +2078,64 @@ export default function Chat() {
             <div className="text-sm text-blue-600">YourID</div>
             <div className="font-mono">{myId || "..."}</div>
             <div className="text-sm text-blue-600">Name: {username}</div>
-            <div className="text-xs text-purple-500 mt-1">Auto-join: {joinedBootstrap || "none"}</div>
+            <div className="text-xs text-purple-500 mt-1">
+              Auto-join: {joinedBootstrap || "none"}
+            </div>
           </div>
 
           <div className="relative" ref={menuRef}>
-            <button onClick={() => setMenuOpen((s) => !s)} className="p-2 rounded-full bg-white/10 text-white" aria-label="Menu">
-              <svg width="18" height="18" viewBox="0 0 24 24" className="inline-block">
+            <button
+              onClick={() => setMenuOpen((s) => !s)}
+              className="p-2 rounded-full bg-white/10 text-white"
+              aria-label="Menu"
+            >
+              <svg
+                width="18"
+                height="18"
+                viewBox="0 0 24 24"
+                className="inline-block"
+              >
                 <circle cx="12" cy="5" r="2" fill="blue" />
                 <circle cx="12" cy="12" r="2" fill="blue" />
                 <circle cx="12" cy="19" r="2" fill="blue" />
               </svg>
             </button>
 
-            <div className={`absolute right-0 mt-2 w-44 bg-white/10 backdrop-blur rounded-lg shadow-lg z-50 transform origin-top-right transition-all duration-200 ${menuOpen ? "opacity-100 scale-100 pointer-events-auto" : "opacity-0 scale-95 pointer-events-none"}`}>
-              <button onClick={handleCreateHub} className="w-full text-left px-4 py-3 hover:bg-white/20 border-b border-white/5 text-green-500">
+            <div
+              className={`absolute right-0 mt-2 w-44 bg-white/10 backdrop-blur rounded-lg shadow-lg z-50 transform origin-top-right transition-all duration-200 ${
+                menuOpen
+                  ? "opacity-100 scale-100 pointer-events-auto"
+                  : "opacity-0 scale-95 pointer-events-none"
+              }`}
+            >
+              <button
+                onClick={handleCreateHub}
+                className="w-full text-left px-4 py-3 hover:bg-white/20 border-b border-white/5 text-green-500"
+              >
                 <span className="font-semibold">Create Hub</span>
-                <div className="text-xs text-gray-400">Make this device the host</div>
+                <div className="text-xs text-gray-400">
+                  Make this device the host
+                </div>
               </button>
 
-              <button onClick={handleJoinHub} className="w-full text-left px-4 py-3 hover:bg-white/20 border-b border-white/5 text-blue-500">
+              <button
+                onClick={handleJoinHub}
+                className="w-full text-left px-4 py-3 hover:bg-white/20 border-b border-white/5 text-blue-500"
+              >
                 <span className="font-semibold">Join Hub</span>
-                <div className="text-xs text-gray-400">Enter a host ID to join</div>
+                <div className="text-xs text-gray-400">
+                  Enter a host ID to join
+                </div>
               </button>
 
-              <button onClick={handleLeaveClick} className="w-full text-left px-4 py-3 hover:bg-white/20 text-red-500 rounded-b-lg">
+              <button
+                onClick={handleLeaveClick}
+                className="w-full text-left px-4 py-3 hover:bg-white/20 text-red-500 rounded-b-lg"
+              >
                 <span className="font-semibold">Leave</span>
-                <div className="text-xs text-gray-400">Leave and clear local history</div>
+                <div className="text-xs text-gray-400">
+                  Leave and clear local history
+                </div>
               </button>
             </div>
           </div>
@@ -2191,7 +2146,9 @@ export default function Chat() {
 
         <main className="flex-1 overflow-auto mb-4 min-h-0">
           <div style={{ paddingBottom: 8 }}>
-            {messages.length === 0 && <div className="text-sm text-white/60">No messages yet</div>}
+            {messages.length === 0 && (
+              <div className="text-sm text-white/60">No messages yet</div>
+            )}
             {messages.map((m, i) => renderMessage(m, i))}
             <div ref={messagesEndRef} />
           </div>
@@ -2203,20 +2160,42 @@ export default function Chat() {
         <footer className="mt-auto">
           {typingSummary()}
           <div className="mb-3 text-sm text-blue-600">
-            Connected peers: {connectedNames.length === 0 ? <span className="text-red-500">none</span> : connectedNames.join(", ")}
+            Connected peers:{" "}
+            {connectedNames.length === 0 ? (
+              <span className="text-red-500">none</span>
+            ) : (
+              connectedNames.join(", ")
+            )}
           </div>
 
           {renderIncomingFileOffers()}
 
           {replyTo && (
             <div className="mb-2 p-3 bg-white/10 text-gray-500 rounded-lg">
-              Replying to <strong>{replyTo.from}</strong>: <span className="text-sm text-blue-400">{replyTo.text}</span>
-              <button onClick={() => setReplyTo(null)} className="ml-4 text-xs text-red-500">x</button>
+              Replying to <strong>{replyTo.from}</strong>:{" "}
+              <span className="text-sm text-blue-400">{replyTo.text}</span>
+              <button
+                onClick={() => setReplyTo(null)}
+                className="ml-4 text-xs text-red-500"
+              >
+                x
+              </button>
             </div>
           )}
           <div className="relative w-full flex items-center">
             {/* clip icon inside input (left) */}
-            <svg onClick={handleFileInputClick} xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="absolute left-3 top-1/2 -translate-y-1/2 w-5 h-5 text-blue-500 cursor-pointer hover:text-blue-700" title="Attach File">
+            <svg
+              onClick={handleFileInputClick}
+              xmlns="http://www.w3.org/2000/svg"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="2"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              className="absolute left-3 top-1/2 -translate-y-1/2 w-5 h-5 text-blue-500 cursor-pointer hover:text-blue-700"
+              title="Attach File"
+            >
               <path d="M21.44 11.05l-9.19 9.19a5.5 5.5 0 01-7.78-7.78l9.19-9.19a3.5 3.5 0 015 5l-9.2 9.19a1.5 1.5 0 01-2.12-2.12l8.49-8.49" />
             </svg>
 
@@ -2231,7 +2210,14 @@ export default function Chat() {
             />
 
             {/* send icon inside input (right) */}
-            <svg onClick={send} xmlns="http://www.w3.org/2000/svg" fill="currentColor" viewBox="0 0 24 24" className="absolute right-3 top-1/2 -translate-y-1/2 w-5 h-5 text-blue-500 cursor-pointer hover:text-blue-700" title="Send">
+            <svg
+              onClick={send}
+              xmlns="http://www.w3.org/2000/svg"
+              fill="currentColor"
+              viewBox="0 0 24 24"
+              className="absolute right-3 top-1/2 -translate-y-1/2 w-5 h-5 text-blue-500 cursor-pointer hover:text-blue-700"
+              title="Send"
+            >
               <path d="M3.4 20.6L21 12 3.4 3.4 3 10l11 2-11 2z" />
             </svg>
           </div>
@@ -2241,13 +2227,28 @@ export default function Chat() {
       {/* Leave confirmation modal */}
       {confirmLeaveOpen && (
         <div className="fixed inset-0 z-60 flex items-center justify-center">
-          <div className="absolute inset-0 bg-black/50" onClick={handleCancelLeave} />
+          <div
+            className="absolute inset-0 bg-black/50"
+            onClick={handleCancelLeave}
+          />
           <div className="relative bg-white/10 p-6 rounded-lg backdrop-blur text-white w-80 z-70">
             <h3 className="text-lg font-bold mb-2">Leave Hub?</h3>
-            <p className="text-sm text-white/80 mb-4">Leaving will clear your local chat history. Are you sure?</p>
+            <p className="text-sm text-white/80 mb-4">
+              Leaving will clear your local chat history. Are you sure?
+            </p>
             <div className="flex justify-center gap-2">
-              <button onClick={handleCancelLeave} className="px-3 py-2 rounded bg-gradient-to-br from-green-500 to-green-600 text-white">Cancel</button>
-              <button onClick={handleConfirmLeave} className="px-3 py-2 rounded bg-gradient-to-br from-red-500 to-red-600 text-white">Leave & Clear</button>
+              <button
+                onClick={handleCancelLeave}
+                className="px-3 py-2 rounded bg-gradient-to-br from-green-500 to-green-600 text-white"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={handleConfirmLeave}
+                className="px-3 py-2 rounded bg-gradient-to-br from-red-500 to-red-600 text-white"
+              >
+                Leave & Clear
+              </button>
             </div>
           </div>
         </div>
