@@ -2960,8 +2960,8 @@ export default function Chat() {
 
   return (
     <>
-      <div className="min-h-[92vh] mx-auto bg-gradient-to-br from-slate-900 via-blue-600 to-slate-900 flex items-center justify-center p-4">
-        <div className="w-full max-w-md bg-white/10 backdrop-blur-lg rounded-3xl shadow-2xl border border-white/20 overflow-hidden">
+      <div className="  bg-gradient-to-br from-slate-900 via-blue-600 to-slate-900 flex items-center justify-center p-4">
+        <div className="w-full max-w-md  bg-white/10 backdrop-blur-lg rounded-3xl shadow-2xl border border-white/20 overflow-hidden">
           {/* Header */}
           <header className="p-4 border-b border-white/10 bg-white/5">
             <div className="flex items-center justify-between mb-2">
