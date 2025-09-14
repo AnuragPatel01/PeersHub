@@ -2336,6 +2336,8 @@ export default function Chat() {
   const peerRef = useRef(null);
   const menuRef = useRef(null);
   const createdUrlsRef = useRef(new Set());
+  const incomingBuffersRef = useRef({}); // offerId -> { chunks: [], bytes: number }
+
 
   // center preview modal
   const [centerPreviewOpen, setCenterPreviewOpen] = useState(false);
@@ -2459,51 +2461,44 @@ export default function Chat() {
   };
 
   // handle incoming file chunk and write to disk using saved handle
-  const handleIncomingFileChunk = async (data) => {
-    let { id: offerId, seq, chunk, final } = data || {};
-    try {
-      if (
-        chunk &&
-        chunk.data &&
-        (chunk.data instanceof ArrayBuffer ||
-          ArrayBuffer.isView(chunk.data) ||
-          chunk.data instanceof Blob)
-      ) {
-        chunk = chunk.data;
-      }
+  // handle incoming file chunk and write to disk using saved handle
+const handleIncomingFileChunk = async (data) => {
+  // defensive: some runtimes wrap chunk under .data (PeerJS / structured clone variants)
+  let { id: offerId, seq, chunk, final } = data || {};
+  try {
+    // unwrap wrapper if necessary (common PeerJS quirk)
+    if (
+      chunk &&
+      chunk.data &&
+      (chunk.data instanceof ArrayBuffer ||
+        ArrayBuffer.isView(chunk.data) ||
+        chunk.data instanceof Blob)
+    ) {
+      chunk = chunk.data;
+    }
 
-      const writer = saveHandlesRef.current[offerId];
-      if (!writer) {
-        console.warn("No writable for offer", offerId, "— ignoring chunk", seq);
-        return;
-      }
-
+    // If we have a FileSystem writable for this offer => write directly (preferred)
+    const writer = saveHandlesRef.current[offerId];
+    if (writer) {
+      // chunk may be Blob, ArrayBuffer, or TypedArray
       if (chunk instanceof Blob) {
         await writer.write(chunk);
-        fileWriteStatusRef.current[offerId] =
-          (fileWriteStatusRef.current[offerId] || 0) + (chunk.size || 0);
+        fileWriteStatusRef.current[offerId] = (fileWriteStatusRef.current[offerId] || 0) + (chunk.size || 0);
       } else if (chunk instanceof ArrayBuffer || ArrayBuffer.isView(chunk)) {
-        const buf =
-          chunk instanceof ArrayBuffer
-            ? new Uint8Array(chunk)
-            : new Uint8Array(chunk.buffer || chunk);
+        const buf = chunk instanceof ArrayBuffer ? new Uint8Array(chunk) : new Uint8Array(chunk.buffer || chunk);
         await writer.write(buf);
-        fileWriteStatusRef.current[offerId] =
-          (fileWriteStatusRef.current[offerId] || 0) + buf.byteLength;
+        fileWriteStatusRef.current[offerId] = (fileWriteStatusRef.current[offerId] || 0) + buf.byteLength;
+      } else if (chunk == null && final) {
+        // some senders send a final marker with null chunk — ignore here (closing handled below)
       } else {
         console.warn("Unknown chunk type for offer", offerId, seq, chunk);
       }
 
+      // update receiver progress entry
       setTransfer(offerId, (prev) => {
         const total = prev?.total || 0;
-        const transferred =
-          fileWriteStatusRef.current[offerId] || prev?.transferred || 0;
-        return {
-          ...prev,
-          total,
-          transferred,
-          direction: prev?.direction || "receiving",
-        };
+        const transferred = fileWriteStatusRef.current[offerId] || prev?.transferred || 0;
+        return { ...prev, total, transferred, direction: prev?.direction || "receiving" };
       });
 
       if (final) {
@@ -2512,66 +2507,142 @@ export default function Chat() {
         } catch (e) {
           console.warn("Error closing writer for offer", offerId, e);
         }
-
+        // mark 100% and schedule clean
         try {
-          setTransfer(offerId, (prev) => ({
-            ...prev,
-            transferred:
-              prev?.total ??
-              fileWriteStatusRef.current[offerId] ??
-              prev?.transferred ??
-              0,
-          }));
+          setTransfer(offerId, (prev) => ({ ...prev, transferred: prev?.total ?? fileWriteStatusRef.current[offerId] ?? prev?.transferred ?? 0 }));
           setTimeout(() => removeTransfer(offerId), 1200);
         } catch (e) {}
-
+        // cleanup
         delete saveHandlesRef.current[offerId];
         delete fileWriteStatusRef.current[offerId];
 
+        // notify UI + persist nothing more (file is on disk)
         setMessages((m) => {
-          const sys = {
-            id: `sys-file-done-${offerId}`,
-            from: "System",
-            text: "File received and saved to disk",
-            ts: Date.now(),
-            type: "system",
-          };
+          const sys = { id: `sys-file-done-${offerId}`, from: "System", text: "File received and saved to disk", ts: Date.now(), type: "system" };
           const next = [...m, sys];
           persistMessages(next);
           return next;
         });
       }
-    } catch (e) {
-      console.warn("handleIncomingFileChunk error", e);
-      setMessages((m) => {
-        const sys = {
-          id: `sys-file-error-${offerId}-${Date.now()}`,
-          from: "System",
-          text: `Error writing received file chunk: ${e.message || e}`,
-          ts: Date.now(),
-          type: "system",
-        };
-        const next = [...m, sys];
-        persistMessages(next);
-        return next;
-      });
-      try {
-        removeTransfer(offerId);
-      } catch (er) {}
-      try {
-        const w = saveHandlesRef.current[offerId];
-        if (w) {
-          try {
-            await w.close();
-          } catch (er) {}
-          delete saveHandlesRef.current[offerId];
-        }
-      } catch (er) {}
-      try {
-        delete fileWriteStatusRef.current[offerId];
-      } catch (er) {}
+      return;
     }
-  };
+
+    // ------- Fallback buffering path (no writable) -------
+    // Buffer chunks in-memory for this offerId
+    if (!incomingBuffersRef.current[offerId]) {
+      incomingBuffersRef.current[offerId] = { chunks: [], bytes: 0 };
+    }
+    const bufEntry = incomingBuffersRef.current[offerId];
+
+    if (chunk instanceof Blob) {
+      bufEntry.chunks.push(chunk);
+      bufEntry.bytes += chunk.size || 0;
+    } else if (chunk instanceof ArrayBuffer || ArrayBuffer.isView(chunk)) {
+      const blobPart = chunk instanceof ArrayBuffer ? new Blob([chunk]) : new Blob([chunk.buffer || chunk]);
+      bufEntry.chunks.push(blobPart);
+      bufEntry.bytes += blobPart.size || 0;
+    } else if (chunk == null && !final) {
+      // ignore unexpected nulls
+    } else {
+      // unknown chunk type — log and skip
+      console.warn("Unknown chunk type (buffer fallback) for offer", offerId, seq, chunk);
+    }
+
+    // update progress UI based on buffered bytes
+    setTransfer(offerId, (prev) => {
+      const total = prev?.total || 0;
+      const transferred = bufEntry.bytes || prev?.transferred || 0;
+      return { ...prev, total, transferred, direction: prev?.direction || "receiving" };
+    });
+
+    // when final chunk arrives, assemble Blob, persist, and create message
+    if (final) {
+      try {
+        const assembled = new Blob(bufEntry.chunks, { type: bufEntry.chunks[0]?.type || "application/octet-stream" });
+        // persist into IndexedDB using your saveBlob helper so it survives refresh
+        try {
+          await saveBlob(offerId, assembled);
+        } catch (e) {
+          console.warn("saveBlob (fallback) failed for", offerId, e);
+        }
+
+        // create a preview URL and message for UI
+        try {
+          const previewUrl = URL.createObjectURL(assembled);
+          // register created URL so we can revoke it later
+          createdUrlsRef.current.add(previewUrl);
+
+          setMessages((m) => {
+            // avoid duplicating message if already present
+            const exists = m.find((x) => x.id === offerId);
+            if (exists) {
+              // update fileUrl if missing
+              const next = m.map((x) => (x.id === offerId ? { ...x, fileUrl: previewUrl } : x));
+              persistMessages(next);
+              return next;
+            }
+            const sysMsg = {
+              id: offerId,
+              type: "file",
+              from: "peer",
+              fromId: null,
+              fromName: "peer",
+              fileName: `file-${offerId}`,
+              fileSize: assembled.size || 0,
+              fileType: assembled.type || "video/webm",
+              fileId: offerId,
+              fileUrl: previewUrl,
+              ts: Date.now(),
+              deliveries: [],
+              reads: [],
+            };
+            const next = [...m, sysMsg];
+            persistMessages(next);
+            return next;
+          });
+
+          // final transfer UI update
+          setTransfer(offerId, (prev) => ({ ...prev, transferred: bufEntry.bytes || prev?.transferred || 0 }));
+          setTimeout(() => removeTransfer(offerId), 1200);
+        } catch (e) {
+          console.warn("preview creation after assembly failed", e);
+        }
+      } catch (e) {
+        console.warn("Error assembling buffered chunks for offer", offerId, e);
+        setMessages((m) => {
+          const sys = { id: `sys-file-error-${offerId}-${Date.now()}`, from: "System", text: `Error assembling received file: ${e.message || e}`, ts: Date.now(), type: "system" };
+          const next = [...m, sys];
+          persistMessages(next);
+          return next;
+        });
+      } finally {
+        // cleanup buffer entry
+        try {
+          delete incomingBuffersRef.current[offerId];
+        } catch (e) {}
+      }
+    }
+  } catch (e) {
+    console.warn("handleIncomingFileChunk error (outer)", e);
+    setMessages((m) => {
+      const sys = { id: `sys-file-error-${Date.now()}`, from: "System", text: `Error processing incoming file chunk: ${e.message || e}`, ts: Date.now(), type: "system" };
+      const next = [...m, sys];
+      persistMessages(next);
+      return next;
+    });
+    // best-effort cleanup
+    try {
+      delete incomingBuffersRef.current[offerId];
+    } catch (er) {}
+    try {
+      delete fileWriteStatusRef.current[offerId];
+    } catch (er) {}
+    try {
+      delete saveHandlesRef.current[offerId];
+    } catch (er) {}
+  }
+};
+
 
   // incoming messages callback from webrtc
   const handleIncoming = async (from, payloadOrText) => {
@@ -3677,304 +3748,315 @@ export default function Chat() {
 
   // UI rendering
   // This should be inside your Chat component function
-return (
-  <>
-    {/* Floating progress panel */}
-    {Object.keys(transfers).length > 0 && (
-      <div className="fixed left-1/2 -translate-x-1/2 top-4 z-50">
-        <div className="bg-black/80 text-white rounded-lg p-3 shadow-lg w-[min(720px,calc(100%-40px))]">
-          {Object.entries(transfers).map(([id, t]) => {
-            const pct = t.total
-              ? Math.min(100, Math.round((t.transferred / t.total) * 100))
-              : 0;
-            const label = t.label || id;
-            const directionText =
-              t.direction === "sending" ? "Sending" : "Receiving";
-            const humanTransferred = `${Math.round(
-              (t.transferred || 0) / 1024
-            )} KB`;
-            const humanTotal = `${Math.round((t.total || 0) / 1024)} KB`;
-            return (
-              <div key={id} className="mb-3 last:mb-0">
-                <div className="flex justify-between items-center text-sm mb-1">
-                  <div className="font-semibold max-w-[70%] break-words whitespace-normal">
-                    {directionText}: {label}
+  return (
+    <>
+      {/* Floating progress panel */}
+      {Object.keys(transfers).length > 0 && (
+        <div className="fixed left-1/2 -translate-x-1/2 top-4 z-50">
+          <div className="bg-black/80 text-white rounded-lg p-3 shadow-lg w-[min(720px,calc(100%-40px))]">
+            {Object.entries(transfers).map(([id, t]) => {
+              const pct = t.total
+                ? Math.min(100, Math.round((t.transferred / t.total) * 100))
+                : 0;
+              const label = t.label || id;
+              const directionText =
+                t.direction === "sending" ? "Sending" : "Receiving";
+              const humanTransferred = `${Math.round(
+                (t.transferred || 0) / 1024
+              )} KB`;
+              const humanTotal = `${Math.round((t.total || 0) / 1024)} KB`;
+              return (
+                <div key={id} className="mb-3 last:mb-0">
+                  <div className="flex justify-between items-center text-sm mb-1">
+                    <div className="font-semibold max-w-[70%] break-words whitespace-normal">
+                      {directionText}: {label}
+                    </div>
+                    <div className="text-xs">{pct}%</div>
                   </div>
-                  <div className="text-xs">{pct}%</div>
+                  <div className="w-full bg-white/10 rounded h-2 overflow-hidden mb-1">
+                    <div
+                      style={{ width: `${pct}%` }}
+                      className="h-2 bg-blue-500 transition-all"
+                    />
+                  </div>
+                  <div className="text-xs text-white/60">
+                    {humanTransferred} / {humanTotal}
+                  </div>
                 </div>
-                <div className="w-full bg-white/10 rounded h-2 overflow-hidden mb-1">
-                  <div
-                    style={{ width: `${pct}%` }}
-                    className="h-2 bg-blue-500 transition-all"
-                  />
-                </div>
-                <div className="text-xs text-white/60">
-                  {humanTransferred} / {humanTotal}
-                </div>
-              </div>
-            );
-          })}
-        </div>
-      </div>
-    )}
-
-    <div className="h-[92vh] md:h-[92vh] max-w-[420px] w-full mx-auto bg-gray-50 text-purple-600 p-6 flex flex-col rounded-4xl">
-      <header className="flex items-center justify-between mb-4">
-        <div className="flex gap-2.5">
-          <div className="text-sm text-blue-600">YourID</div>
-          <div className="font-mono">{myId || "..."}</div>
-          <div className="text-sm text-blue-600">Name: {username}</div>
-          <div className="text-xs text-purple-500 mt-1">
-            Auto-join: {joinedBootstrap || "none"}
+              );
+            })}
           </div>
         </div>
+      )}
 
-        <div className="relative" ref={menuRef}>
-          <button
-            onClick={() => setMenuOpen((s) => !s)}
-            className="p-2 rounded-full bg-white/10 text-white"
-            aria-label="Menu"
-          >
-            <svg
-              width="18"
-              height="18"
-              viewBox="0 0 24 24"
-              className="inline-block"
-            >
-              <circle cx="12" cy="5" r="2" fill="blue" />
-              <circle cx="12" cy="12" r="2" fill="blue" />
-              <circle cx="12" cy="19" r="2" fill="blue" />
-            </svg>
-          </button>
-
-          <div
-            className={`absolute right-0 mt-2 w-44 bg-white/10 backdrop-blur rounded-lg shadow-lg z-50 transform origin-top-right transition-all duration-200 ${
-              menuOpen
-                ? "opacity-100 scale-100 pointer-events-auto"
-                : "opacity-0 scale-95 pointer-events-none"
-            }`}
-          >
-            <button
-              onClick={handleCreateHub}
-              className="w-full text-left px-4 py-3 hover:bg-white/20 border-b border-white/5 text-green-500"
-            >
-              <span className="font-semibold">Create Hub</span>
-              <div className="text-xs text-gray-400">
-                Make this device the host
-              </div>
-            </button>
-
-            <button
-              onClick={handleJoinHub}
-              className="w-full text-left px-4 py-3 hover:bg-white/20 border-b border-white/5 text-blue-500"
-            >
-              <span className="font-semibold">Join Hub</span>
-              <div className="text-xs text-gray-400">
-                Enter a host ID to join
-              </div>
-            </button>
-
-            <button
-              onClick={handleLeaveClick}
-              className="w-full text-left px-4 py-3 hover:bg-white/20 text-red-500 rounded-b-lg"
-            >
-              <span className="font-semibold">Leave</span>
-              <div className="text-xs text-gray-400">
-                Leave and clear local history
-              </div>
-            </button>
+      <div className="h-[92vh] md:h-[92vh] max-w-[420px] w-full mx-auto bg-gray-50 text-purple-600 p-6 flex flex-col rounded-4xl">
+        <header className="flex items-center justify-between mb-4">
+          <div className="flex gap-2.5">
+            <div className="text-sm text-blue-600">YourID</div>
+            <div className="font-mono">{myId || "..."}</div>
+            <div className="text-sm text-blue-600">Name: {username}</div>
+            <div className="text-xs text-purple-500 mt-1">
+              Auto-join: {joinedBootstrap || "none"}
+            </div>
           </div>
-        </div>
-      </header>
 
-      <div className="w-full text-white h-0.5 bg-white" />
-      <br />
+          <div className="relative" ref={menuRef}>
+            <button
+              onClick={() => setMenuOpen((s) => !s)}
+              className="p-2 rounded-full bg-white/10 text-white"
+              aria-label="Menu"
+            >
+              <svg
+                width="18"
+                height="18"
+                viewBox="0 0 24 24"
+                className="inline-block"
+              >
+                <circle cx="12" cy="5" r="2" fill="blue" />
+                <circle cx="12" cy="12" r="2" fill="blue" />
+                <circle cx="12" cy="19" r="2" fill="blue" />
+              </svg>
+            </button>
 
-      <main className="flex-1 overflow-auto mb-4 min-h-0">
-        <div style={{ paddingBottom: 8 }}>
-          {messages.length === 0 && (
-            <div className="text-sm text-white/60">No messages yet</div>
+            <div
+              className={`absolute right-0 mt-2 w-44 bg-white/10 backdrop-blur rounded-lg shadow-lg z-50 transform origin-top-right transition-all duration-200 ${
+                menuOpen
+                  ? "opacity-100 scale-100 pointer-events-auto"
+                  : "opacity-0 scale-95 pointer-events-none"
+              }`}
+            >
+              <button
+                onClick={handleCreateHub}
+                className="w-full text-left px-4 py-3 hover:bg-white/20 border-b border-white/5 text-green-500"
+              >
+                <span className="font-semibold">Create Hub</span>
+                <div className="text-xs text-gray-400">
+                  Make this device the host
+                </div>
+              </button>
+
+              <button
+                onClick={handleJoinHub}
+                className="w-full text-left px-4 py-3 hover:bg-white/20 border-b border-white/5 text-blue-500"
+              >
+                <span className="font-semibold">Join Hub</span>
+                <div className="text-xs text-gray-400">
+                  Enter a host ID to join
+                </div>
+              </button>
+
+              <button
+                onClick={handleLeaveClick}
+                className="w-full text-left px-4 py-3 hover:bg-white/20 text-red-500 rounded-b-lg"
+              >
+                <span className="font-semibold">Leave</span>
+                <div className="text-xs text-gray-400">
+                  Leave and clear local history
+                </div>
+              </button>
+            </div>
+          </div>
+        </header>
+
+        <div className="w-full text-white h-0.5 bg-white" />
+        <br />
+
+        <main className="flex-1 overflow-auto mb-4 min-h-0">
+          <div style={{ paddingBottom: 8 }}>
+            {messages.length === 0 && (
+              <div className="text-sm text-white/60">No messages yet</div>
+            )}
+            {messages.map((m, i) => renderMessage(m, i))}
+            <div ref={messagesEndRef} />
+          </div>
+        </main>
+
+        <div className="w-full text-white h-0.5 bg-white" />
+        <br />
+
+        <footer className="mt-auto">
+          {typingSummary()}
+          <div className="mb-3 text-sm text-blue-600">
+            Connected peers:{" "}
+            {connectedNames.length === 0 ? (
+              <span className="text-red-500">none</span>
+            ) : (
+              connectedNames.join(", ")
+            )}
+          </div>
+
+          {renderIncomingFileOffers()}
+
+          {replyTo && (
+            <div className="mb-2 p-3 bg-white/10 text-gray-500 rounded-lg">
+              Replying to <strong>{replyTo.from}</strong>:{" "}
+              <span className="text-sm text-blue-400">{replyTo.text}</span>
+              <button
+                onClick={() => setReplyTo(null)}
+                className="ml-4 text-xs text-red-500"
+              >
+                x
+              </button>
+            </div>
           )}
-          {messages.map((m, i) => renderMessage(m, i))}
-          <div ref={messagesEndRef} />
-        </div>
-      </main>
 
-      <div className="w-full text-white h-0.5 bg-white" />
-      <br />
+          {/* Improved input container layout */}
+          <div className="relative w-full flex items-center gap-2">
+            {/* Left side controls container */}
+            <div className="flex items-center gap-2 flex-shrink-0">
+              {/* Circular video-record button */}
+              <div className="relative">
+                <CircularStream
+                  onFileRecorded={(file) =>
+                    onFileSelected(file, { directSend: true })
+                  }
+                  buttonClassName="w-10 h-10 flex items-center justify-center flex-shrink-0"
+                />
+              </div>
 
-      <footer className="mt-auto">
-        {typingSummary()}
-        <div className="mb-3 text-sm text-blue-600">
-          Connected peers:{" "}
-          {connectedNames.length === 0 ? (
-            <span className="text-red-500">none</span>
-          ) : (
-            connectedNames.join(", ")
-          )}
-        </div>
-
-        {renderIncomingFileOffers()}
-
-        {replyTo && (
-          <div className="mb-2 p-3 bg-white/10 text-gray-500 rounded-lg">
-            Replying to <strong>{replyTo.from}</strong>:{" "}
-            <span className="text-sm text-blue-400">{replyTo.text}</span>
-            <button
-              onClick={() => setReplyTo(null)}
-              className="ml-4 text-xs text-red-500"
-            >
-              x
-            </button>
-          </div>
-        )}
-
-        {/* Improved input container layout */}
-        <div className="relative w-full flex items-center gap-2">
-          {/* Left side controls container */}
-          <div className="flex items-center gap-2 flex-shrink-0">
-            {/* Circular video-record button */}
-            <div className="relative">
-              <CircularStream
-                onFileRecorded={(file) =>
-                  onFileSelected(file, { directSend: true })
-                }
-                buttonClassName="w-10 h-10 flex items-center justify-center flex-shrink-0"
-              />
+              {/* File attachment button */}
+              <button
+                onClick={() => {
+                  const input = document.createElement("input");
+                  input.type = "file";
+                  input.onchange = (e) => {
+                    const f = e.target.files && e.target.files[0];
+                    if (f) onFileSelected(f, { directSend: false });
+                  };
+                  input.click();
+                }}
+                className="w-10 h-10 flex items-center justify-center rounded-full bg-white/10 hover:bg-white/20 text-blue-500 hover:text-blue-600 transition-all duration-200 flex-shrink-0"
+                title="Attach File"
+                aria-label="Attach File"
+              >
+                <svg
+                  xmlns="http://www.w3.org/2000/svg"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="2"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  className="w-5 h-5"
+                >
+                  <path d="M21.44 11.05l-9.19 9.19a5.5 5.5 0 01-7.78-7.78l9.19-9.19a3.5 3.5 0 015 5l-9.2 9.19a1.5 1.5 0 01-2.12-2.12l8.49-8.49" />
+                </svg>
+              </button>
             </div>
 
-            {/* File attachment button */}
+            {/* Text input - flex-1 takes remaining space */}
+            <div className="relative flex-1">
+              <input
+                value={text}
+                onChange={(e) => setText(e.target.value)}
+                placeholder="Type a message..."
+                className="w-full p-3 pr-12 bg-white/10 placeholder-blue-300 text-blue-500 font-mono rounded-3xl border-2 border-white/20 focus:border-blue-400 focus:outline-none transition-colors duration-200"
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") send();
+                }}
+              />
+
+              {/* Send button inside input */}
+              <button
+                onClick={send}
+                className="absolute right-2 top-1/2 -translate-y-1/2 w-8 h-8 flex items-center justify-center rounded-full text-blue-500 hover:text-blue-600 hover:bg-white/10 transition-all duration-200"
+                title="Send"
+                aria-label="Send message"
+              >
+                <svg
+                  xmlns="http://www.w3.org/2000/svg"
+                  viewBox="0 0 24 24"
+                  fill="currentColor"
+                  className="w-5 h-5"
+                >
+                  <path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z" />
+                </svg>
+              </button>
+            </div>
+          </div>
+        </footer>
+      </div>
+
+      {/* Enhanced video preview modal */}
+      {centerPreviewOpen && centerPreviewUrl && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm">
+          <div className="relative w-full max-w-4xl mx-auto">
+            {/* Close button */}
             <button
-              onClick={() => {
-                const input = document.createElement("input");
-                input.type = "file";
-                input.onchange = (e) => {
-                  const f = e.target.files && e.target.files[0];
-                  if (f) onFileSelected(f, { directSend: false });
-                };
-                input.click();
-              }}
-              className="w-10 h-10 flex items-center justify-center rounded-full bg-white/10 hover:bg-white/20 text-blue-500 hover:text-blue-600 transition-all duration-200 flex-shrink-0"
-              title="Attach File"
-              aria-label="Attach File"
+              onClick={closeCenterPreview}
+              aria-label="Close preview"
+              className="absolute -top-12 right-0 z-10 text-white hover:text-gray-300 bg-black/50 hover:bg-black/70 p-3 rounded-full transition-all duration-200 backdrop-blur-sm"
+              title="Close preview"
             >
               <svg
-                xmlns="http://www.w3.org/2000/svg"
-                viewBox="0 0 24 24"
+                className="w-6 h-6"
                 fill="none"
                 stroke="currentColor"
-                strokeWidth="2"
-                strokeLinecap="round"
-                strokeLinejoin="round"
-                className="w-5 h-5"
-              >
-                <path d="M21.44 11.05l-9.19 9.19a5.5 5.5 0 01-7.78-7.78l9.19-9.19a3.5 3.5 0 015 5l-9.2 9.19a1.5 1.5 0 01-2.12-2.12l8.49-8.49" />
-              </svg>
-            </button>
-          </div>
-
-          {/* Text input - flex-1 takes remaining space */}
-          <div className="relative flex-1">
-            <input
-              value={text}
-              onChange={(e) => setText(e.target.value)}
-              placeholder="Type a message..."
-              className="w-full p-3 pr-12 bg-white/10 placeholder-blue-300 text-blue-500 font-mono rounded-3xl border-2 border-white/20 focus:border-blue-400 focus:outline-none transition-colors duration-200"
-              onKeyDown={(e) => {
-                if (e.key === "Enter") send();
-              }}
-            />
-
-            {/* Send button inside input */}
-            <button
-              onClick={send}
-              className="absolute right-2 top-1/2 -translate-y-1/2 w-8 h-8 flex items-center justify-center rounded-full text-blue-500 hover:text-blue-600 hover:bg-white/10 transition-all duration-200"
-              title="Send"
-              aria-label="Send message"
-            >
-              <svg
-                xmlns="http://www.w3.org/2000/svg"
                 viewBox="0 0 24 24"
-                fill="currentColor"
-                className="w-5 h-5"
               >
-                <path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z" />
+                <path
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  strokeWidth={2}
+                  d="M6 18L18 6M6 6l12 12"
+                />
               </svg>
             </button>
-          </div>
-        </div>
-      </footer>
-    </div>
 
-    {/* Enhanced video preview modal */}
-    {centerPreviewOpen && centerPreviewUrl && (
-      <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm">
-        <div className="relative w-full max-w-4xl mx-auto">
-          {/* Close button */}
-          <button
+            {/* Video container */}
+            <div className="relative bg-black rounded-xl overflow-hidden shadow-2xl">
+              <video
+                src={centerPreviewUrl}
+                controls
+                autoPlay
+                playsInline
+                className="w-full h-auto max-h-[80vh] object-contain"
+                onLoadedMetadata={(e) => {
+                  // Auto-focus the video for better UX
+                  e.target.focus();
+                }}
+              />
+            </div>
+          </div>
+
+          {/* Click outside to close */}
+          <div
+            className="absolute inset-0 -z-10"
             onClick={closeCenterPreview}
-            aria-label="Close preview"
-            className="absolute -top-12 right-0 z-10 text-white hover:text-gray-300 bg-black/50 hover:bg-black/70 p-3 rounded-full transition-all duration-200 backdrop-blur-sm"
-            title="Close preview"
-          >
-            <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
-            </svg>
-          </button>
+            aria-label="Click to close preview"
+          />
+        </div>
+      )}
 
-          {/* Video container */}
-          <div className="relative bg-black rounded-xl overflow-hidden shadow-2xl">
-            <video
-              src={centerPreviewUrl}
-              controls
-              autoPlay
-              playsInline
-              className="w-full h-auto max-h-[80vh] object-contain"
-              onLoadedMetadata={(e) => {
-                // Auto-focus the video for better UX
-                e.target.focus();
-              }}
-            />
+      {/* Leave confirmation modal */}
+      {confirmLeaveOpen && (
+        <div className="fixed inset-0 z-60 flex items-center justify-center">
+          <div
+            className="absolute inset-0 bg-black/50"
+            onClick={handleCancelLeave}
+          />
+          <div className="relative bg-white/10 p-6 rounded-lg backdrop-blur text-white w-80 z-70">
+            <h3 className="text-lg font-bold mb-2">Leave Hub?</h3>
+            <p className="text-sm text-white/80 mb-4">
+              Leaving will clear your local chat history. Are you sure?
+            </p>
+            <div className="flex justify-center gap-2">
+              <button
+                onClick={handleCancelLeave}
+                className="px-3 py-2 rounded bg-gradient-to-br from-green-500 to-green-600 text-white"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={handleConfirmLeave}
+                className="px-3 py-2 rounded bg-gradient-to-br from-red-500 to-red-600 text-white"
+              >
+                Leave & Clear
+              </button>
+            </div>
           </div>
         </div>
-
-        {/* Click outside to close */}
-        <div 
-          className="absolute inset-0 -z-10" 
-          onClick={closeCenterPreview}
-          aria-label="Click to close preview"
-        />
-      </div>
-    )}
-
-    {/* Leave confirmation modal */}
-    {confirmLeaveOpen && (
-      <div className="fixed inset-0 z-60 flex items-center justify-center">
-        <div
-          className="absolute inset-0 bg-black/50"
-          onClick={handleCancelLeave}
-        />
-        <div className="relative bg-white/10 p-6 rounded-lg backdrop-blur text-white w-80 z-70">
-          <h3 className="text-lg font-bold mb-2">Leave Hub?</h3>
-          <p className="text-sm text-white/80 mb-4">
-            Leaving will clear your local chat history. Are you sure?
-          </p>
-          <div className="flex justify-center gap-2">
-            <button
-              onClick={handleCancelLeave}
-              className="px-3 py-2 rounded bg-gradient-to-br from-green-500 to-green-600 text-white"
-            >
-              Cancel
-            </button>
-            <button
-              onClick={handleConfirmLeave}
-              className="px-3 py-2 rounded bg-gradient-to-br from-red-500 to-red-600 text-white"
-            >
-              Leave & Clear
-            </button>
-          </div>
-        </div>
-      </div>
-    )}
-  </>
-)}
+      )}
+    </>
+  );
+}
