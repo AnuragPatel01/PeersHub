@@ -851,76 +851,6 @@
 //   );
 // }
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 // src/components/Chat.jsx
 import "./App.css";
 import React, { useEffect, useState, useRef } from "react";
@@ -959,6 +889,15 @@ export default function Chat() {
     } catch (e) {}
     return [];
   });
+
+  // file offers state: offerId -> { offer, expiresAt, origin }
+  const [incomingFileOffers, setIncomingFileOffers] = useState({});
+  // save handles for File System Access API: offerId -> writable
+  const saveHandlesRef = useRef({});
+  const fileWriteStatusRef = useRef({}); // offerId -> bytesReceived
+  // outgoing pending offers: offerId -> { file, acceptingPeers: Set }
+  const outgoingPendingOffers = useRef({});
+
   const [text, setText] = useState("");
   const [username, setUsername] = useState(
     () => localStorage.getItem("ph_name") || ""
@@ -974,6 +913,9 @@ export default function Chat() {
   const [menuOpen, setMenuOpen] = useState(false);
   const [confirmLeaveOpen, setConfirmLeaveOpen] = useState(false);
 
+  // tick state for countdown timers
+  const [now, setNow] = useState(Date.now());
+
   useEffect(() => {
     if (!username) return;
     requestNotificationPermission().then((granted) => {
@@ -986,18 +928,17 @@ export default function Chat() {
   const peerRef = useRef(null);
   const menuRef = useRef(null);
 
+  // re-render every second while file offers exist
+  useEffect(() => {
+    if (!Object.keys(incomingFileOffers).length) return;
+    const id = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(id);
+  }, [incomingFileOffers]);
+
   // typingUsers: { [name]: timestamp }
   const [typingUsers, setTypingUsers] = useState({});
   const [replyTo, setReplyTo] = useState(null);
   const typingTimeoutRef = useRef(null);
-
-  // file offers state: offerId -> { offer, expiresAt, origin }
-  const [incomingFileOffers, setIncomingFileOffers] = useState({});
-  // save handles for File System Access API: offerId -> writable
-  const saveHandlesRef = useRef({});
-  const fileWriteStatusRef = useRef({}); // offerId -> bytesReceived
-  // outgoing pending offers: offerId -> { file, acceptingPeers: Set }
-  const outgoingPendingOffers = useRef({});
 
   // helper to show notification only when appropriate
   const maybeNotify = (fromDisplay, text) => {
@@ -1181,10 +1122,15 @@ export default function Chat() {
     if (from === "__system_file_offer__" && payloadOrText) {
       const offer = payloadOrText; // contains id, name, size, mime, from
       const offerId =
-        offer.id || `offer-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+        offer.id ||
+        `offer-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
       setIncomingFileOffers((s) => {
         const copy = { ...s };
-        copy[offerId] = { offer, expiresAt: Date.now() + 10000, origin: offer.from };
+        copy[offerId] = {
+          offer,
+          expiresAt: Date.now() + 10000,
+          origin: offer.from,
+        };
         return copy;
       });
 
@@ -1202,7 +1148,10 @@ export default function Chat() {
         });
       }, 10000);
 
-      maybeNotify(peerNamesMap[offer.from] || offer.from, `File offer: ${offer.name}`);
+      maybeNotify(
+        peerNamesMap[offer.from] || offer.from,
+        `File offer: ${offer.name}`
+      );
       return;
     }
 
@@ -1672,9 +1621,20 @@ export default function Chat() {
   // file input handler (sender)
   const onFileSelected = async (file) => {
     if (!file) return;
-    const offerId = `offer-${Date.now()}-${Math.random().toString(36).slice(2,7)}`;
-    outgoingPendingOffers.current[offerId] = { file, acceptingPeers: new Set() };
-    const meta = { id: offerId, name: file.name, size: file.size, mime: file.type, from: getLocalPeerId() || myId };
+    const offerId = `offer-${Date.now()}-${Math.random()
+      .toString(36)
+      .slice(2, 7)}`;
+    outgoingPendingOffers.current[offerId] = {
+      file,
+      acceptingPeers: new Set(),
+    };
+    const meta = {
+      id: offerId,
+      name: file.name,
+      size: file.size,
+      mime: file.type,
+      from: getLocalPeerId() || myId,
+    };
     try {
       offerFileToPeers(meta);
     } catch (e) {
@@ -1684,7 +1644,7 @@ export default function Chat() {
       const sys = {
         id: `sys-offer-${offerId}`,
         from: "System",
-        text: `Offered file: ${file.name} (${Math.round(file.size/1024)} KB)`,
+        text: `Offered file: ${file.name} (${Math.round(file.size / 1024)} KB)`,
         ts: Date.now(),
         type: "system",
       };
@@ -1731,8 +1691,9 @@ export default function Chat() {
             {
               description: offer.mime || "file",
               accept: {
-                [offer.mime || "application/octet-stream"]:
-                  ["." + (offer.name.split(".").pop() || "")],
+                [offer.mime || "application/octet-stream"]: [
+                  "." + (offer.name.split(".").pop() || ""),
+                ],
               },
             },
           ],
@@ -1740,7 +1701,10 @@ export default function Chat() {
         const handle = await (window.showSaveFilePicker
           ? window.showSaveFilePicker(opts)
           : window.chooseFileSystemEntries
-          ? window.chooseFileSystemEntries({ type: "save-file", accepts: opts.types })
+          ? window.chooseFileSystemEntries({
+              type: "save-file",
+              accepts: opts.types,
+            })
           : null);
         if (!handle) {
           respondToFileOffer(offerId, offer.from, false);
@@ -1838,20 +1802,31 @@ export default function Chat() {
     return keys.map((k) => {
       const entry = incomingFileOffers[k];
       const offer = entry.offer;
-      const remaining = Math.max(0, Math.ceil((entry.expiresAt - Date.now()) / 1000));
+      const remaining = Math.max(0, Math.ceil((entry.expiresAt - now) / 1000));
+
       return (
-        <div key={k} className="mb-2 p-2 rounded bg-white/10 text-sm text-black">
+        <div
+          key={k}
+          className="mb-2 p-2 rounded bg-white/10 text-sm text-black"
+        >
           <div className="font-semibold">
             File offer: {offer.name} ({Math.round((offer.size || 0) / 1024)} KB)
           </div>
           <div className="text-xs text-gray-600">
-            From: {peerNamesMap[offer.from] || offer.from} — Expires in {remaining}s
+            From: {peerNamesMap[offer.from] || offer.from} — Expires in{" "}
+            {remaining}s
           </div>
           <div className="mt-2 flex gap-2">
-            <button onClick={() => acceptFileOffer(k)} className="px-3 py-1 rounded bg-green-500 text-white">
+            <button
+              onClick={() => acceptFileOffer(k)}
+              className="px-3 py-1 rounded bg-gradient-to-br from-green-500 to-green-600 text-white"
+            >
               Accept
             </button>
-            <button onClick={() => ignoreFileOffer(k)} className="px-3 py-1 rounded bg-red-500 text-white">
+            <button
+              onClick={() => ignoreFileOffer(k)}
+              className="px-3 py-1 rounded bg-gradient-to-br from-red-500 to-red-600 text-white"
+            >
               Ignore
             </button>
           </div>
@@ -1892,7 +1867,12 @@ export default function Chat() {
               className="p-2 rounded-full bg-white/10 text-white"
               aria-label="Menu"
             >
-              <svg width="18" height="18" viewBox="0 0 24 24" className="inline-block">
+              <svg
+                width="18"
+                height="18"
+                viewBox="0 0 24 24"
+                className="inline-block"
+              >
                 <circle cx="12" cy="5" r="2" fill="blue" />
                 <circle cx="12" cy="12" r="2" fill="blue" />
                 <circle cx="12" cy="19" r="2" fill="blue" />
@@ -1901,7 +1881,9 @@ export default function Chat() {
 
             <div
               className={`absolute right-0 mt-2 w-44 bg-white/10 backdrop-blur rounded-lg shadow-lg z-50 transform origin-top-right transition-all duration-200 ${
-                menuOpen ? "opacity-100 scale-100 pointer-events-auto" : "opacity-0 scale-95 pointer-events-none"
+                menuOpen
+                  ? "opacity-100 scale-100 pointer-events-auto"
+                  : "opacity-0 scale-95 pointer-events-none"
               }`}
             >
               <button
@@ -1978,18 +1960,34 @@ export default function Chat() {
               </button>
             </div>
           )}
-          <div className="relative w-full flex items-center gap-2">
-            {/* clip button left of input */}
-            <button onClick={handleFileInputClick} className="p-2 rounded-full bg-white/10 text-blue-500">📎</button>
+          <div className="relative w-full flex items-center">
+            {/* clip icon inside input (left) */}
+            <svg
+              onClick={handleFileInputClick}
+              xmlns="http://www.w3.org/2000/svg"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="2"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              className="absolute left-3 top-1/2 -translate-y-1/2 w-5 h-5 text-blue-500 cursor-pointer hover:text-blue-700"
+              title="Attach File"
+            >
+              <path d="M21.44 11.05l-9.19 9.19a5.5 5.5 0 01-7.78-7.78l9.19-9.19a3.5 3.5 0 015 5l-9.2 9.19a1.5 1.5 0 01-2.12-2.12l8.49-8.49" />
+            </svg>
+
             <input
               value={text}
               onChange={(e) => setText(e.target.value)}
               placeholder="Type a message..."
-              className="flex-1 p-3 pl-3 pr-10 bg-white/10 placeholder-blue-300 text-blue-500 font-mono rounded-3xl border-2"
+              className="flex-1 p-3 pl-10 pr-10 bg-white/10 placeholder-blue-300 text-blue-500 font-mono rounded-3xl border-2"
               onKeyDown={(e) => {
                 if (e.key === "Enter") send();
               }}
             />
+
+            {/* send icon inside input (right) */}
             <svg
               onClick={send}
               xmlns="http://www.w3.org/2000/svg"
@@ -1999,7 +1997,7 @@ export default function Chat() {
               title="Send"
             >
               <path d="M3.4 20.6L21 12 3.4 3.4 3 10l11 2-11 2z" />
-            </svg>{" "}
+            </svg>
           </div>
         </footer>
       </div>
@@ -2036,29 +2034,3 @@ export default function Chat() {
     </>
   );
 }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-

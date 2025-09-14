@@ -1,9 +1,6 @@
-
-
 // // new integration
 
 // // src/webrtc.js
-
 
 // import Peer from "peerjs";
 // import { nanoid } from "nanoid";
@@ -820,34 +817,6 @@
 //   return createPeerWithId(storedId);
 // };
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 // ---------- src/webrtc.js (updated: disk-to-disk streaming) ----------
 
 /*
@@ -921,7 +890,11 @@ window.__PH_resumeReconnect = () => {
     localStorage.removeItem(LS_LEFT_AT);
     localStorage.setItem(LS_SHOULD_AUTOJOIN, "true");
     if (peer) {
-      startReconnectLoop(onMessageGlobal, onPeerListUpdateGlobal, peerNames[peer.id]);
+      startReconnectLoop(
+        onMessageGlobal,
+        onPeerListUpdateGlobal,
+        peerNames[peer.id]
+      );
     }
     console.log(
       "Called window.__PH_resumeReconnect(): left marker cleared, autojoin enabled."
@@ -991,7 +964,12 @@ const sendAckDeliver = (toPeerId, msgId) => {
   if (conn) {
     sendToConn(conn, { type: "ack_deliver", id: msgId, from: peer.id });
   } else {
-    broadcastRaw({ type: "ack_deliver", id: msgId, from: peer.id, to: toPeerId });
+    broadcastRaw({
+      type: "ack_deliver",
+      id: msgId,
+      from: peer.id,
+      to: toPeerId,
+    });
   }
 };
 
@@ -999,10 +977,19 @@ export const sendAckRead = (msgId, originPeerId) => {
   if (!msgId) return;
   try {
     if (originPeerId && connections[originPeerId]) {
-      sendToConn(connections[originPeerId], { type: "ack_read", id: msgId, from: peer.id });
+      sendToConn(connections[originPeerId], {
+        type: "ack_read",
+        id: msgId,
+        from: peer.id,
+      });
       return;
     }
-    broadcastRaw({ type: "ack_read", id: msgId, from: peer.id, to: originPeerId || null });
+    broadcastRaw({
+      type: "ack_read",
+      id: msgId,
+      from: peer.id,
+      to: originPeerId || null,
+    });
   } catch (e) {
     console.warn("sendAckRead failed", e);
   }
@@ -1010,7 +997,12 @@ export const sendAckRead = (msgId, originPeerId) => {
 
 export const broadcastSystem = (type, text, id = null) => {
   try {
-    const payload = { type: type || "system_public", text: text || "", id: id || `sys-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`, origin: peer ? peer.id : null };
+    const payload = {
+      type: type || "system_public",
+      text: text || "",
+      id: id || `sys-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+      origin: peer ? peer.id : null,
+    };
     broadcastRaw(payload);
   } catch (e) {
     console.warn("broadcastSystem failed", e);
@@ -1019,7 +1011,8 @@ export const broadcastSystem = (type, text, id = null) => {
 
 export const getPeers = () => [...peersList];
 export const getPeerNames = () => ({ ...peerNames });
-export const getLocalPeerId = () => peer ? peer.id : localStorage.getItem(LS_PEER_ID) || null;
+export const getLocalPeerId = () =>
+  peer ? peer.id : localStorage.getItem(LS_PEER_ID) || null;
 export const getKnownPeers = () => Array.from(loadKnownPeers());
 
 /* ---------- File transfer helpers ---------- */
@@ -1031,7 +1024,11 @@ export const getKnownPeers = () => Array.from(loadKnownPeers());
 // sender: create offer to specific peers (or broadcast)
 export const offerFileToPeers = (fileMeta, targetPeerIds = []) => {
   // fileMeta must include: offerId, name, size, mime
-  const payload = { type: 'file_offer', ...fileMeta, from: peer ? peer.id : null };
+  const payload = {
+    type: "file_offer",
+    ...fileMeta,
+    from: peer ? peer.id : null,
+  };
   if (!targetPeerIds || targetPeerIds.length === 0) {
     broadcastRaw(payload);
     return;
@@ -1054,17 +1051,40 @@ const streamFileToConn = async (conn, file, offerId) => {
       if (done) break;
       // value is a Uint8Array (chunk)
       // send structured object with chunk as ArrayBuffer — structured cloning will transfer it
-      sendToConn(conn, { type: 'file_chunk', id: offerId, seq: seq++, chunk: value.buffer, final: false });
+      sendToConn(conn, {
+        type: "file_chunk",
+        id: offerId,
+        seq: seq++,
+        chunk: value.buffer,
+        final: false,
+      });
       // small throttle to yield - avoid blocking event loop
       await new Promise((r) => setTimeout(r, 0));
     }
     // send final marker
-    sendToConn(conn, { type: 'file_chunk', id: offerId, seq: seq, chunk: null, final: true });
+    sendToConn(conn, {
+      type: "file_chunk",
+      id: offerId,
+      seq: seq,
+      chunk: null,
+      final: true,
+    });
     // notify done
-    sendToConn(conn, { type: 'file_transfer_done', id: offerId, from: peer.id });
+    sendToConn(conn, {
+      type: "file_transfer_done",
+      id: offerId,
+      from: peer.id,
+    });
   } catch (e) {
-    console.warn('streamFileToConn error', e);
-    try { sendToConn(conn, { type: 'file_transfer_cancel', id: offerId, from: peer.id, reason: e && e.message }); } catch (err) {}
+    console.warn("streamFileToConn error", e);
+    try {
+      sendToConn(conn, {
+        type: "file_transfer_cancel",
+        id: offerId,
+        from: peer.id,
+        reason: e && e.message,
+      });
+    } catch (err) {}
   }
 };
 
@@ -1081,193 +1101,496 @@ export const respondToFileOffer = (offerId, toPeerId, accept) => {
   const conn = connections[toPeerId];
   if (!conn) {
     // fallback broadcast so origin gets it
-    broadcastRaw({ type: 'file_offer_response', id: offerId, from: peer.id, accept });
+    broadcastRaw({
+      type: "file_offer_response",
+      id: offerId,
+      from: peer.id,
+      accept,
+    });
     return;
   }
-  sendToConn(conn, { type: 'file_offer_response', id: offerId, from: peer.id, accept });
+  sendToConn(conn, {
+    type: "file_offer_response",
+    id: offerId,
+    from: peer.id,
+    accept,
+  });
 };
 
 /* ---------- parse incoming raw data ---------- */
 const parseMessage = (raw) => {
-  if (typeof raw === 'string') {
-    try { return JSON.parse(raw); } catch (e) { return { type: 'chat', text: raw }; }
+  if (typeof raw === "string") {
+    try {
+      return JSON.parse(raw);
+    } catch (e) {
+      return { type: "chat", text: raw };
+    }
   }
-  if (typeof raw === 'object' && raw !== null) return raw;
-  return { type: 'chat', text: String(raw) };
+  if (typeof raw === "object" && raw !== null) return raw;
+  return { type: "chat", text: String(raw) };
 };
 
 /* ---------- setupConnection (updated to route file messages to UI) ---------- */
-const setupConnection = (conn, onMessage, onPeerListUpdate, localName = 'Anonymous') => {
+const setupConnection = (
+  conn,
+  onMessage,
+  onPeerListUpdate,
+  localName = "Anonymous"
+) => {
   try {
     const leftAt = localStorage.getItem(LS_LEFT_AT);
-    if (leftAt) { try { conn.close && conn.close(); } catch (e) {} ; return; }
-  } catch (e) { console.warn('PH: error checking left marker before setupConnection:', e); }
+    if (leftAt) {
+      try {
+        conn.close && conn.close();
+      } catch (e) {}
+      return;
+    }
+  } catch (e) {
+    console.warn("PH: error checking left marker before setupConnection:", e);
+  }
 
-  conn.on('open', () => {
+  conn.on("open", () => {
     connections[conn.peer] = conn;
     if (!peersList.includes(conn.peer)) peersList.push(conn.peer);
-    if (onPeerListUpdate) try { onPeerListUpdate([...peersList]); } catch (e) { console.warn(e); }
-    retryCounts[conn.peer] = 0; LAST_ATTEMPT[conn.peer] = 0;
-    sendToConn(conn, { type: 'intro', id: peer.id, name: peerNames[peer.id] || localName, peers: [...peersList] });
+    if (onPeerListUpdate)
+      try {
+        onPeerListUpdate([...peersList]);
+      } catch (e) {
+        console.warn(e);
+      }
+    retryCounts[conn.peer] = 0;
+    LAST_ATTEMPT[conn.peer] = 0;
+    sendToConn(conn, {
+      type: "intro",
+      id: peer.id,
+      name: peerNames[peer.id] || localName,
+      peers: [...peersList],
+    });
   });
 
-  conn.on('data', async (raw) => {
+  conn.on("data", async (raw) => {
     const data = parseMessage(raw);
-    if (!data || typeof data !== 'object') return;
+    if (!data || typeof data !== "object") return;
 
-    if (data.type === 'system_leave') {
+    if (data.type === "system_leave") {
       const origin = data.origin || null;
-      if (origin) { retryCounts[origin] = MAX_RETRY_PER_PEER; LAST_ATTEMPT[origin] = Date.now(); }
-      if (onMessage) onMessage('__system_leave__', data);
+      if (origin) {
+        retryCounts[origin] = MAX_RETRY_PER_PEER;
+        LAST_ATTEMPT[origin] = Date.now();
+      }
+      if (onMessage) onMessage("__system_leave__", data);
       return;
     }
 
     if (data.to && data.to !== peer.id) return;
 
-    if (data.type === 'intro') {
+    if (data.type === "intro") {
       if (data.id && data.name) peerNames[data.id] = data.name;
       if (data.id && !peersList.includes(data.id)) peersList.push(data.id);
-      (data.peers || []).forEach((p) => { if (!p || p === peer.id) return; addKnownPeer(p); try { const leftAt = localStorage.getItem(LS_LEFT_AT); if (leftAt) return; } catch (e) {} if (!connections[p]) setTimeout(() => { try { connectToPeer(p, onMessageGlobal, onPeerListUpdateGlobal, peerNames[peer.id] || localName); } catch (e) { console.warn('PH: connectToPeer failed for known peer', p, e); } }, 100); });
-      if (onPeerListUpdate) try { onPeerListUpdate([...peersList]); } catch (e) { console.warn(e); }
+      (data.peers || []).forEach((p) => {
+        if (!p || p === peer.id) return;
+        addKnownPeer(p);
+        try {
+          const leftAt = localStorage.getItem(LS_LEFT_AT);
+          if (leftAt) return;
+        } catch (e) {}
+        if (!connections[p])
+          setTimeout(() => {
+            try {
+              connectToPeer(
+                p,
+                onMessageGlobal,
+                onPeerListUpdateGlobal,
+                peerNames[peer.id] || localName
+              );
+            } catch (e) {
+              console.warn("PH: connectToPeer failed for known peer", p, e);
+            }
+          }, 100);
+      });
+      if (onPeerListUpdate)
+        try {
+          onPeerListUpdate([...peersList]);
+        } catch (e) {
+          console.warn(e);
+        }
       return;
     }
 
     // file transfer signaling/flow
-    if (data.type === 'file_offer') {
+    if (data.type === "file_offer") {
       // forward offer to UI so it can present accept/ignore prompt
-      if (onMessage) onMessage('__system_file_offer__', data);
+      if (onMessage) onMessage("__system_file_offer__", data);
       return;
     }
 
-    if (data.type === 'file_offer_response') {
+    if (data.type === "file_offer_response") {
       // forward response to UI (sender will start streaming if accept:true)
-      if (onMessage) onMessage('__system_file_offer_response__', data);
+      if (onMessage) onMessage("__system_file_offer_response__", data);
       return;
     }
 
-    if (data.type === 'file_chunk') {
+    if (data.type === "file_chunk") {
       // chunks may contain ArrayBuffer in data.chunk (structured)
-      if (onMessage) onMessage('__system_file_chunk__', data);
+      if (onMessage) onMessage("__system_file_chunk__", data);
       return;
     }
 
-    if (data.type === 'file_transfer_done' || data.type === 'file_transfer_cancel') {
-      if (onMessage) onMessage('__system_file_transfer_done__', data);
+    if (
+      data.type === "file_transfer_done" ||
+      data.type === "file_transfer_cancel"
+    ) {
+      if (onMessage) onMessage("__system_file_transfer_done__", data);
       return;
     }
 
-    if (data.type === 'typing') {
-      if (onMessage) onMessage('__system_typing__', { fromName: data.fromName, isTyping: data.isTyping });
+    if (data.type === "typing") {
+      if (onMessage)
+        onMessage("__system_typing__", {
+          fromName: data.fromName,
+          isTyping: data.isTyping,
+        });
       return;
     }
 
-    if (data.type === 'chat') {
+    if (data.type === "chat") {
       if (onMessage) onMessage(data.from, data);
       const origin = data.origin || data.from;
-      if (origin && origin !== peer.id) { try { sendAckDeliver(origin, data.id); } catch (e) { broadcastRaw({ type: 'ack_deliver', id: data.id, from: peer.id, to: origin }); } }
+      if (origin && origin !== peer.id) {
+        try {
+          sendAckDeliver(origin, data.id);
+        } catch (e) {
+          broadcastRaw({
+            type: "ack_deliver",
+            id: data.id,
+            from: peer.id,
+            to: origin,
+          });
+        }
+      }
       return;
     }
 
-    if (data.type === 'ack_deliver') {
-      if (onMessage) onMessage('__system_ack_deliver__', { fromPeer: data.from, id: data.id });
+    if (data.type === "ack_deliver") {
+      if (onMessage)
+        onMessage("__system_ack_deliver__", {
+          fromPeer: data.from,
+          id: data.id,
+        });
       return;
     }
 
-    if (data.type === 'ack_read') {
-      if (onMessage) onMessage('__system_ack_read__', { fromPeer: data.from, id: data.id });
+    if (data.type === "ack_read") {
+      if (onMessage)
+        onMessage("__system_ack_read__", { fromPeer: data.from, id: data.id });
       return;
     }
 
     if (onMessage) onMessage(data.from || conn.peer, data);
   });
 
-  conn.on('close', () => {
-    try { delete connections[conn.peer]; } catch (e) {}
+  conn.on("close", () => {
+    try {
+      delete connections[conn.peer];
+    } catch (e) {}
     peersList = peersList.filter((p) => p !== conn.peer);
     delete peerNames[conn.peer];
-    if (onPeerListUpdate) try { onPeerListUpdate([...peersList]); } catch (e) { console.warn(e); }
-    try { addKnownPeer(conn.peer); } catch (e) {}
-    startReconnectLoop(onMessageGlobal, onPeerListUpdateGlobal, peerNames[peer.id]);
+    if (onPeerListUpdate)
+      try {
+        onPeerListUpdate([...peersList]);
+      } catch (e) {
+        console.warn(e);
+      }
+    try {
+      addKnownPeer(conn.peer);
+    } catch (e) {}
+    startReconnectLoop(
+      onMessageGlobal,
+      onPeerListUpdateGlobal,
+      peerNames[peer.id]
+    );
   });
 
-  conn.on('error', (err) => {
-    console.warn('Connection error with', conn.peer, err);
-    try { addKnownPeer(conn.peer); } catch (e) {}
-    startReconnectLoop(onMessageGlobal, onPeerListUpdateGlobal, peerNames[peer.id]);
+  conn.on("error", (err) => {
+    console.warn("Connection error with", conn.peer, err);
+    try {
+      addKnownPeer(conn.peer);
+    } catch (e) {}
+    startReconnectLoop(
+      onMessageGlobal,
+      onPeerListUpdateGlobal,
+      peerNames[peer.id]
+    );
   });
 };
 
 const startReconnectLoop = (onMessage, onPeerListUpdate, localName) => {
-  const leftAt = parseInt(localStorage.getItem(LS_LEFT_AT) || '0', 10);
-  if (leftAt && !isNaN(leftAt)) { console.log('PH: startReconnectLoop blocked because ph_left_at present:', leftAt); return; }
-  const shouldAutoNow = localStorage.getItem(LS_SHOULD_AUTOJOIN) === 'true';
-  if (!shouldAutoNow) { console.log('PH: startReconnectLoop skipped because autojoin flag is false'); return; }
+  const leftAt = parseInt(localStorage.getItem(LS_LEFT_AT) || "0", 10);
+  if (leftAt && !isNaN(leftAt)) {
+    console.log(
+      "PH: startReconnectLoop blocked because ph_left_at present:",
+      leftAt
+    );
+    return;
+  }
+  const shouldAutoNow = localStorage.getItem(LS_SHOULD_AUTOJOIN) === "true";
+  if (!shouldAutoNow) {
+    console.log(
+      "PH: startReconnectLoop skipped because autojoin flag is false"
+    );
+    return;
+  }
   stopReconnectLoop();
   reconnectInterval = setInterval(() => {
-    const shouldAuto = localStorage.getItem(LS_SHOULD_AUTOJOIN) === 'true';
+    const shouldAuto = localStorage.getItem(LS_SHOULD_AUTOJOIN) === "true";
     const leftNow = localStorage.getItem(LS_LEFT_AT);
-    if (!shouldAuto || leftNow) { stopReconnectLoop(); return; }
+    if (!shouldAuto || leftNow) {
+      stopReconnectLoop();
+      return;
+    }
     const bootstrap = localStorage.getItem(LS_HUB_BOOTSTRAP);
-    if (bootstrap && bootstrap !== getLocalPeerId() && !connections[bootstrap]) { try { connectToPeer(bootstrap, onMessage, onPeerListUpdate, localName); } catch (e) { console.warn('PH: reconnect loop bootstrap connect failed', e); } }
+    if (
+      bootstrap &&
+      bootstrap !== getLocalPeerId() &&
+      !connections[bootstrap]
+    ) {
+      try {
+        connectToPeer(bootstrap, onMessage, onPeerListUpdate, localName);
+      } catch (e) {
+        console.warn("PH: reconnect loop bootstrap connect failed", e);
+      }
+    }
     const known = loadKnownPeers();
-    known.forEach((p) => { if (!p || p === getLocalPeerId()) return; if (!connections[p]) { try { connectToPeer(p, onMessage, onPeerListUpdate, localName); } catch (e) { console.warn('PH: reconnect loop known peer connect failed', e); } } });
+    known.forEach((p) => {
+      if (!p || p === getLocalPeerId()) return;
+      if (!connections[p]) {
+        try {
+          connectToPeer(p, onMessage, onPeerListUpdate, localName);
+        } catch (e) {
+          console.warn("PH: reconnect loop known peer connect failed", e);
+        }
+      }
+    });
   }, RECONNECT_INTERVAL_MS);
 };
 
-const stopReconnectLoop = () => { if (reconnectInterval) { clearInterval(reconnectInterval); reconnectInterval = null; } };
+const stopReconnectLoop = () => {
+  if (reconnectInterval) {
+    clearInterval(reconnectInterval);
+    reconnectInterval = null;
+  }
+};
 
-export const connectToPeer = (peerId, onMessage, onPeerListUpdate, localName = 'Anonymous') => {
-  try { if (localStorage.getItem(LS_LEFT_AT)) { retryCounts[peerId] = MAX_RETRY_PER_PEER; LAST_ATTEMPT[peerId] = Date.now(); return; } } catch (e) {}
-  if (!peer) return; if (!peerId) return; if (peerId === peer.id) return; if (connections[peerId]) return;
-  const now = Date.now(); const last = LAST_ATTEMPT[peerId] || 0; const tries = retryCounts[peerId] || 0;
-  if (tries >= MAX_RETRY_PER_PEER) { if (now - last < COOLDOWN_AFTER_MAX) return; else retryCounts[peerId] = 0; }
+export const connectToPeer = (
+  peerId,
+  onMessage,
+  onPeerListUpdate,
+  localName = "Anonymous"
+) => {
+  try {
+    if (localStorage.getItem(LS_LEFT_AT)) {
+      retryCounts[peerId] = MAX_RETRY_PER_PEER;
+      LAST_ATTEMPT[peerId] = Date.now();
+      return;
+    }
+  } catch (e) {}
+  if (!peer) return;
+  if (!peerId) return;
+  if (peerId === peer.id) return;
+  if (connections[peerId]) return;
+  const now = Date.now();
+  const last = LAST_ATTEMPT[peerId] || 0;
+  const tries = retryCounts[peerId] || 0;
+  if (tries >= MAX_RETRY_PER_PEER) {
+    if (now - last < COOLDOWN_AFTER_MAX) return;
+    else retryCounts[peerId] = 0;
+  }
   const backoff = BACKOFF_BASE_MS * Math.pow(2, tries);
   if (now - last < backoff) return;
-  try { LAST_ATTEMPT[peerId] = now; retryCounts[peerId] = (retryCounts[peerId] || 0) + 1; const conn = peer.connect(peerId, { reliable: true }); setupConnection(conn, onMessage, onPeerListUpdate, localName); } catch (e) { console.warn('connectToPeer error', e); }
+  try {
+    LAST_ATTEMPT[peerId] = now;
+    retryCounts[peerId] = (retryCounts[peerId] || 0) + 1;
+    const conn = peer.connect(peerId, { reliable: true });
+    setupConnection(conn, onMessage, onPeerListUpdate, localName);
+  } catch (e) {
+    console.warn("connectToPeer error", e);
+  }
 };
 
-export const joinHub = (bootstrapPeerId) => { if (!bootstrapPeerId) return; localStorage.setItem(LS_HUB_BOOTSTRAP, bootstrapPeerId); localStorage.setItem(LS_SHOULD_AUTOJOIN, 'true'); localStorage.removeItem(LS_LEFT_AT); if (onBootstrapChangedGlobal) onBootstrapChangedGlobal(bootstrapPeerId); };
+export const joinHub = (bootstrapPeerId) => {
+  if (!bootstrapPeerId) return;
+  localStorage.setItem(LS_HUB_BOOTSTRAP, bootstrapPeerId);
+  localStorage.setItem(LS_SHOULD_AUTOJOIN, "true");
+  localStorage.removeItem(LS_LEFT_AT);
+  if (onBootstrapChangedGlobal) onBootstrapChangedGlobal(bootstrapPeerId);
+};
 
 export const leaveHub = () => {
-  stopReconnectLoop();
-  Object.values(connections).forEach((conn) => { try { conn.close && conn.close(); } catch (e) { console.warn('error closing conn on leaveHub', e); } });
-  try { const myId = getLocalPeerId(); const myName = peerNames[myId] || localStorage.getItem(LS_LOCAL_NAME) || 'Unknown'; broadcastSystem('system_leave', `${myName} left the hub`, `sys-leave-${myId || 'unknown'}`); } catch (e) { console.warn('PH: failed to broadcast leave', e); }
-  connections = {}; peersList = []; peerNames = {};
-  try { localStorage.removeItem(LS_HUB_BOOTSTRAP); localStorage.removeItem(LS_SHOULD_AUTojoin); localStorage.removeItem(LS_KNOWN_PEERS); localStorage.setItem(LS_LEFT_AT, Date.now().toString()); } catch (e) { console.warn('Error clearing leaveHub storage keys', e); }
-  if (onPeerListUpdateGlobal) try { onPeerListUpdateGlobal([...peersList]); } catch (e) {}
-  if (onBootstrapChangedGlobal) try { onBootstrapChangedGlobal(null); } catch (e) {}
+  // stop reconnect loop immediately
+  try {
+    stopReconnectLoop();
+  } catch (e) {
+    console.warn("leaveHub: stopReconnectLoop failed", e);
+  }
+
+  // set left marker FIRST to prevent any reconnect racing
+  try {
+    localStorage.setItem(LS_LEFT_AT, Date.now().toString());
+    // also proactively disable autojoin flag
+    localStorage.setItem(LS_SHOULD_AUTOJOIN, "false");
+  } catch (e) {
+    console.warn("leaveHub: failed to set left marker / disable autojoin", e);
+  }
+
+  // close all active DataConnections
+  Object.values(connections).forEach((conn) => {
+    try {
+      conn.close && conn.close();
+    } catch (e) {
+      console.warn("error closing conn on leaveHub", e);
+    }
+  });
+
+  // try to broadcast a public leave notice so others can reduce attempts sooner
+  try {
+    const myId = getLocalPeerId();
+    const myName =
+      peerNames[myId] || localStorage.getItem(LS_LOCAL_NAME) || "Unknown";
+    broadcastSystem(
+      "system_leave",
+      `${myName} left the hub`,
+      `sys-leave-${myId || "unknown"}`
+    );
+  } catch (e) {
+    console.warn("PH: failed to broadcast leave", e);
+  }
+
+  // clear in-memory connection state
+  connections = {};
+  peersList = [];
+  peerNames = {};
+
+  // clear persistence keys — do each call so one failure doesn't abort the rest
+  try {
+    localStorage.removeItem(LS_HUB_BOOTSTRAP);
+  } catch (e) {
+    console.warn("leaveHub: remove ph_hub_bootstrap failed", e);
+  }
+  try {
+    localStorage.removeItem(LS_SHOULD_AUTOJOIN);
+  } catch (e) {
+    console.warn("leaveHub: remove ph_should_autojoin failed", e);
+  }
+  try {
+    localStorage.removeItem(LS_KNOWN_PEERS);
+  } catch (e) {
+    console.warn("leaveHub: remove ph_known_peers failed", e);
+  }
+  // Note: we already set LS_LEFT_AT above; don't overwrite it here.
+
+  // notify UI callbacks
+  if (onPeerListUpdateGlobal) {
+    try {
+      onPeerListUpdateGlobal([...peersList]);
+    } catch (e) {}
+  }
+  if (onBootstrapChangedGlobal) {
+    try {
+      onBootstrapChangedGlobal(null);
+    } catch (e) {}
+  }
+
+  console.log(
+    "PH: leaveHub() -> cleared bootstrap, autojoin, known peers and set left marker"
+  );
 };
 
-export const initPeer = (onMessage, onPeerListUpdate, localName = 'Anonymous', onBootstrapChange = null) => {
-  onMessageGlobal = onMessage || null; onPeerListUpdateGlobal = onPeerListUpdate || null; onBootstrapChangedGlobal = onBootstrapChange || null;
+export const initPeer = (
+  onMessage,
+  onPeerListUpdate,
+  localName = "Anonymous",
+  onBootstrapChange = null
+) => {
+  onMessageGlobal = onMessage || null;
+  onPeerListUpdateGlobal = onPeerListUpdate || null;
+  onBootstrapChangedGlobal = onBootstrapChange || null;
   let storedId = localStorage.getItem(LS_PEER_ID);
-  if (!storedId) { storedId = nanoid(6); localStorage.setItem(LS_PEER_ID, storedId); }
+  if (!storedId) {
+    storedId = nanoid(6);
+    localStorage.setItem(LS_PEER_ID, storedId);
+  }
   const createPeerWithId = (id) => {
     try {
       peer = new Peer(id);
-      peer.on('open', (idOpen) => {
+      peer.on("open", (idOpen) => {
         localStorage.setItem(LS_PEER_ID, idOpen);
         peerNames[idOpen] = localName;
-        const shouldAuto = localStorage.getItem(LS_SHOULD_AUTOJOIN) === 'true';
+        const shouldAuto = localStorage.getItem(LS_SHOULD_AUTOJOIN) === "true";
         if (shouldAuto) {
           const bootstrap = localStorage.getItem(LS_HUB_BOOTSTRAP);
-          if (bootstrap && bootstrap !== idOpen) try { connectToPeer(bootstrap, onMessageGlobal, onPeerListUpdateGlobal, localName); } catch (e) {}
-          const known = loadKnownPeers(); known.forEach((p) => { if (!p || p === idOpen) return; if (!connections[p]) try { connectToPeer(p, onMessageGlobal, onPeerListUpdateGlobal, localName); } catch (e) {} });
-          startReconnectLoop(onMessageGlobal, onPeerListUpdateGlobal, localName);
+          if (bootstrap && bootstrap !== idOpen)
+            try {
+              connectToPeer(
+                bootstrap,
+                onMessageGlobal,
+                onPeerListUpdateGlobal,
+                localName
+              );
+            } catch (e) {}
+          const known = loadKnownPeers();
+          known.forEach((p) => {
+            if (!p || p === idOpen) return;
+            if (!connections[p])
+              try {
+                connectToPeer(
+                  p,
+                  onMessageGlobal,
+                  onPeerListUpdateGlobal,
+                  localName
+                );
+              } catch (e) {}
+          });
+          startReconnectLoop(
+            onMessageGlobal,
+            onPeerListUpdateGlobal,
+            localName
+          );
         } else stopReconnectLoop();
       });
-      peer.on('connection', (conn) => {
-        try { const leftAt = localStorage.getItem(LS_LEFT_AT); if (leftAt) { conn.close && conn.close(); return; } } catch (e) {}
-        setupConnection(conn, onMessageGlobal, onPeerListUpdateGlobal, localName);
+      peer.on("connection", (conn) => {
+        try {
+          const leftAt = localStorage.getItem(LS_LEFT_AT);
+          if (leftAt) {
+            conn.close && conn.close();
+            return;
+          }
+        } catch (e) {}
+        setupConnection(
+          conn,
+          onMessageGlobal,
+          onPeerListUpdateGlobal,
+          localName
+        );
       });
-      peer.on('error', (err) => {
-        console.warn('Peer error', err);
-        try { if (err && err.type === 'unavailable-id') { const newId = nanoid(6); localStorage.setItem(LS_PEER_ID, newId); try { peer.destroy && peer.destroy(); } catch (e) {} createPeerWithId(newId); } } catch (e) {}
+      peer.on("error", (err) => {
+        console.warn("Peer error", err);
+        try {
+          if (err && err.type === "unavailable-id") {
+            const newId = nanoid(6);
+            localStorage.setItem(LS_PEER_ID, newId);
+            try {
+              peer.destroy && peer.destroy();
+            } catch (e) {}
+            createPeerWithId(newId);
+          }
+        } catch (e) {}
       });
       return peer;
     } catch (e) {
-      console.warn('createPeerWithId failed', e);
-      const newId = nanoid(6); localStorage.setItem(LS_PEER_ID, newId); return createPeerWithId(newId);
+      console.warn("createPeerWithId failed", e);
+      const newId = nanoid(6);
+      localStorage.setItem(LS_PEER_ID, newId);
+      return createPeerWithId(newId);
     }
   };
   return createPeerWithId(storedId);
@@ -1275,19 +1598,12 @@ export const initPeer = (onMessage, onPeerListUpdate, localName = 'Anonymous', o
 
 // expose a helper to request file save permission from outside if needed
 export const supportsNativeFileSystem = () => {
-  return typeof window.showSaveFilePicker === 'function' || typeof window.chooseFileSystemEntries === 'function';
+  return (
+    typeof window.showSaveFilePicker === "function" ||
+    typeof window.chooseFileSystemEntries === "function"
+  );
 };
 
 // respondToFileOffer, offerFileToPeers, startSendingFile exported earlier
 
-
 // ---------- end of webrtc.js ----------
-
-
-
-
-
-
-
-
-
