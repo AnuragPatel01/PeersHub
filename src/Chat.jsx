@@ -851,6 +851,152 @@
 //   );
 // }
 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 // src/components/Chat.jsx
 import "./App.css";
 import React, { useEffect, useState, useRef } from "react";
@@ -897,6 +1043,10 @@ export default function Chat() {
   const fileWriteStatusRef = useRef({}); // offerId -> bytesReceived
   // outgoing pending offers: offerId -> { file, acceptingPeers: Set }
   const outgoingPendingOffers = useRef({});
+
+  // transfers: active transfers for UI progress
+  // transfers: { [offerId]: { direction: 'sending'|'receiving', label, total, transferred, peers?: [] } }
+  const [transfers, setTransfers] = useState({});
 
   const [text, setText] = useState("");
   const [username, setUsername] = useState(
@@ -1013,26 +1163,98 @@ export default function Chat() {
     });
   };
 
+  // transfer helpers (update UI state)
+  const setTransfer = (offerId, patch) => {
+    setTransfers((t) => {
+      const cur = t[offerId] || {};
+      const next = { ...t, [offerId]: { ...cur, ...patch } };
+      return next;
+    });
+  };
+  const removeTransfer = (offerId) => {
+    setTransfers((t) => {
+      const copy = { ...t };
+      delete copy[offerId];
+      return copy;
+    });
+  };
+
   // handle incoming file chunk and write to disk using saved handle
   const handleIncomingFileChunk = async (data) => {
-    const { id: offerId, seq, chunk, final } = data;
+    // defensive: some runtimes wrap chunk under .data (PeerJS / structured clone variants)
+    let { id: offerId, seq, chunk, final } = data || {};
     try {
-      if (!saveHandlesRef.current[offerId]) {
-        console.warn("No save handle for offer", offerId);
+      // unwrap wrapper if necessary (common PeerJS quirk)
+      if (chunk && chunk.data && (chunk.data instanceof ArrayBuffer || ArrayBuffer.isView(chunk.data) || chunk.data instanceof Blob)) {
+        chunk = chunk.data;
+      }
+
+      const writer = saveHandlesRef.current[offerId];
+      console.debug("received chunk", {
+        offerId,
+        seq,
+        chunkType: chunk && chunk.constructor && chunk.constructor.name,
+        writerExists: !!writer,
+      });
+
+      if (!writer) {
+        console.warn("No writable for offer", offerId, "— ignoring chunk", seq);
         return;
       }
-      const writer = saveHandlesRef.current[offerId];
-      if (chunk && chunk instanceof ArrayBuffer) {
-        await writer.write(new Uint8Array(chunk));
-        fileWriteStatusRef.current[offerId] =
-          (fileWriteStatusRef.current[offerId] || 0) + (chunk.byteLength || 0);
+
+      // chunk may be Blob or ArrayBuffer / TypedArray
+      let bytesWritten = 0;
+      if (chunk instanceof Blob) {
+        await writer.write(chunk);
+        bytesWritten = chunk.size || 0;
+      } else if (chunk instanceof ArrayBuffer || ArrayBuffer.isView(chunk)) {
+        const buf =
+          chunk instanceof ArrayBuffer
+            ? new Uint8Array(chunk)
+            : new Uint8Array(chunk.buffer || chunk);
+        await writer.write(buf);
+        bytesWritten = buf.byteLength;
+      } else if (chunk && chunk.buffer && ArrayBuffer.isView(chunk)) {
+        // extra fallback
+        const buf = new Uint8Array(chunk.buffer);
+        await writer.write(buf);
+        bytesWritten = buf.byteLength;
+      } else {
+        console.warn("Unknown chunk type for offer", offerId, seq, chunk);
       }
+
+      // update bytes tracker
+      if (bytesWritten > 0) {
+        fileWriteStatusRef.current[offerId] =
+          (fileWriteStatusRef.current[offerId] || 0) + bytesWritten;
+
+        // update UI transfer progress
+        const total = saveHandlesRef.current.__meta__ && saveHandlesRef.current.__meta__[offerId]
+          ? saveHandlesRef.current.__meta__[offerId].total
+          : (transfers[offerId] && transfers[offerId].total) || 0;
+
+        setTransfer(offerId, {
+          direction: "receiving",
+          label: saveHandlesRef.current.__meta__ && saveHandlesRef.current.__meta__[offerId]
+            ? saveHandlesRef.current.__meta__[offerId].label
+            : (transfers[offerId] && transfers[offerId].label) || `Receiving ${offerId}`,
+          total,
+          transferred: fileWriteStatusRef.current[offerId] || 0,
+        });
+      }
+
       if (final) {
         try {
           await writer.close();
         } catch (e) {
-          console.warn("close writer failed", e);
+          console.warn("Error closing writer for offer", offerId, e);
         }
+        // cleanup
+        delete saveHandlesRef.current[offerId];
+        delete fileWriteStatusRef.current[offerId];
+
+        // finalize UI
+        setTransfer(offerId, { transferred: (transfers[offerId] && transfers[offerId].total) || undefined });
         setMessages((m) => {
           const sys = {
             id: `sys-file-done-${offerId}`,
@@ -1045,11 +1267,32 @@ export default function Chat() {
           persistMessages(next);
           return next;
         });
-        delete saveHandlesRef.current[offerId];
-        delete fileWriteStatusRef.current[offerId];
+
+        // remove the transfer UI after a brief moment
+        setTimeout(() => removeTransfer(offerId), 3000);
       }
     } catch (e) {
       console.warn("handleIncomingFileChunk error", e);
+      setMessages((m) => {
+        const sys = {
+          id: `sys-file-error-${offerId}-${Date.now()}`,
+          from: "System",
+          text: `Error writing received file chunk: ${e.message || e}`,
+          ts: Date.now(),
+          type: "system",
+        };
+        const next = [...m, sys];
+        persistMessages(next);
+        return next;
+      });
+      // cleanup UI record
+      removeTransfer(offerId);
+      try {
+        if (saveHandlesRef.current[offerId]) {
+          try { await saveHandlesRef.current[offerId].close(); } catch (er) {}
+          delete saveHandlesRef.current[offerId];
+        }
+      } catch (er) {}
     }
   };
 
@@ -1121,9 +1364,11 @@ export default function Chat() {
     // file offer received -> show accept/ignore UI and set 10s timer
     if (from === "__system_file_offer__" && payloadOrText) {
       const offer = payloadOrText; // contains id, name, size, mime, from
+      // IMPORTANT: use the sender-provided offer.id as the canonical key
       const offerId =
         offer.id ||
         `offer-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+
       setIncomingFileOffers((s) => {
         const copy = { ...s };
         copy[offerId] = {
@@ -1139,7 +1384,6 @@ export default function Chat() {
         setIncomingFileOffers((s) => {
           const copy = { ...s };
           if (!copy[offerId]) return s;
-          // send ignore response
           try {
             if (offer.from) respondToFileOffer(offerId, offer.from, false);
           } catch (e) {}
@@ -1159,11 +1403,27 @@ export default function Chat() {
     if (from === "__system_file_offer_response__" && payloadOrText) {
       const { id: offerId, from: responder, accept } = payloadOrText;
       try {
-        if (!outgoingPendingOffers.current[offerId]) return;
+        const pending = outgoingPendingOffers.current[offerId];
+        if (!pending) return;
         if (accept) {
-          outgoingPendingOffers.current[offerId].acceptingPeers.add(responder);
-          const file = outgoingPendingOffers.current[offerId].file;
-          if (file) startSendingFile(file, offerId, [responder]);
+          pending.acceptingPeers.add(responder);
+          const file = pending.file;
+          if (file) {
+            // Start sending file to this responder
+            // Track UI sending progress
+            setTransfer(offerId, {
+              direction: "sending",
+              label: `Sending: ${file.name}`,
+              total: file.size,
+              transferred: 0,
+              peers: Array.from(pending.acceptingPeers),
+            });
+            try {
+              startSendingFile(file, offerId, [responder]);
+            } catch (e) {
+              console.warn("startSendingFile failed", e);
+            }
+          }
         }
       } catch (e) {
         console.warn("file_offer_response handling failed", e);
@@ -1192,6 +1452,9 @@ export default function Chat() {
         persistMessages(next);
         return next;
       });
+      // mark transfer finished for sender side too and remove after delay
+      setTransfer(offerId, (prev) => ({ ...prev, transferred: (prev && prev.total) || prev && prev.transferred }));
+      setTimeout(() => removeTransfer(offerId), 3000);
       return;
     }
 
@@ -1516,114 +1779,10 @@ export default function Chat() {
     }
   };
 
-  // compute status dot for message using WhatsApp-like rules
-  const renderStatusDot = (m) => {
-    const totalPeers = peers?.length || 0; // recipients count (excluding self)
-    if (totalPeers === 0) {
-      return (
-        <span
-          className="inline-block w-2 h-2 rounded-full bg-gray-400 ml-2"
-          title="No recipients (offline)"
-        />
-      );
-    }
-
-    const deliveries = (m.deliveries || []).filter(
-      (id) => id !== (getLocalPeerId() || myId)
-    ).length;
-    const reads = (m.reads || []).filter(
-      (id) => id !== (getLocalPeerId() || myId)
-    ).length;
-
-    // single tick (red) when not delivered to all recipients
-    if (deliveries < totalPeers) {
-      return (
-        <span
-          className="inline-block w-2 h-2 rounded-full bg-red-500 ml-2"
-          title={`Single tick — delivered to ${deliveries}/${totalPeers}`}
-        />
-      );
-    }
-
-    // double tick (yellow) when delivered to everyone but not read by all
-    if (deliveries === totalPeers && reads < totalPeers) {
-      return (
-        <span
-          className="inline-block w-2 h-2 rounded-full bg-yellow-400 ml-2"
-          title={`Double tick — delivered to all (${totalPeers}), reads ${reads}/${totalPeers}`}
-        />
-      );
-    }
-
-    // double-blue (green) when read by everyone
-    if (reads === totalPeers) {
-      return (
-        <span
-          className="inline-block w-2 h-2 rounded-full bg-green-500 ml-2"
-          title="Double-blue — read by everyone"
-        />
-      );
-    }
-
-    return (
-      <span className="inline-block w-2 h-2 rounded-full bg-gray-400 ml-2" />
-    );
-  };
-
-  // render message (preserve UI)
-  const renderMessage = (m, idx) => {
-    const from = m.from ?? "peer";
-    const txt = typeof m.text === "string" ? m.text : JSON.stringify(m.text);
-    const time = new Date(m.ts).toLocaleTimeString([], {
-      hour: "2-digit",
-      minute: "2-digit",
-    });
-    const isSystem = m.type && m.type.toString().startsWith("system");
-    const isMe =
-      (m.fromId || m.from) === (getLocalPeerId() || myId) || from === username;
-
-    if (isSystem) {
-      return (
-        <div key={`${m.id ?? m.ts}-${idx}`} className="w-full text-center my-2">
-          <div className="inline-block px-3 py-1 rounded bg-white/20 text-blue-500 text-sm">
-            {m.text}
-          </div>
-        </div>
-      );
-    }
-
-    return (
-      <div
-        onClick={() => handleTapMessage(m)}
-        key={`${m.id ?? m.ts}-${idx}`}
-        className={`p-2 rounded-2xl max-w-[50%] mb-2 cursor-pointer ${
-          isMe ? "ml-auto bg-blue-500 text-white" : "bg-white/100  text-black"
-        }`}
-      >
-        <div className="text-xs font-bold flex items-center">
-          <div className="flex-1">{isMe ? "You" : from}</div>
-          <div className="text-[10px] text-gray-700 /70 ml-2">{time}</div>
-          {isMe && renderStatusDot(m)}
-        </div>
-        {m.replyTo && (
-          <div className="mt-2 mb-2 p-2 rounded border border-white/5 text-xs text-gray-600 bg-gray-300">
-            <strong className="text-xs text-blue-400">
-              Reply to {m.replyTo.from}:
-            </strong>{" "}
-            {m.replyTo.text}
-          </div>
-        )}
-        <div className="break-words">{txt}</div>
-      </div>
-    );
-  };
-
   // file input handler (sender)
   const onFileSelected = async (file) => {
     if (!file) return;
-    const offerId = `offer-${Date.now()}-${Math.random()
-      .toString(36)
-      .slice(2, 7)}`;
+    const offerId = file && file.name ? `${getLocalPeerId() || myId}-${Date.now()}-${Math.random().toString(36).slice(2,7)}` : `offer-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
     outgoingPendingOffers.current[offerId] = {
       file,
       acceptingPeers: new Set(),
@@ -1653,6 +1812,15 @@ export default function Chat() {
       return next;
     });
 
+    // prepare transfer UI placeholder (will update when someone accepts)
+    setTransfer(offerId, {
+      direction: "sending",
+      label: `Sending: ${file.name}`,
+      total: file.size,
+      transferred: 0,
+      peers: [],
+    });
+
     // cleanup after 10s (if nobody accepted)
     setTimeout(() => {
       try {
@@ -1671,6 +1839,9 @@ export default function Chat() {
             persistMessages(next);
             return next;
           });
+          // remove transfer UI if nobody accepted
+          removeTransfer(offerId);
+          delete outgoingPendingOffers.current[offerId];
         }
       } catch (e) {
         console.warn("post-offer cleanup failed", e);
@@ -1716,14 +1887,36 @@ export default function Chat() {
           return;
         }
         const writable = await handle.createWritable();
+
+        // store a meta map for UI total/label lookups
+        if (!saveHandlesRef.current.__meta__) saveHandlesRef.current.__meta__ = {};
+        saveHandlesRef.current.__meta__[offerId] = {
+          total: offer.size || 0,
+          label: `Receiving: ${offer.name}`,
+        };
+
+        // record the writable and initialize fileWriteStatus
         saveHandlesRef.current[offerId] = writable;
         fileWriteStatusRef.current[offerId] = 0;
+
+        // update transfers UI entry
+        setTransfer(offerId, {
+          direction: "receiving",
+          label: `Receiving: ${offer.name}`,
+          total: offer.size || 0,
+          transferred: 0,
+        });
+
+        // IMPORTANT: only respond accept after writable created
         respondToFileOffer(offerId, offer.from, true);
+
+        // remove the incoming offer UI
         setIncomingFileOffers((s) => {
           const copy = { ...s };
           delete copy[offerId];
           return copy;
         });
+
         setMessages((m) => {
           const sys = {
             id: `sys-accept-${offerId}`,
@@ -1737,8 +1930,8 @@ export default function Chat() {
           return next;
         });
       } else {
-        // fallback: accept but warn that direct disk writes aren't supported
-        respondToFileOffer(offerId, offer.from, true);
+        // fallback: decline if no native file system support (or implement fallback to IndexedDB)
+        respondToFileOffer(offerId, offer.from, false);
         setIncomingFileOffers((s) => {
           const copy = { ...s };
           delete copy[offerId];
@@ -1748,7 +1941,7 @@ export default function Chat() {
           const sys = {
             id: `sys-accept-${offerId}`,
             from: "System",
-            text: `Accepted file: ${offer.name} — browser may not support direct disk writes.`,
+            text: `Browser does not support direct disk writes; cannot accept ${offer.name}.`,
             ts: Date.now(),
             type: "system",
           };
@@ -1767,6 +1960,7 @@ export default function Chat() {
         delete copy[offerId];
         return copy;
       });
+      removeTransfer(offerId);
     }
   };
 
@@ -1847,8 +2041,151 @@ export default function Chat() {
     return <div className="text-sm text-blue-500 mb-2">{shown} typing...</div>;
   };
 
+  // render floating transfer progress UI (top)
+  const renderTransferBars = () => {
+    const ids = Object.keys(transfers);
+    if (!ids.length) return null;
+    return (
+      <div className="fixed left-1/2 -translate-x-1/2 top-4 z-50 w-[92%] max-w-[720px]">
+        <div className="bg-black/60 backdrop-blur px-3 py-2 rounded-lg space-y-2">
+          {ids.map((id) => {
+            const t = transfers[id];
+            const total = t.total || 0;
+            const transferred = t.transferred || 0;
+            const pct = total > 0 ? Math.round((transferred / total) * 100) : 0;
+            return (
+              <div key={id} className="text-white text-sm">
+                <div className="flex justify-between items-center">
+                  <div className="font-medium">{t.label || id}</div>
+                  <div className="text-xs opacity-80">
+                    {total > 0 ? `${pct}%` : `${(transferred / 1024).toFixed(1)} KB`}
+                  </div>
+                </div>
+                <div className="mt-1 w-full bg-white/20 h-2 rounded overflow-hidden">
+                  <div
+                    className="h-2 bg-blue-500"
+                    style={{ width: `${Math.min(100, pct)}%` }}
+                  />
+                </div>
+                <div className="mt-1 text-xs opacity-80">
+                  {total > 0
+                    ? `${(transferred / 1024).toFixed(1)} KB / ${(total / 1024).toFixed(1)} KB`
+                    : `${(transferred / 1024).toFixed(1)} KB transferred`}
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      </div>
+    );
+  };
+
+  // render message (preserve UI)
+  const renderMessage = (m, idx) => {
+    const from = m.from ?? "peer";
+    const txt = typeof m.text === "string" ? m.text : JSON.stringify(m.text);
+    const time = new Date(m.ts).toLocaleTimeString([], {
+      hour: "2-digit",
+      minute: "2-digit",
+    });
+    const isSystem = m.type && m.type.toString().startsWith("system");
+    const isMe =
+      (m.fromId || m.from) === (getLocalPeerId() || myId) || from === username;
+
+    if (isSystem) {
+      return (
+        <div key={`${m.id ?? m.ts}-${idx}`} className="w-full text-center my-2">
+          <div className="inline-block px-3 py-1 rounded bg-white/20 text-blue-500 text-sm">
+            {m.text}
+          </div>
+        </div>
+      );
+    }
+
+    return (
+      <div
+        onClick={() => handleTapMessage(m)}
+        key={`${m.id ?? m.ts}-${idx}`}
+        className={`p-2 rounded-2xl max-w-[50%] mb-2 cursor-pointer ${
+          isMe ? "ml-auto bg-blue-500 text-white" : "bg-white/100  text-black"
+        }`}
+      >
+        <div className="text-xs font-bold flex items-center">
+          <div className="flex-1">{isMe ? "You" : from}</div>
+          <div className="text-[10px] text-gray-700 /70 ml-2">{time}</div>
+          {isMe && renderStatusDot(m)}
+        </div>
+        {m.replyTo && (
+          <div className="mt-2 mb-2 p-2 rounded border border-white/5 text-xs text-gray-600 bg-gray-300">
+            <strong className="text-xs text-blue-400">
+              Reply to {m.replyTo.from}:
+            </strong>{" "}
+            {m.replyTo.text}
+          </div>
+        )}
+        <div className="break-words">{txt}</div>
+      </div>
+    );
+  };
+
+  // compute status dot for message using WhatsApp-like rules
+  function renderStatusDot(m) {
+    const totalPeers = peers?.length || 0; // recipients count (excluding self)
+    if (totalPeers === 0) {
+      return (
+        <span
+          className="inline-block w-2 h-2 rounded-full bg-gray-400 ml-2"
+          title="No recipients (offline)"
+        />
+      );
+    }
+
+    const deliveries = (m.deliveries || []).filter(
+      (id) => id !== (getLocalPeerId() || myId)
+    ).length;
+    const reads = (m.reads || []).filter(
+      (id) => id !== (getLocalPeerId() || myId)
+    ).length;
+
+    // single tick (red) when not delivered to all recipients
+    if (deliveries < totalPeers) {
+      return (
+        <span
+          className="inline-block w-2 h-2 rounded-full bg-red-500 ml-2"
+          title={`Single tick — delivered to ${deliveries}/${totalPeers}`}
+        />
+      );
+    }
+
+    // double tick (yellow) when delivered to everyone but not read by all
+    if (deliveries === totalPeers && reads < totalPeers) {
+      return (
+        <span
+          className="inline-block w-2 h-2 rounded-full bg-yellow-400 ml-2"
+          title={`Double tick — delivered to all (${totalPeers}), reads ${reads}/${totalPeers}`}
+        />
+      );
+    }
+
+    // double-blue (green) when read by everyone
+    if (reads === totalPeers) {
+      return (
+        <span
+          className="inline-block w-2 h-2 rounded-full bg-green-500 ml-2"
+          title="Double-blue — read by everyone"
+        />
+      );
+    }
+
+    return (
+      <span className="inline-block w-2 h-2 rounded-full bg-gray-400 ml-2" />
+    );
+  }
+
   return (
     <>
+      {renderTransferBars()}
+
       <div className="h-[92vh] md:h-[92vh] max-w-[410px] w-full mx-auto bg-gray-50 text-purple-600 p-6 flex flex-col rounded-4xl">
         <header className="flex items-center justify-between mb-4">
           <div className="flex gap-2.5">
