@@ -1816,7 +1816,7 @@ export default function Chat() {
             From: {peerNamesMap[offer.from] || offer.from} — Expires in{" "}
             {remaining}s
           </div>
-          <div className="mt-2 flex gap-2">
+          <div className="mt-2 flex justify-center gap-2">
             <button
               onClick={() => acceptFileOffer(k)}
               className="px-3 py-1 rounded bg-gradient-to-br from-green-500 to-green-600 text-white"
@@ -1849,7 +1849,7 @@ export default function Chat() {
 
   return (
     <>
-      <div className="h-[92vh] md:h-[92vh] max-w-[400px] w-full mx-auto bg-gray-50 text-purple-600 p-6 flex flex-col rounded-4xl">
+      <div className="h-[92vh] md:h-[92vh] max-w-[410px] w-full mx-auto bg-gray-50 text-purple-600 p-6 flex flex-col rounded-4xl">
         <header className="flex items-center justify-between mb-4">
           <div className="flex gap-2.5">
             <div className="text-sm text-blue-600">YourID</div>
