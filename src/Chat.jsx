@@ -1035,145 +1035,89 @@ export default function Chat() {
   };
 
   // handle incoming file chunk and write to disk using saved handle
-  const handleIncomingFileChunk = async (data) => {
-    // defensive: some runtimes wrap chunk under .data (PeerJS / structured clone variants)
-    let { id: offerId, seq, chunk, final } = data || {};
-    try {
-      // unwrap wrapper if necessary (common PeerJS quirk)
-      if (
-        chunk &&
-        chunk.data &&
-        (chunk.data instanceof ArrayBuffer ||
-          ArrayBuffer.isView(chunk.data) ||
-          chunk.data instanceof Blob)
-      ) {
-        chunk = chunk.data;
-      }
+  // handle incoming file chunk and write to disk using saved handle
 
-      const writer = saveHandlesRef.current[offerId];
-      console.debug("received chunk", {
-        offerId,
-        seq,
-        chunkType: chunk && chunk.constructor && chunk.constructor.name,
-        writerExists: !!writer,
-      });
 
-      if (!writer) {
-        console.warn("No writable for offer", offerId, "— ignoring chunk", seq);
-        return;
-      }
+  // handle incoming file chunk and write to disk using saved handle
+const handleIncomingFileChunk = async (data) => {
+  // defensive: some runtimes wrap chunk under .data (PeerJS / structured clone variants)
+  let { id: offerId, seq, chunk, final } = data || {};
 
-      // chunk may be Blob or ArrayBuffer / TypedArray
-      let bytesWritten = 0;
-      if (chunk instanceof Blob) {
-        await writer.write(chunk);
-        bytesWritten = chunk.size || 0;
-      } else if (chunk instanceof ArrayBuffer || ArrayBuffer.isView(chunk)) {
-        const buf =
-          chunk instanceof ArrayBuffer
-            ? new Uint8Array(chunk)
-            : new Uint8Array(chunk.buffer || chunk);
-        await writer.write(buf);
-        bytesWritten = buf.byteLength;
-      } else if (chunk && chunk.buffer && ArrayBuffer.isView(chunk)) {
-        // extra fallback
-        const buf = new Uint8Array(chunk.buffer);
-        await writer.write(buf);
-        bytesWritten = buf.byteLength;
-      } else {
-        console.warn("Unknown chunk type for offer", offerId, seq, chunk);
-      }
-
-      // update bytes tracker
-      if (bytesWritten > 0) {
-        fileWriteStatusRef.current[offerId] =
-          (fileWriteStatusRef.current[offerId] || 0) + bytesWritten;
-
-        // update UI transfer progress
-        const total =
-          saveHandlesRef.current.__meta__ &&
-          saveHandlesRef.current.__meta__[offerId]
-            ? saveHandlesRef.current.__meta__[offerId].total
-            : (transfers[offerId] && transfers[offerId].total) || 0;
-
-        setTransfer(offerId, {
-          direction: "receiving",
-          label:
-            saveHandlesRef.current.__meta__ &&
-            saveHandlesRef.current.__meta__[offerId]
-              ? saveHandlesRef.current.__meta__[offerId].label
-              : (transfers[offerId] && transfers[offerId].label) ||
-                `Receiving ${offerId}`,
-          total,
-          transferred: fileWriteStatusRef.current[offerId] || 0,
-        });
-      }
-
-      if (final) {
   try {
-    // ensure final chunks are flushed to disk
-    await writer.close();
-  } catch (e) {
-    console.warn("Error closing writer for offer", offerId, e);
-  }
-
-  // mark transfer as 100% and schedule UI removal (guard against missing funcs)
-  try {
-    if (typeof setTransfer === "function" && typeof removeTransfer === "function") {
-      setTransfer(offerId, (prev) => ({
-        ...prev,
-        transferred: prev?.total ?? prev?.transferred ?? 0,
-      }));
-      // remove the floating progress bar after a short delay so user sees completion
-      setTimeout(() => {
-        try {
-          removeTransfer(offerId);
-        } catch (e) {
-          console.warn("removeTransfer error", e);
-        }
-      }, 1500);
+    // unwrap wrapper if necessary (common PeerJS quirk)
+    if (
+      chunk &&
+      chunk.data &&
+      (chunk.data instanceof ArrayBuffer ||
+        ArrayBuffer.isView(chunk.data) ||
+        chunk.data instanceof Blob)
+    ) {
+      chunk = chunk.data;
     }
-  } catch (e) {
-    console.warn("transfer cleanup failed", e);
-  }
 
-  // cleanup internal bookkeeping
-  try {
-    delete saveHandlesRef.current[offerId];
-    delete fileWriteStatusRef.current[offerId];
-  } catch (e) {
-    console.warn("cleanup refs failed", e);
-  }
-}
+    const writer = saveHandlesRef.current[offerId];
+    if (!writer) {
+      console.warn("No writable for offer", offerId, "— ignoring chunk", seq);
+      return;
+    }
 
-        // finalize UI
-        setTransfer(offerId, {
-          transferred:
-            (transfers[offerId] && transfers[offerId].total) || undefined,
-        });
-        setMessages((m) => {
-          const sys = {
-            id: `sys-file-done-${offerId}`,
-            from: "System",
-            text: "File received and saved to disk",
-            ts: Date.now(),
-            type: "system",
-          };
-          const next = [...m, sys];
-          persistMessages(next);
-          return next;
-        });
+    // chunk may be Blob, ArrayBuffer, or TypedArray
+    if (chunk instanceof Blob) {
+      await writer.write(chunk);
+      fileWriteStatusRef.current[offerId] =
+        (fileWriteStatusRef.current[offerId] || 0) + (chunk.size || 0);
+    } else if (chunk instanceof ArrayBuffer || ArrayBuffer.isView(chunk)) {
+      const buf =
+        chunk instanceof ArrayBuffer
+          ? new Uint8Array(chunk)
+          : new Uint8Array(chunk.buffer || chunk);
+      await writer.write(buf);
+      fileWriteStatusRef.current[offerId] =
+        (fileWriteStatusRef.current[offerId] || 0) + buf.byteLength;
+    } else {
+      console.warn("Unknown chunk type for offer", offerId, seq, chunk);
+    }
 
-        // remove the transfer UI after a brief moment
-        setTimeout(() => removeTransfer(offerId), 3000);
+    if (final) {
+      try {
+        await writer.close();
+      } catch (e) {
+        console.warn("Error closing writer for offer", offerId, e);
       }
-    } catch (e) {
-      console.warn("handleIncomingFileChunk error", e);
+
+      // cleanup UI progress (guarded)
+      try {
+        if (typeof setTransfer === "function" && typeof removeTransfer === "function") {
+          setTransfer(offerId, (prev) => ({
+            ...prev,
+            transferred: prev?.total ?? prev?.transferred ?? 0,
+          }));
+          setTimeout(() => {
+            try {
+              removeTransfer(offerId);
+            } catch (er) {
+              console.warn("removeTransfer failed", er);
+            }
+          }, 1500);
+        }
+      } catch (e) {
+        console.warn("transfer cleanup failed", e);
+      }
+
+      // cleanup refs
+      try {
+        delete saveHandlesRef.current[offerId];
+      } catch (e) {}
+      try {
+        delete fileWriteStatusRef.current[offerId];
+      } catch (e) {}
+
+      // notify user in UI (append a system message)
       setMessages((m) => {
         const sys = {
-          id: `sys-file-error-${offerId}-${Date.now()}`,
+          id: `sys-file-done-${offerId}`,
           from: "System",
-          text: `Error writing received file chunk: ${e.message || e}`,
+          text: "File received and saved to disk",
           ts: Date.now(),
           type: "system",
         };
@@ -1181,18 +1125,55 @@ export default function Chat() {
         persistMessages(next);
         return next;
       });
-      // cleanup UI record
-      removeTransfer(offerId);
-      try {
-        if (saveHandlesRef.current[offerId]) {
-          try {
-            await saveHandlesRef.current[offerId].close();
-          } catch (er) {}
-          delete saveHandlesRef.current[offerId];
-        }
-      } catch (er) {}
     }
-  };
+  } catch (e) {
+    console.warn("handleIncomingFileChunk error", e);
+
+    // append error system message
+    setMessages((m) => {
+      const sys = {
+        id: `sys-file-error-${offerId}-${Date.now()}`,
+        from: "System",
+        text: `Error writing received file chunk: ${e.message || e}`,
+        ts: Date.now(),
+        type: "system",
+      };
+      const next = [...m, sys];
+      try {
+        persistMessages(next);
+      } catch (err) {}
+      return next;
+    });
+
+    // cleanup UI record
+    try {
+      if (typeof removeTransfer === "function") removeTransfer(offerId);
+    } catch (er) {
+      console.warn("removeTransfer error", er);
+    }
+
+    // try to close and delete any writer safely
+    try {
+      const w = saveHandlesRef.current[offerId];
+      if (w) {
+        try {
+          await w.close();
+        } catch (er) {
+          console.warn("error closing writer during error cleanup", er);
+        }
+        delete saveHandlesRef.current[offerId];
+      }
+    } catch (er) {
+      console.warn("saveHandles cleanup error", er);
+    }
+
+    // ensure we delete the fileWriteStatus entry
+    try {
+      delete fileWriteStatusRef.current[offerId];
+    } catch (er) {}
+  }
+};
+
 
   // incoming messages callback from webrtc
   const handleIncoming = async (from, payloadOrText) => {
