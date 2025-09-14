@@ -2210,7 +2210,7 @@ const LandingPage = ({ onGetStarted }) => {
   }, []);
 
   return (
-    <div className="min-h-screen bg-gradient-to-br from-slate-900 via-purple-900 to-slate-900 flex items-center justify-center p-4 overflow-hidden relative">
+    <div className=" h-[92vh] bg-gradient-to-br from-slate-900 via-purple-900 to-slate-900 flex items-center justify-center p-4 overflow-hidden relative">
       {/* Animated background elements */}
       <div className="absolute inset-0">
         <div className="absolute top-20 left-10 w-72 h-72 bg-purple-500 rounded-full filter blur-3xl opacity-20 animate-pulse"></div>
@@ -2960,7 +2960,7 @@ export default function Chat() {
 
   return (
     <>
-      <div className="  bg-gradient-to-br from-slate-900 via-blue-600 to-slate-900 flex items-center justify-center p-4">
+      <div className="bg-gradient-to-br from-slate-900 via-blue-600 to-slate-900 flex items-center justify-center p-4">
         <div className="w-full max-w-md  bg-white/10 backdrop-blur-lg rounded-3xl shadow-2xl border border-white/20 overflow-hidden">
           {/* Header */}
           <header className="p-4 border-b border-white/10 bg-white/5">
@@ -3039,7 +3039,7 @@ export default function Chat() {
           </header>
 
           {/* Messages */}
-          <main className="flex-1 h-140 w-90 overflow-y-auto">
+          <main className="flex-1 h-155 w-90 overflow-y-auto">
             <div className="p-2">
               {messages.length === 0 && (
                 <div className="text-center text-gray-400 text-sm py-8">
