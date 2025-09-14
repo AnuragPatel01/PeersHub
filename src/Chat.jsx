@@ -2368,7 +2368,19 @@ export default function Chat() {
   const recordTimerRef = useRef(null);
   const [isRecording, setIsRecording] = useState(false);
   const [recordRemaining, setRecordRemaining] = useState(MAX_RECORD_SECONDS);
-  const previewVideoRef = useRef(null);
+  const previewUrlsRef = useRef(new Set());
+  const previewVideoRef = useRef(null);   // for the live preview <video> element
+
+  useEffect(() => {
+    return () => {
+      previewUrlsRef.current.forEach((u) => {
+        try {
+          URL.revokeObjectURL(u);
+        } catch (e) {}
+      });
+      previewUrlsRef.current.clear();
+    };
+  }, []);
 
   // FIXED: Video player overlay state
   const [expandedVideo, setExpandedVideo] = useState(null);
@@ -2484,6 +2496,14 @@ export default function Chat() {
 
   // handle incoming file chunk and write to disk using saved handle
   const handleIncomingFileChunk = async (data) => {
+    console.debug("PH: incoming chunk", {
+      offerId,
+      seq,
+      chunkType: typeof chunk,
+      isBlob: chunk instanceof Blob,
+      size: chunk && (chunk.size || chunk.byteLength),
+    });
+
     let { id: offerId, seq, chunk, final } = data || {};
     try {
       if (
@@ -2601,6 +2621,16 @@ export default function Chat() {
 
   // incoming message handler
   const handleIncoming = async (from, payloadOrText) => {
+    console.debug(
+      "PH: received chat media?",
+      payloadOrText.id,
+      payloadOrText.media && {
+        hasBlob: !!payloadOrText.media.blob,
+        size: payloadOrText.media && payloadOrText.media.size,
+        url: payloadOrText.media && payloadOrText.media.url,
+      }
+    );
+
     // FIXED: Better typing handling with automatic cleanup
     if (
       from === "__system_typing__" &&
@@ -3398,78 +3428,101 @@ export default function Chat() {
       };
 
       recorder.onstop = async () => {
-        // stop media tracks
         try {
-          mediaStreamRef.current &&
-            mediaStreamRef.current.getTracks().forEach((t) => t.stop());
-        } catch (e) {}
-
-        // blob from chunks
-        const blob = new Blob(recordedChunksRef.current, {
-          type: "video/webm",
-        });
-        const size = blob.size || 0;
-        const name = `recording-${Date.now()}.webm`;
-        const localUrl = URL.createObjectURL(blob);
-
-        // add local message (sender)
-        const id = nanoid();
-        const localId = getLocalPeerId() || myId;
-        const msgObj = {
-          id,
-          from: localId,
-          fromName: username,
-          text: "",
-          ts: Date.now(),
-          deliveries: [],
-          reads: [localId],
-          media: { blob, mime: blob.type, size, name, url: localUrl },
-        };
-        setMessages((m) => {
-          const next = [...m, msgObj];
-          persistMessages(next);
-          return next;
-        });
-
-        // sender progress UI
-        setTransfer(id, {
-          name,
-          label: "Sending",
-          transferred: 0,
-          total: size,
-          ts: Date.now(),
-        });
-
-        // send chat (structured clone of object with blob)
-        try {
-          sendChat(msgObj);
-          setTransfer(id, (prev) => ({ ...(prev || {}), transferred: size }));
-          setTimeout(() => removeTransfer(id), 1500);
-        } catch (e) {
-          console.warn("send recorded media failed", e);
-          removeTransfer(id);
-        }
-
-        // cleanup preview element srcObject & revoke URL later
-        if (previewVideoRef.current) {
+          // stop media tracks safely
           try {
-            previewVideoRef.current.srcObject = stream;
-            previewVideoRef.current.muted = true;
-            previewVideoRef.current.playsInline = true;
-            // make sure autoplay DOM prop is set
-            previewVideoRef.current.autoplay = true;
+            mediaStreamRef.current &&
+              mediaStreamRef.current.getTracks().forEach((t) => t.stop());
+          } catch (e) {}
 
-            // play after metadata is ready
-            previewVideoRef.current.onloadedmetadata = async () => {
-              try {
-                await previewVideoRef.current.play();
-              } catch (err) {
-                console.warn("preview play failed (onloadedmetadata)", err);
-              }
-            };
+          // create the blob from recorded chunks (declare blob BEFORE we use it)
+          const blob = new Blob(recordedChunksRef.current, {
+            type: "video/webm",
+          });
+          const size = blob.size || 0;
+          const name = `recording-${Date.now()}.webm`;
+
+          // create a local object URL for immediate preview (do NOT revoke it here)
+          const localUrl = URL.createObjectURL(blob);
+          // track created URLs if you want to revoke them later on unmount
+          if (!previewUrlsRef.current) previewUrlsRef.current = new Set();
+          previewUrlsRef.current.add(localUrl);
+
+          // add a local preview message (sender)
+          const id = nanoid();
+          const localId = getLocalPeerId() || myId;
+          const msgObj = {
+            id,
+            from: localId,
+            fromName: username,
+            text: "",
+            ts: Date.now(),
+            deliveries: [],
+            reads: [localId],
+            media: { blob: null, mime: blob.type, size, name, url: localUrl },
+          };
+          setMessages((m) => {
+            const next = [...m, msgObj];
+            persistMessages(next); // your persistMessages will strip blobs (good)
+            return next;
+          });
+
+          // add sender transfer UI entry and offer stream path
+          // convert blob -> File for file.stream() compatibility
+          let fileForSend;
+          try {
+            fileForSend = new File([blob], name, { type: blob.type });
           } catch (e) {
-            console.warn("preview setup failed", e);
+            // fallback — some environments don't support File constructor
+            fileForSend = blob;
           }
+
+          const offerId = `offer-${Date.now()}-${Math.random()
+            .toString(36)
+            .slice(2, 7)}`;
+          outgoingPendingOffers.current[offerId] = {
+            file: fileForSend,
+            acceptingPeers: new Set(),
+          };
+
+          const meta = {
+            id: offerId,
+            name,
+            size,
+            mime: blob.type,
+            from: getLocalPeerId() || myId,
+          };
+
+          // advertise the recording via your existing file-offer flow
+          try {
+            offerFileToPeers(meta);
+          } catch (e) {
+            console.warn("offerFileToPeers failed for recorded media", e);
+          }
+
+          setTransfer(offerId, {
+            name,
+            label: "Offered",
+            transferred: 0,
+            total: size,
+            ts: Date.now(),
+          });
+
+          // Do not revoke localUrl here. Revoke later on unmount or when message is removed.
+        } catch (e) {
+          console.warn("recorder.onstop error", e);
+        } finally {
+          // cleanup UI timers/state
+          try {
+            if (recordTimerRef.current) {
+              clearInterval(recordTimerRef.current);
+              recordTimerRef.current = null;
+            }
+          } catch (er) {}
+          setIsRecording(false);
+          setRecordRemaining(MAX_RECORD_SECONDS);
+          // clear recorded chunks buffer (optional)
+          recordedChunksRef.current = [];
         }
       };
 
@@ -3849,7 +3902,7 @@ export default function Chat() {
                 className="w-full h-full object-cover"
                 muted
                 playsInline
-                autoplay
+                autoPlay
               />
 
               {/* Recording indicator */}
@@ -3885,7 +3938,7 @@ export default function Chat() {
             <video
               src={expandedVideo.url}
               controls
-              autoplay
+              autoPlay
               playsInline
               className="max-w-full max-h-full rounded-lg"
               onClick={(e) => e.stopPropagation()}
