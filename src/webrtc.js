@@ -859,9 +859,11 @@ let onBootstrapChangedGlobal = null;
 
 // NEW: sender-side progress callback: (offerId, targetPeerId, bytesSent, totalBytes) => void
 let onFileProgressGlobal = null;
-export const setOnFileProgress = (cb) => {
-  onFileProgressGlobal = typeof cb === "function" ? cb : null;
-};
+let onFileCompleteGlobal = null;
+
+export const setOnFileProgress = (fn) => { onFileProgressGlobal = fn; };
+export const setOnFileComplete = (fn) => { onFileCompleteGlobal = fn; };
+
 
 window.__PH_debug = () => ({
   peerId: peer ? peer.id : null,
@@ -1049,7 +1051,6 @@ export const offerFileToPeers = (fileMeta, targetPeerIds = []) => {
 const streamFileToConn = async (conn, file, offerId) => {
   try {
     if (!conn || conn.open === false) return;
-
     const reader = file.stream().getReader();
     let seq = 0;
     let bytesSent = 0;
@@ -1059,84 +1060,80 @@ const streamFileToConn = async (conn, file, offerId) => {
       const { done, value } = await reader.read();
       if (done) break;
 
-      // value is usually a Uint8Array view — send only the exact bytes
-      let arrBufToSend;
-      if (value instanceof Uint8Array) {
-        // slice to exact bytes to avoid sending a larger backing buffer
-        arrBufToSend = value.buffer.slice(
-          value.byteOffset,
-          value.byteOffset + value.byteLength
-        );
-      } else if (value instanceof ArrayBuffer) {
-        arrBufToSend = value;
-      } else {
-        // fallback: try to coerce
-        try {
-          const tmp = new Uint8Array(value);
-          arrBufToSend = tmp.buffer.slice(
-            tmp.byteOffset,
-            tmp.byteOffset + tmp.byteLength
-          );
-        } catch (e) {
-          // give up on this chunk
-          console.warn("Unexpected chunk type, skipping", value);
-          continue;
-        }
+      // value is typically a Uint8Array chunk
+      const arrBuf = value && value.buffer ? value.buffer : value;
+      try {
+        sendToConn(conn, {
+          type: "file_chunk",
+          id: offerId,
+          seq: seq++,
+          chunk: arrBuf,
+          final: false,
+        });
+      } catch (e) {
+        console.warn("sendToConn chunk failed", e);
       }
 
-      sendToConn(conn, {
-        type: "file_chunk",
-        id: offerId,
-        seq: seq++,
-        chunk: arrBufToSend,
-        final: false,
-      });
-
-      // update counters & notify progress
-      const chunkBytes = arrBufToSend.byteLength || 0;
-      bytesSent += chunkBytes;
+      // update local bytes counter + progress hook
       try {
+        const chunkBytes =
+          (value && value.byteLength) || (arrBuf && arrBuf.byteLength) || 0;
+        bytesSent += chunkBytes;
         if (typeof onFileProgressGlobal === "function") {
           onFileProgressGlobal(offerId, conn.peer, bytesSent, totalBytes);
         }
       } catch (e) {
-        /* swallow */
+        // swallow progress errors
       }
 
-      // yield briefly — tune as needed
+      // yield briefly (avoid blocking)
       await new Promise((r) => setTimeout(r, 0));
     }
 
-    // final marker (only once)
-    sendToConn(conn, {
-      type: "file_chunk",
-      id: offerId,
-      seq: seq,
-      chunk: null,
-      final: true,
-    });
-
-    // notify done (single)
-    // notify done (single)
-    sendToConn(conn, {
-      type: "file_transfer_done",
-      id: offerId,
-      from: peer.id,
-    });
-
-    // final progress ensure (set to total)
+    // ---------------- FINALIZATION BLOCK (place here) ----------------
     try {
-      if (typeof onFileProgressGlobal === "function") {
-        onFileProgressGlobal(offerId, conn.peer, totalBytes, totalBytes);
-      }
-    } catch (e) {}
+      // final marker: single final chunk (null)
+      sendToConn(conn, {
+        type: "file_chunk",
+        id: offerId,
+        seq: seq,
+        chunk: null,
+        final: true,
+      });
 
-    // final progress ensure (set to total)
-    try {
-      if (typeof onFileProgressGlobal === "function") {
-        onFileProgressGlobal(offerId, conn.peer, totalBytes, totalBytes);
-      }
-    } catch (e) {}
+      // notify done to peer
+      sendToConn(conn, {
+        type: "file_transfer_done",
+        id: offerId,
+        from: peer.id,
+      });
+
+      // ensure UI sees 100% progress
+      try {
+        if (typeof onFileProgressGlobal === "function") {
+          onFileProgressGlobal(offerId, conn.peer, totalBytes, totalBytes);
+        }
+      } catch (e) {}
+
+      // notify completion hook if UI registered it
+      try {
+        if (typeof onFileCompleteGlobal === "function") {
+          onFileCompleteGlobal(offerId, conn.peer);
+        }
+      } catch (e) {}
+    } catch (e) {
+      console.warn("streamFileToConn finalization error", e);
+      try {
+        sendToConn(conn, {
+          type: "file_transfer_cancel",
+          id: offerId,
+          from: peer.id,
+          reason: e && e.message,
+        });
+      } catch (err) {}
+    }
+    // -----------------------------------------------------------------
+
   } catch (e) {
     console.warn("streamFileToConn error", e);
     try {

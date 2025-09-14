@@ -851,6 +851,152 @@
 //   );
 // }
 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 // src/components/Chat.jsx
 import "./App.css";
 import React, { useEffect, useState, useRef } from "react";
@@ -869,17 +1015,18 @@ import {
   respondToFileOffer,
   startSendingFile,
   supportsNativeFileSystem,
+  // these two must be implemented in your webrtc.js and will be used to receive progress events
   setOnFileProgress,
+  setOnFileComplete,
 } from "./webrtc";
-// notification helpers
 import { requestNotificationPermission, showNotification } from "./notify";
-// id generator
 import { nanoid } from "nanoid";
 
 const LS_MSGS = "ph_msgs_v1";
 const MAX_MSGS = 100;
 
 export default function Chat() {
+  // core state
   const [myId, setMyId] = useState(() => getLocalPeerId() || "...");
   const [peers, setPeers] = useState([]);
   const [peerNamesMap, setPeerNamesMap] = useState({});
@@ -891,18 +1038,16 @@ export default function Chat() {
     return [];
   });
 
-  // file offers state: offerId -> { offer, expiresAt, origin }
+  // file transfer
   const [incomingFileOffers, setIncomingFileOffers] = useState({});
-  // save handles for File System Access API: offerId -> writable
-  const saveHandlesRef = useRef({});
-  const fileWriteStatusRef = useRef({}); // offerId -> bytesReceived
-  // outgoing pending offers: offerId -> { file, acceptingPeers: Set }
-  const outgoingPendingOffers = useRef({});
-
-  // transfers: active transfers for UI progress
-  // transfers: { [offerId]: { direction: 'sending'|'receiving', label, total, transferred, peers?: [] } }
+  // transfers: offerId -> { direction, label, total, transferred, peers }
   const [transfers, setTransfers] = useState({});
 
+  const saveHandlesRef = useRef({}); // offerId -> writable
+  const fileWriteStatusRef = useRef({}); // offerId -> bytesReceived
+  const outgoingPendingOffers = useRef({}); // offerId -> { file, acceptingPeers:Set }
+
+  // UI / other state
   const [text, setText] = useState("");
   const [username, setUsername] = useState(
     () => localStorage.getItem("ph_name") || ""
@@ -918,57 +1063,34 @@ export default function Chat() {
   const [menuOpen, setMenuOpen] = useState(false);
   const [confirmLeaveOpen, setConfirmLeaveOpen] = useState(false);
 
-  // tick state for countdown timers
+  // ticking for timers
   const [now, setNow] = useState(Date.now());
 
-  useEffect(() => {
-    if (!username) return;
-    requestNotificationPermission().then((granted) => {
-      console.log("Notification permission granted:", granted);
-    });
-  }, [username]);
+  // typing
+  const [typingUsers, setTypingUsers] = useState({});
+  const [replyTo, setReplyTo] = useState(null);
+  const typingTimeoutRef = useRef(null);
 
+  // refs
   const messagesEndRef = useRef(null);
   const seenSystemIdsRef = useRef(new Set());
   const peerRef = useRef(null);
   const menuRef = useRef(null);
 
-  // re-render every second while file offers exist
+  // notifications permission on username set
+  useEffect(() => {
+    if (!username) return;
+    requestNotificationPermission();
+  }, [username]);
+
+  // re-render every second if there are incoming offers (countdown)
   useEffect(() => {
     if (!Object.keys(incomingFileOffers).length) return;
     const id = setInterval(() => setNow(Date.now()), 1000);
     return () => clearInterval(id);
   }, [incomingFileOffers]);
 
-  // typingUsers: { [name]: timestamp }
-  const [typingUsers, setTypingUsers] = useState({});
-  const [replyTo, setReplyTo] = useState(null);
-  const typingTimeoutRef = useRef(null);
-
-  // helper to show notification only when appropriate
-  const maybeNotify = (fromDisplay, text) => {
-    try {
-      if (!fromDisplay || fromDisplay === username) return;
-      if (!document.hidden && document.hasFocus()) return;
-
-      const title = `${fromDisplay}`;
-      const body =
-        typeof text === "string"
-          ? text.length > 120
-            ? text.slice(0, 117) + "..."
-            : text
-          : JSON.stringify(text);
-      showNotification(title, {
-        body,
-        tag: `peershub-${fromDisplay}`,
-        data: { from: fromDisplay },
-      });
-    } catch (e) {
-      console.warn("maybeNotify error", e);
-    }
-  };
-
-  // persist messages to localStorage (trimmed)
+  // persist messages helper
   const persistMessages = (arr) => {
     try {
       const tail = arr.slice(-MAX_MSGS);
@@ -976,7 +1098,7 @@ export default function Chat() {
     } catch (e) {}
   };
 
-  // add or merge incoming chat
+  // messages helpers
   const upsertIncomingChat = (incoming) => {
     setMessages((m) => {
       const exists = m.find((x) => x.id === incoming.id);
@@ -1004,7 +1126,6 @@ export default function Chat() {
     });
   };
 
-  // utility used by acks to update arrays safely
   const addUniqueToMsgArray = (msgId, field, peerId) => {
     setMessages((m) => {
       const next = m.map((msg) => {
@@ -1018,12 +1139,15 @@ export default function Chat() {
     });
   };
 
-  // transfer helpers (update UI state)
-  const setTransfer = (offerId, patch) => {
+  // transfer UI helpers
+  const setTransfer = (offerId, updaterOrObj) => {
     setTransfers((t) => {
-      const cur = t[offerId] || {};
-      const next = { ...t, [offerId]: { ...cur, ...patch } };
-      return next;
+      const prev = t[offerId] || {};
+      const nextEntry =
+        typeof updaterOrObj === "function"
+          ? updaterOrObj(prev)
+          : { ...prev, ...updaterOrObj };
+      return { ...t, [offerId]: nextEntry };
     });
   };
   const removeTransfer = (offerId) => {
@@ -1035,89 +1159,92 @@ export default function Chat() {
   };
 
   // handle incoming file chunk and write to disk using saved handle
-  // handle incoming file chunk and write to disk using saved handle
-
-
-  // handle incoming file chunk and write to disk using saved handle
-const handleIncomingFileChunk = async (data) => {
-  // defensive: some runtimes wrap chunk under .data (PeerJS / structured clone variants)
-  let { id: offerId, seq, chunk, final } = data || {};
-
-  try {
-    // unwrap wrapper if necessary (common PeerJS quirk)
-    if (
-      chunk &&
-      chunk.data &&
-      (chunk.data instanceof ArrayBuffer ||
-        ArrayBuffer.isView(chunk.data) ||
-        chunk.data instanceof Blob)
-    ) {
-      chunk = chunk.data;
-    }
-
-    const writer = saveHandlesRef.current[offerId];
-    if (!writer) {
-      console.warn("No writable for offer", offerId, "— ignoring chunk", seq);
-      return;
-    }
-
-    // chunk may be Blob, ArrayBuffer, or TypedArray
-    if (chunk instanceof Blob) {
-      await writer.write(chunk);
-      fileWriteStatusRef.current[offerId] =
-        (fileWriteStatusRef.current[offerId] || 0) + (chunk.size || 0);
-    } else if (chunk instanceof ArrayBuffer || ArrayBuffer.isView(chunk)) {
-      const buf =
-        chunk instanceof ArrayBuffer
-          ? new Uint8Array(chunk)
-          : new Uint8Array(chunk.buffer || chunk);
-      await writer.write(buf);
-      fileWriteStatusRef.current[offerId] =
-        (fileWriteStatusRef.current[offerId] || 0) + buf.byteLength;
-    } else {
-      console.warn("Unknown chunk type for offer", offerId, seq, chunk);
-    }
-
-    if (final) {
-      try {
-        await writer.close();
-      } catch (e) {
-        console.warn("Error closing writer for offer", offerId, e);
+  const handleIncomingFileChunk = async (data) => {
+    // defensive: some runtimes wrap chunk under .data (PeerJS / structured clone variants)
+    let { id: offerId, seq, chunk, final } = data || {};
+    try {
+      // unwrap wrapper if necessary (common PeerJS quirk)
+      if (
+        chunk &&
+        chunk.data &&
+        (chunk.data instanceof ArrayBuffer ||
+          ArrayBuffer.isView(chunk.data) ||
+          chunk.data instanceof Blob)
+      ) {
+        chunk = chunk.data;
       }
 
-      // cleanup UI progress (guarded)
-      try {
-        if (typeof setTransfer === "function" && typeof removeTransfer === "function") {
+      const writer = saveHandlesRef.current[offerId];
+      if (!writer) {
+        console.warn("No writable for offer", offerId, "— ignoring chunk", seq);
+        return;
+      }
+
+      // chunk may be Blob, ArrayBuffer, or TypedArray
+      if (chunk instanceof Blob) {
+        await writer.write(chunk);
+        fileWriteStatusRef.current[offerId] =
+          (fileWriteStatusRef.current[offerId] || 0) + (chunk.size || 0);
+      } else if (chunk instanceof ArrayBuffer || ArrayBuffer.isView(chunk)) {
+        const buf =
+          chunk instanceof ArrayBuffer
+            ? new Uint8Array(chunk)
+            : new Uint8Array(chunk.buffer || chunk);
+        await writer.write(buf);
+        fileWriteStatusRef.current[offerId] =
+          (fileWriteStatusRef.current[offerId] || 0) + buf.byteLength;
+      } else {
+        console.warn("Unknown chunk type for offer", offerId, seq, chunk);
+      }
+
+      // update receiver progress entry
+      setTransfer(offerId, (prev) => {
+        const total = prev?.total || 0;
+        const transferred = fileWriteStatusRef.current[offerId] || prev?.transferred || 0;
+        return { ...prev, total, transferred, direction: prev?.direction || "receiving" };
+      });
+
+      if (final) {
+        try {
+          await writer.close();
+        } catch (e) {
+          console.warn("Error closing writer for offer", offerId, e);
+        }
+
+        // mark 100% and schedule clean
+        try {
           setTransfer(offerId, (prev) => ({
             ...prev,
-            transferred: prev?.total ?? prev?.transferred ?? 0,
+            transferred: prev?.total ?? fileWriteStatusRef.current[offerId] ?? prev?.transferred ?? 0,
           }));
-          setTimeout(() => {
-            try {
-              removeTransfer(offerId);
-            } catch (er) {
-              console.warn("removeTransfer failed", er);
-            }
-          }, 1500);
-        }
-      } catch (e) {
-        console.warn("transfer cleanup failed", e);
-      }
+          setTimeout(() => removeTransfer(offerId), 1200);
+        } catch (e) {}
 
-      // cleanup refs
-      try {
+        // cleanup
         delete saveHandlesRef.current[offerId];
-      } catch (e) {}
-      try {
         delete fileWriteStatusRef.current[offerId];
-      } catch (e) {}
 
-      // notify user in UI (append a system message)
+        // notify UI
+        setMessages((m) => {
+          const sys = {
+            id: `sys-file-done-${offerId}`,
+            from: "System",
+            text: "File received and saved to disk",
+            ts: Date.now(),
+            type: "system",
+          };
+          const next = [...m, sys];
+          persistMessages(next);
+          return next;
+        });
+      }
+    } catch (e) {
+      console.warn("handleIncomingFileChunk error", e);
       setMessages((m) => {
         const sys = {
-          id: `sys-file-done-${offerId}`,
+          id: `sys-file-error-${offerId}-${Date.now()}`,
           from: "System",
-          text: "File received and saved to disk",
+          text: `Error writing received file chunk: ${e.message || e}`,
           ts: Date.now(),
           type: "system",
         };
@@ -1125,59 +1252,24 @@ const handleIncomingFileChunk = async (data) => {
         persistMessages(next);
         return next;
       });
-    }
-  } catch (e) {
-    console.warn("handleIncomingFileChunk error", e);
 
-    // append error system message
-    setMessages((m) => {
-      const sys = {
-        id: `sys-file-error-${offerId}-${Date.now()}`,
-        from: "System",
-        text: `Error writing received file chunk: ${e.message || e}`,
-        ts: Date.now(),
-        type: "system",
-      };
-      const next = [...m, sys];
+      // cleanup UI record
+      try { removeTransfer(offerId); } catch (er) {}
+      // try close writer if present
       try {
-        persistMessages(next);
-      } catch (err) {}
-      return next;
-    });
-
-    // cleanup UI record
-    try {
-      if (typeof removeTransfer === "function") removeTransfer(offerId);
-    } catch (er) {
-      console.warn("removeTransfer error", er);
-    }
-
-    // try to close and delete any writer safely
-    try {
-      const w = saveHandlesRef.current[offerId];
-      if (w) {
-        try {
-          await w.close();
-        } catch (er) {
-          console.warn("error closing writer during error cleanup", er);
+        const w = saveHandlesRef.current[offerId];
+        if (w) {
+          try { await w.close(); } catch (er) {}
+          delete saveHandlesRef.current[offerId];
         }
-        delete saveHandlesRef.current[offerId];
-      }
-    } catch (er) {
-      console.warn("saveHandles cleanup error", er);
+      } catch (er) {}
+      try { delete fileWriteStatusRef.current[offerId]; } catch (er) {}
     }
-
-    // ensure we delete the fileWriteStatus entry
-    try {
-      delete fileWriteStatusRef.current[offerId];
-    } catch (er) {}
-  }
-};
-
+  };
 
   // incoming messages callback from webrtc
   const handleIncoming = async (from, payloadOrText) => {
-    // typing system
+    // typing
     if (
       from === "__system_typing__" &&
       payloadOrText &&
@@ -1240,14 +1332,12 @@ const handleIncomingFileChunk = async (data) => {
       return;
     }
 
-    // file offer received -> show accept/ignore UI and set 10s timer
+    // file offer received -> UI prompt for 10s
     if (from === "__system_file_offer__" && payloadOrText) {
-      const offer = payloadOrText; // contains id, name, size, mime, from
-      // IMPORTANT: use the sender-provided offer.id as the canonical key
+      const offer = payloadOrText;
       const offerId =
         offer.id ||
         `offer-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
-
       setIncomingFileOffers((s) => {
         const copy = { ...s };
         copy[offerId] = {
@@ -1258,45 +1348,38 @@ const handleIncomingFileChunk = async (data) => {
         return copy;
       });
 
-      // auto-expire after 10s -> send ignore
+      // auto ignore after 10s
       setTimeout(() => {
         setIncomingFileOffers((s) => {
           const copy = { ...s };
           if (!copy[offerId]) return s;
-          try {
-            if (offer.from) respondToFileOffer(offerId, offer.from, false);
-          } catch (e) {}
+          try { respondToFileOffer(offerId, offer.from, false); } catch (e) {}
           delete copy[offerId];
           return copy;
         });
       }, 10000);
 
-      maybeNotify(
-        peerNamesMap[offer.from] || offer.from,
-        `File offer: ${offer.name}`
-      );
+      maybeNotify(peerNamesMap[offer.from] || offer.from, `File offer: ${offer.name}`);
       return;
     }
 
-    // file offer response (sender receives who accepted)
+    // file offer response (sender receives accepts)
     if (from === "__system_file_offer_response__" && payloadOrText) {
       const { id: offerId, from: responder, accept } = payloadOrText;
       try {
-        const pending = outgoingPendingOffers.current[offerId];
-        if (!pending) return;
+        if (!outgoingPendingOffers.current[offerId]) return;
         if (accept) {
-          pending.acceptingPeers.add(responder);
-          const file = pending.file;
+          outgoingPendingOffers.current[offerId].acceptingPeers.add(responder);
+          const file = outgoingPendingOffers.current[offerId].file;
           if (file) {
-            // Start sending file to this responder
-            // Track UI sending progress
-            setTransfer(offerId, {
+            // ensure sender transfer UI exists
+            setTransfer(offerId, (prev) => ({
               direction: "sending",
-              label: `Sending: ${file.name}`,
-              total: file.size,
-              transferred: 0,
-              peers: Array.from(pending.acceptingPeers),
-            });
+              label: file.name,
+              total: file.size || prev?.total || 0,
+              transferred: prev?.transferred || 0,
+              peers: Array.from(new Set([...(prev?.peers || []), responder])),
+            }));
             try {
               startSendingFile(file, offerId, [responder]);
             } catch (e) {
@@ -1319,6 +1402,13 @@ const handleIncomingFileChunk = async (data) => {
     // file transfer done/cancel
     if (from === "__system_file_transfer_done__" && payloadOrText) {
       const { id: offerId } = payloadOrText;
+      try {
+        setTransfer(offerId, (prev) => ({
+          ...prev,
+          transferred: prev?.total ?? prev?.transferred ?? 0,
+        }));
+        setTimeout(() => removeTransfer(offerId), 1200);
+      } catch (e) {}
       setMessages((m) => {
         const sys = {
           id: `sys-file-complete-${offerId}`,
@@ -1331,12 +1421,6 @@ const handleIncomingFileChunk = async (data) => {
         persistMessages(next);
         return next;
       });
-      // mark transfer finished for sender side too and remove after delay
-      setTransfer(offerId, (prev) => ({
-        ...prev,
-        transferred: (prev && prev.total) || (prev && prev.transferred),
-      }));
-      setTimeout(() => removeTransfer(offerId), 3000);
       return;
     }
 
@@ -1348,35 +1432,21 @@ const handleIncomingFileChunk = async (data) => {
       payloadOrText.id
     ) {
       upsertIncomingChat(payloadOrText);
-      maybeNotify(
-        payloadOrText.fromName || payloadOrText.from,
-        payloadOrText.text
-      );
+      maybeNotify(payloadOrText.fromName || payloadOrText.from, payloadOrText.text);
 
-      // --- NEW: auto-send ack_read NOW if the app is visible and message not from me ---
+      // auto ack_read now if visible & not from self
       try {
         const origin = payloadOrText.from || payloadOrText.origin || null;
         const localId = getLocalPeerId() || myId;
-        if (
-          origin &&
-          origin !== localId &&
-          document.visibilityState === "visible"
-        ) {
-          try {
-            sendAckRead(payloadOrText.id, origin);
-          } catch (e) {
-            console.warn("sendAckRead error (auto on receive):", e);
-          }
+        if (origin && origin !== localId && document.visibilityState === "visible") {
+          try { sendAckRead(payloadOrText.id, origin); } catch (e) {}
           addUniqueToMsgArray(payloadOrText.id, "reads", localId);
         }
-      } catch (e) {
-        console.warn("auto ack_read failed", e);
-      }
-
+      } catch (e) {}
       return;
     }
 
-    // plain string fallback
+    // string fallback
     if (typeof payloadOrText === "string") {
       const safeText = payloadOrText;
       const newMsg = {
@@ -1399,7 +1469,7 @@ const handleIncomingFileChunk = async (data) => {
     }
   };
 
-  // peer list update callback
+  // peer list update
   const handlePeerListUpdate = (list) => {
     setPeers(list || []);
     try {
@@ -1408,12 +1478,11 @@ const handleIncomingFileChunk = async (data) => {
     } catch (e) {}
   };
 
-  // handle bootstrap change
   const handleBootstrapChange = (newBootstrapId) => {
     setJoinedBootstrap(newBootstrapId || "");
   };
 
-  // init peer when username available
+  // init peer
   useEffect(() => {
     if (!username) return;
     const p = initPeer(
@@ -1434,39 +1503,7 @@ const handleIncomingFileChunk = async (data) => {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [username]);
 
-  // register for file-send progress events from webrtc
-  useEffect(() => {
-    // callback invoked from webrtc.streamFileToConn while sending
-    const cb = (offerId, targetPeerId, bytesSent, totalBytes) => {
-      // update transfer UI for this offerId
-      setTransfers((t) => {
-        const cur = t[offerId] || {};
-        // ensure peers array contains targetPeerId
-        const peersArr = new Set((cur.peers || []).concat([targetPeerId]));
-        return {
-          ...t,
-          [offerId]: {
-            ...cur,
-            direction: cur.direction || "sending",
-            label: cur.label || `Sending ${offerId}`,
-            total: totalBytes || cur.total || 0,
-            transferred: bytesSent || cur.transferred || 0,
-            peers: Array.from(peersArr),
-          },
-        };
-      });
-    };
-
-    // set in webrtc
-    setOnFileProgress(cb);
-
-    // cleanup: clear listener on unmount
-    return () => {
-      setOnFileProgress(null);
-    };
-  }, []);
-
-  // autoscroll to bottom when messages change
+  // autoscroll
   useEffect(() => {
     if (!messagesEndRef.current) return;
     try {
@@ -1477,7 +1514,7 @@ const handleIncomingFileChunk = async (data) => {
     } catch (e) {}
   }, [messages]);
 
-  // when tab becomes visible, send ack_read for any unread messages
+  // visibility ack_read
   useEffect(() => {
     const onVisibility = () => {
       if (document.visibilityState === "visible") {
@@ -1486,8 +1523,7 @@ const handleIncomingFileChunk = async (data) => {
           if (!m || m.type !== "chat") return;
           const origin = m.fromId || m.from;
           if (!origin || origin === localId) return;
-          const alreadyRead =
-            Array.isArray(m.reads) && m.reads.includes(localId);
+          const alreadyRead = Array.isArray(m.reads) && m.reads.includes(localId);
           if (!alreadyRead) {
             try {
               sendAckRead(m.id, origin);
@@ -1505,7 +1541,7 @@ const handleIncomingFileChunk = async (data) => {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [messages, myId]);
 
-  // menu outside click handler
+  // outside click for menu
   useEffect(() => {
     const onDocClick = (e) => {
       if (!menuRef.current) return;
@@ -1516,7 +1552,7 @@ const handleIncomingFileChunk = async (data) => {
     return () => document.removeEventListener("mousedown", onDocClick);
   }, [menuOpen]);
 
-  // typing broadcast: debounce while typing
+  // typing broadcast
   useEffect(() => {
     if (!username) return;
     if (typingTimeoutRef.current) clearTimeout(typingTimeoutRef.current);
@@ -1534,18 +1570,16 @@ const handleIncomingFileChunk = async (data) => {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [text]);
 
-  // Create Hub
+  // create hub
   const handleCreateHub = () => {
     const id = getLocalPeerId() || myId;
     if (!id) return alert("Peer not ready yet. Wait a moment and try again.");
     joinHub(id);
     setJoinedBootstrap(id);
 
-    // persist hub + autojoin flag
     localStorage.setItem("ph_hub_bootstrap", id);
     localStorage.setItem("ph_should_autojoin", "true");
 
-    // local system message for the creator
     const sysPlain = {
       id: `sys-create-${Date.now()}`,
       from: "System",
@@ -1559,7 +1593,6 @@ const handleIncomingFileChunk = async (data) => {
       return next;
     });
 
-    // BROADCAST public system announcement so others know who the host is
     try {
       const publicText = `[${username || "Host"}] is the host`;
       broadcastSystem("system_public", publicText, `sys-host-${id}`);
@@ -1570,7 +1603,7 @@ const handleIncomingFileChunk = async (data) => {
     setMenuOpen(false);
   };
 
-  // Join Hub
+  // join hub
   const handleJoinHub = async () => {
     const id = prompt("Enter Hub bootstrap peer ID (the host's ID):");
     if (!id) {
@@ -1581,7 +1614,6 @@ const handleIncomingFileChunk = async (data) => {
     joinHub(trimmed);
     setJoinedBootstrap(trimmed);
 
-    // persist hub + autojoin flag
     localStorage.setItem("ph_hub_bootstrap", trimmed);
     localStorage.setItem("ph_should_autojoin", "true");
 
@@ -1604,7 +1636,7 @@ const handleIncomingFileChunk = async (data) => {
     setMenuOpen(false);
   };
 
-  // Leave flow
+  // leave hub
   const handleLeaveClick = () => {
     setMenuOpen(false);
     setConfirmLeaveOpen(true);
@@ -1616,7 +1648,6 @@ const handleIncomingFileChunk = async (data) => {
     } catch (e) {}
     setJoinedBootstrap("");
 
-    // clear hub + autojoin flag
     localStorage.removeItem("ph_hub_bootstrap");
     localStorage.removeItem("ph_should_autojoin");
 
@@ -1655,8 +1686,8 @@ const handleIncomingFileChunk = async (data) => {
       replyTo: replyTo
         ? { id: replyTo.id, from: replyTo.from, text: replyTo.text }
         : null,
-      deliveries: [], // peers who acknowledged delivery
-      reads: [getLocalPeerId() || myId], // mark self as read
+      deliveries: [],
+      reads: [getLocalPeerId() || myId],
     };
     setMessages((m) => {
       const next = [...m, msgObj];
@@ -1672,7 +1703,7 @@ const handleIncomingFileChunk = async (data) => {
     setReplyTo(null);
   };
 
-  // tap message to reply + send ack_read
+  // reply + send ack_read
   const handleTapMessage = (m) => {
     if (m.type && m.type.startsWith("system")) return;
     setReplyTo({ id: m.id, from: m.from, text: m.text });
@@ -1685,7 +1716,6 @@ const handleIncomingFileChunk = async (data) => {
     if (m.id && originPeerId) {
       try {
         sendAckRead(m.id, originPeerId);
-        // locally add read
         addUniqueToMsgArray(m.id, "reads", getLocalPeerId() || myId);
       } catch (e) {
         console.warn("sendAckRead error", e);
@@ -1693,318 +1723,56 @@ const handleIncomingFileChunk = async (data) => {
     }
   };
 
-  // file input handler (sender)
-  const onFileSelected = async (file) => {
-    if (!file) return;
-    const offerId =
-      file && file.name
-        ? `${getLocalPeerId() || myId}-${Date.now()}-${Math.random()
-            .toString(36)
-            .slice(2, 7)}`
-        : `offer-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
-    outgoingPendingOffers.current[offerId] = {
-      file,
-      acceptingPeers: new Set(),
-    };
-    const meta = {
-      id: offerId,
-      name: file.name,
-      size: file.size,
-      mime: file.type,
-      from: getLocalPeerId() || myId,
-    };
-    try {
-      offerFileToPeers(meta);
-    } catch (e) {
-      console.warn("offerFileToPeers failed", e);
-    }
-    setMessages((m) => {
-      const sys = {
-        id: `sys-offer-${offerId}`,
-        from: "System",
-        text: `Offered file: ${file.name} (${Math.round(file.size / 1024)} KB)`,
-        ts: Date.now(),
-        type: "system",
-      };
-      const next = [...m, sys];
-      persistMessages(next);
-      return next;
-    });
-
-    // prepare transfer UI placeholder (will update when someone accepts)
-    setTransfer(offerId, {
-      direction: "sending",
-      label: `Sending: ${file.name}`,
-      total: file.size,
-      transferred: 0,
-      peers: [],
-    });
-
-    // cleanup after 10s (if nobody accepted)
-    setTimeout(() => {
-      try {
-        const pending = outgoingPendingOffers.current[offerId];
-        if (!pending) return;
-        if (pending.acceptingPeers.size === 0) {
-          setMessages((m) => {
-            const sys = {
-              id: `sys-offer-expire-${offerId}`,
-              from: "System",
-              text: `No one accepted the file offer: ${file.name}`,
-              ts: Date.now(),
-              type: "system",
-            };
-            const next = [...m, sys];
-            persistMessages(next);
-            return next;
-          });
-          // remove transfer UI if nobody accepted
-          removeTransfer(offerId);
-          delete outgoingPendingOffers.current[offerId];
-        }
-      } catch (e) {
-        console.warn("post-offer cleanup failed", e);
-      }
-    }, 10000);
-  };
-
-  // when user accepts an incoming offer: pick save location and signal acceptance
-  const acceptFileOffer = async (offerId) => {
-    const entry = incomingFileOffers[offerId];
-    if (!entry) return;
-    const { offer } = entry;
-    try {
-      if (supportsNativeFileSystem()) {
-        const opts = {
-          suggestedName: offer.name,
-          types: [
-            {
-              description: offer.mime || "file",
-              accept: {
-                [offer.mime || "application/octet-stream"]: [
-                  "." + (offer.name.split(".").pop() || ""),
-                ],
-              },
-            },
-          ],
-        };
-        const handle = await (window.showSaveFilePicker
-          ? window.showSaveFilePicker(opts)
-          : window.chooseFileSystemEntries
-          ? window.chooseFileSystemEntries({
-              type: "save-file",
-              accepts: opts.types,
-            })
-          : null);
-        if (!handle) {
-          respondToFileOffer(offerId, offer.from, false);
-          setIncomingFileOffers((s) => {
-            const copy = { ...s };
-            delete copy[offerId];
-            return copy;
-          });
-          return;
-        }
-        const writable = await handle.createWritable();
-
-        // store a meta map for UI total/label lookups
-        if (!saveHandlesRef.current.__meta__)
-          saveHandlesRef.current.__meta__ = {};
-        saveHandlesRef.current.__meta__[offerId] = {
-          total: offer.size || 0,
-          label: `Receiving: ${offer.name}`,
-        };
-
-        // record the writable and initialize fileWriteStatus
-        saveHandlesRef.current[offerId] = writable;
-        fileWriteStatusRef.current[offerId] = 0;
-
-        // update transfers UI entry
-        setTransfer(offerId, {
-          direction: "receiving",
-          label: `Receiving: ${offer.name}`,
-          total: offer.size || 0,
-          transferred: 0,
-        });
-
-        // IMPORTANT: only respond accept after writable created
-        respondToFileOffer(offerId, offer.from, true);
-
-        // remove the incoming offer UI
-        setIncomingFileOffers((s) => {
-          const copy = { ...s };
-          delete copy[offerId];
-          return copy;
-        });
-
-        setMessages((m) => {
-          const sys = {
-            id: `sys-accept-${offerId}`,
-            from: "System",
-            text: `Accepted file: ${offer.name}`,
-            ts: Date.now(),
-            type: "system",
-          };
-          const next = [...m, sys];
-          persistMessages(next);
-          return next;
-        });
-      } else {
-        // fallback: decline if no native file system support (or implement fallback to IndexedDB)
-        respondToFileOffer(offerId, offer.from, false);
-        setIncomingFileOffers((s) => {
-          const copy = { ...s };
-          delete copy[offerId];
-          return copy;
-        });
-        setMessages((m) => {
-          const sys = {
-            id: `sys-accept-${offerId}`,
-            from: "System",
-            text: `Browser does not support direct disk writes; cannot accept ${offer.name}.`,
-            ts: Date.now(),
-            type: "system",
-          };
-          const next = [...m, sys];
-          persistMessages(next);
-          return next;
-        });
-      }
-    } catch (e) {
-      console.warn("acceptFileOffer failed", e);
-      try {
-        respondToFileOffer(offerId, offer.from, false);
-      } catch (er) {}
-      setIncomingFileOffers((s) => {
-        const copy = { ...s };
-        delete copy[offerId];
-        return copy;
-      });
-      removeTransfer(offerId);
-    }
-  };
-
-  const ignoreFileOffer = (offerId) => {
-    const entry = incomingFileOffers[offerId];
-    if (!entry) return;
-    try {
-      respondToFileOffer(offerId, entry.offer.from, false);
-    } catch (e) {
-      console.warn("ignoreFileOffer failed", e);
-    }
-    setIncomingFileOffers((s) => {
-      const copy = { ...s };
-      delete copy[offerId];
-      return copy;
-    });
-  };
-
-  const handleFileInputClick = () => {
-    const input = document.createElement("input");
-    input.type = "file";
-    input.onchange = (e) => {
-      const f = e.target.files && e.target.files[0];
-      if (f) onFileSelected(f);
-    };
-    input.click();
-  };
-
-  // render incoming file offer banners
-  const renderIncomingFileOffers = () => {
-    const keys = Object.keys(incomingFileOffers);
-    if (!keys.length) return null;
-    return keys.map((k) => {
-      const entry = incomingFileOffers[k];
-      const offer = entry.offer;
-      const remaining = Math.max(0, Math.ceil((entry.expiresAt - now) / 1000));
-
+  // render status dot
+  const renderStatusDot = (m) => {
+    const totalPeers = peers?.length || 0;
+    if (totalPeers === 0) {
       return (
-        <div
-          key={k}
-          className="mb-2 p-2 rounded bg-white/10 text-sm text-black"
-        >
-          <div className="font-semibold">
-            File offer: {offer.name} ({Math.round((offer.size || 0) / 1024)} KB)
-          </div>
-          <div className="text-xs text-gray-600">
-            From: {peerNamesMap[offer.from] || offer.from} — Expires in{" "}
-            {remaining}s
-          </div>
-          <div className="mt-2 flex justify-center gap-2">
-            <button
-              onClick={() => acceptFileOffer(k)}
-              className="px-3 py-1 rounded bg-gradient-to-br from-green-500 to-green-600 text-white"
-            >
-              Accept
-            </button>
-            <button
-              onClick={() => ignoreFileOffer(k)}
-              className="px-3 py-1 rounded bg-gradient-to-br from-red-500 to-red-600 text-white"
-            >
-              Ignore
-            </button>
-          </div>
-        </div>
+        <span
+          className="inline-block w-2 h-2 rounded-full bg-gray-400 ml-2"
+          title="No recipients (offline)"
+        />
       );
-    });
+    }
+
+    const deliveries = (m.deliveries || []).filter(
+      (id) => id !== (getLocalPeerId() || myId)
+    ).length;
+    const reads = (m.reads || []).filter(
+      (id) => id !== (getLocalPeerId() || myId)
+    ).length;
+
+    if (deliveries < totalPeers) {
+      return (
+        <span
+          className="inline-block w-2 h-2 rounded-full bg-red-500 ml-2"
+          title={`Single tick — delivered to ${deliveries}/${totalPeers}`}
+        />
+      );
+    }
+
+    if (deliveries === totalPeers && reads < totalPeers) {
+      return (
+        <span
+          className="inline-block w-2 h-2 rounded-full bg-yellow-400 ml-2"
+          title={`Double tick — delivered to all (${totalPeers}), reads ${reads}/${totalPeers}`}
+        />
+      );
+    }
+
+    if (reads === totalPeers) {
+      return (
+        <span
+          className="inline-block w-2 h-2 rounded-full bg-green-500 ml-2"
+          title="Double-blue — read by everyone"
+        />
+      );
+    }
+
+    return <span className="inline-block w-2 h-2 rounded-full bg-gray-400 ml-2" />;
   };
 
-  const connectedNames = peers.length
-    ? peers.map((id) => peerNamesMap[id] || id)
-    : [];
-
-  // show typing summary using keys (names)
-  const typingSummary = () => {
-    const names = Object.keys(typingUsers);
-    if (!names.length) return null;
-    const shown = names.slice(0, 2).join(", ");
-    return <div className="text-sm text-blue-500 mb-2">{shown} typing...</div>;
-  };
-
-  // render floating transfer progress UI (top)
-  const renderTransferBars = () => {
-    const ids = Object.keys(transfers);
-    if (!ids.length) return null;
-    return (
-      <div className="fixed left-1/2 -translate-x-1/2 top-4 z-50 w-[92%] max-w-[720px]">
-        <div className="bg-black/60 backdrop-blur px-3 py-2 rounded-lg space-y-2">
-          {ids.map((id) => {
-            const t = transfers[id];
-            const total = t.total || 0;
-            const transferred = t.transferred || 0;
-            const pct = total > 0 ? Math.round((transferred / total) * 100) : 0;
-            return (
-              <div key={id} className="text-white text-sm">
-                <div className="flex justify-between items-center">
-                  <div className="font-medium">{t.label || id}</div>
-                  <div className="text-xs opacity-80">
-                    {total > 0
-                      ? `${pct}%`
-                      : `${(transferred / 1024).toFixed(1)} KB`}
-                  </div>
-                </div>
-                <div className="mt-1 w-full bg-white/20 h-2 rounded overflow-hidden">
-                  <div
-                    className="h-2 bg-blue-500"
-                    style={{ width: `${Math.min(100, pct)}%` }}
-                  />
-                </div>
-                <div className="mt-1 text-xs opacity-80">
-                  {total > 0
-                    ? `${(transferred / 1024).toFixed(1)} KB / ${(
-                        total / 1024
-                      ).toFixed(1)} KB`
-                    : `${(transferred / 1024).toFixed(1)} KB transferred`}
-                </div>
-              </div>
-            );
-          })}
-        </div>
-      </div>
-    );
-  };
-
-  // render message (preserve UI)
+  // message renderer
   const renderMessage = (m, idx) => {
     const from = m.from ?? "peer";
     const txt = typeof m.text === "string" ? m.text : JSON.stringify(m.text);
@@ -2052,63 +1820,334 @@ const handleIncomingFileChunk = async (data) => {
     );
   };
 
-  // compute status dot for message using WhatsApp-like rules
-  function renderStatusDot(m) {
-    const totalPeers = peers?.length || 0; // recipients count (excluding self)
-    if (totalPeers === 0) {
-      return (
-        <span
-          className="inline-block w-2 h-2 rounded-full bg-gray-400 ml-2"
-          title="No recipients (offline)"
-        />
-      );
+  // file input (sender) - file picker
+  const onFileSelected = async (file) => {
+    if (!file) return;
+    const offerId = `offer-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+    outgoingPendingOffers.current[offerId] = {
+      file,
+      acceptingPeers: new Set(),
+    };
+
+    // init sender UI entry
+    setTransfer(offerId, {
+      direction: "sending",
+      label: file.name,
+      total: file.size || 0,
+      transferred: 0,
+      peers: [],
+    });
+
+    const meta = {
+      id: offerId,
+      name: file.name,
+      size: file.size,
+      mime: file.type,
+      from: getLocalPeerId() || myId,
+    };
+    try {
+      offerFileToPeers(meta);
+    } catch (e) {
+      console.warn("offerFileToPeers failed", e);
     }
 
-    const deliveries = (m.deliveries || []).filter(
-      (id) => id !== (getLocalPeerId() || myId)
-    ).length;
-    const reads = (m.reads || []).filter(
-      (id) => id !== (getLocalPeerId() || myId)
-    ).length;
+    setMessages((m) => {
+      const sys = {
+        id: `sys-offer-${offerId}`,
+        from: "System",
+        text: `Offered file: ${file.name} (${Math.round(file.size / 1024)} KB)`,
+        ts: Date.now(),
+        type: "system",
+      };
+      const next = [...m, sys];
+      persistMessages(next);
+      return next;
+    });
 
-    // single tick (red) when not delivered to all recipients
-    if (deliveries < totalPeers) {
-      return (
-        <span
-          className="inline-block w-2 h-2 rounded-full bg-red-500 ml-2"
-          title={`Single tick — delivered to ${deliveries}/${totalPeers}`}
-        />
-      );
+    // cleanup if nobody accepts after 10s
+    setTimeout(() => {
+      try {
+        const pending = outgoingPendingOffers.current[offerId];
+        if (!pending) return;
+        if (pending.acceptingPeers.size === 0) {
+          setMessages((m) => {
+            const sys = {
+              id: `sys-offer-expire-${offerId}`,
+              from: "System",
+              text: `No one accepted the file offer: ${file.name}`,
+              ts: Date.now(),
+              type: "system",
+            };
+            const next = [...m, sys];
+            persistMessages(next);
+            return next;
+          });
+          setTimeout(() => removeTransfer(offerId), 800);
+        }
+      } catch (e) {
+        console.warn("post-offer cleanup failed", e);
+      }
+    }, 10000);
+  };
+
+  const handleFileInputClick = () => {
+    const input = document.createElement("input");
+    input.type = "file";
+    input.onchange = (e) => {
+      const f = e.target.files && e.target.files[0];
+      if (f) onFileSelected(f);
+    };
+    input.click();
+  };
+
+  // accept incoming offer -> ask where to save and respond true
+  const acceptFileOffer = async (offerId) => {
+    const entry = incomingFileOffers[offerId];
+    if (!entry) return;
+    const { offer } = entry;
+    try {
+      if (supportsNativeFileSystem()) {
+        const opts = {
+          suggestedName: offer.name,
+          types: [
+            {
+              description: offer.mime || "file",
+              accept: {
+                [offer.mime || "application/octet-stream"]: [
+                  "." + (offer.name.split(".").pop() || ""),
+                ],
+              },
+            },
+          ],
+        };
+        const handle = await (window.showSaveFilePicker
+          ? window.showSaveFilePicker(opts)
+          : window.chooseFileSystemEntries
+          ? window.chooseFileSystemEntries({
+              type: "save-file",
+              accepts: opts.types,
+            })
+          : null);
+        if (!handle) {
+          respondToFileOffer(offerId, offer.from, false);
+          setIncomingFileOffers((s) => {
+            const copy = { ...s };
+            delete copy[offerId];
+            return copy;
+          });
+          return;
+        }
+        const writable = await handle.createWritable();
+        saveHandlesRef.current[offerId] = writable;
+        fileWriteStatusRef.current[offerId] = 0;
+
+        // set receiver UI progress entry
+        setTransfer(offerId, {
+          direction: "receiving",
+          label: offer.name,
+          total: offer.size || 0,
+          transferred: 0,
+          peers: [offer.from],
+        });
+
+        respondToFileOffer(offerId, offer.from, true);
+        setIncomingFileOffers((s) => {
+          const copy = { ...s };
+          delete copy[offerId];
+          return copy;
+        });
+        setMessages((m) => {
+          const sys = {
+            id: `sys-accept-${offerId}`,
+            from: "System",
+            text: `Accepted file: ${offer.name}`,
+            ts: Date.now(),
+            type: "system",
+          };
+          const next = [...m, sys];
+          persistMessages(next);
+          return next;
+        });
+      } else {
+        // fallback: accept but warn
+        respondToFileOffer(offerId, offer.from, true);
+        setIncomingFileOffers((s) => {
+          const copy = { ...s };
+          delete copy[offerId];
+          return copy;
+        });
+        setMessages((m) => {
+          const sys = {
+            id: `sys-accept-${offerId}`,
+            from: "System",
+            text: `Accepted file: ${offer.name} — browser may not support direct disk writes.`,
+            ts: Date.now(),
+            type: "system",
+          };
+          const next = [...m, sys];
+          persistMessages(next);
+          return next;
+        });
+        setTransfer(offerId, {
+          direction: "receiving",
+          label: offer.name,
+          total: offer.size || 0,
+          transferred: 0,
+          peers: [offer.from],
+        });
+      }
+    } catch (e) {
+      console.warn("acceptFileOffer failed", e);
+      try {
+        respondToFileOffer(offerId, offer.from, false);
+      } catch (er) {}
+      setIncomingFileOffers((s) => {
+        const copy = { ...s };
+        delete copy[offerId];
+        return copy;
+      });
+    }
+  };
+
+  const ignoreFileOffer = (offerId) => {
+    const entry = incomingFileOffers[offerId];
+    if (!entry) return;
+    try {
+      respondToFileOffer(offerId, entry.offer.from, false);
+    } catch (e) {
+      console.warn("ignoreFileOffer failed", e);
+    }
+    setIncomingFileOffers((s) => {
+      const copy = { ...s };
+      delete copy[offerId];
+      return copy;
+    });
+  };
+
+  // wire up progress/completion callbacks exported by webrtc.js
+  useEffect(() => {
+    const progressCb = (offerId, peerId, bytes, totalBytes) => {
+      setTransfer(offerId, (prev) => ({
+        direction: prev?.direction || "sending",
+        label: prev?.label || `Transfer ${offerId}`,
+        total: totalBytes || prev?.total || 0,
+        transferred: bytes || prev?.transferred || 0,
+        peers: Array.from(new Set([...(prev?.peers || []), peerId])),
+      }));
+    };
+    const completeCb = (offerId, peerId) => {
+      setTransfer(offerId, (prev) => ({
+        ...prev,
+        transferred: prev?.total ?? prev?.transferred ?? 0,
+        peers: Array.from(new Set([...(prev?.peers || []), peerId])),
+      }));
+      setTimeout(() => removeTransfer(offerId), 1200);
+    };
+
+    try {
+      setOnFileProgress(progressCb);
+      setOnFileComplete(completeCb);
+    } catch (e) {
+      // if exports not present, ignore gracefully
+      // console.warn("Failed to register progress callbacks", e);
     }
 
-    // double tick (yellow) when delivered to everyone but not read by all
-    if (deliveries === totalPeers && reads < totalPeers) {
+    return () => {
+      try {
+        setOnFileProgress(null);
+        setOnFileComplete(null);
+      } catch (e) {}
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // connected peer names
+  const connectedNames = peers.length
+    ? peers.map((id) => peerNamesMap[id] || id)
+    : [];
+
+  const typingSummary = () => {
+    const names = Object.keys(typingUsers);
+    if (!names.length) return null;
+    const shown = names.slice(0, 2).join(", ");
+    return <div className="text-sm text-blue-500 mb-2">{shown} typing...</div>;
+  };
+
+  const renderIncomingFileOffers = () => {
+    const keys = Object.keys(incomingFileOffers);
+    if (!keys.length) return null;
+    return keys.map((k) => {
+      const entry = incomingFileOffers[k];
+      const offer = entry.offer;
+      const remaining = Math.max(0, Math.ceil((entry.expiresAt - now) / 1000));
       return (
-        <span
-          className="inline-block w-2 h-2 rounded-full bg-yellow-400 ml-2"
-          title={`Double tick — delivered to all (${totalPeers}), reads ${reads}/${totalPeers}`}
-        />
+        <div key={k} className="mb-2 p-2 rounded bg-white/10 text-sm text-black">
+          <div className="font-semibold">
+            File offer: {offer.name} ({Math.round((offer.size || 0) / 1024)} KB)
+          </div>
+          <div className="text-xs text-gray-600">
+            From: {peerNamesMap[offer.from] || offer.from} — Expires in {remaining}s
+          </div>
+          <div className="mt-2 flex justify-center gap-2">
+            <button onClick={() => acceptFileOffer(k)} className="px-3 py-1 rounded bg-gradient-to-br from-green-500 to-green-600 text-white">Accept</button>
+            <button onClick={() => ignoreFileOffer(k)} className="px-3 py-1 rounded bg-gradient-to-br from-red-500 to-red-600 text-white">Ignore</button>
+          </div>
+        </div>
       );
+    });
+  };
+
+  const maybeNotify = (fromDisplay, text) => {
+    try {
+      if (!fromDisplay || fromDisplay === username) return;
+      if (!document.hidden && document.hasFocus()) return;
+
+      const title = `${fromDisplay}`;
+      const body =
+        typeof text === "string"
+          ? text.length > 120
+            ? text.slice(0, 117) + "..."
+            : text
+          : JSON.stringify(text);
+      showNotification(title, {
+        body,
+        tag: `peershub-${fromDisplay}`,
+        data: { from: fromDisplay },
+      });
+    } catch (e) {
+      console.warn("maybeNotify error", e);
     }
+  };
 
-    // double-blue (green) when read by everyone
-    if (reads === totalPeers) {
-      return (
-        <span
-          className="inline-block w-2 h-2 rounded-full bg-green-500 ml-2"
-          title="Double-blue — read by everyone"
-        />
-      );
-    }
-
-    return (
-      <span className="inline-block w-2 h-2 rounded-full bg-gray-400 ml-2" />
-    );
-  }
-
+  // UI rendering
   return (
     <>
-      {renderTransferBars()}
+      {/* Floating progress panel */}
+      {Object.keys(transfers).length > 0 && (
+        <div className="fixed left-1/2 -translate-x-1/2 top-4 z-50">
+          <div className="bg-black/80 text-white rounded-lg p-3 shadow-lg w-[min(720px,calc(100%-40px))]">
+            {Object.entries(transfers).map(([id, t]) => {
+              const pct = t.total ? Math.min(100, Math.round((t.transferred / t.total) * 100)) : 0;
+              const label = t.label || id;
+              const directionText = t.direction === "sending" ? "Sending" : "Receiving";
+              const humanTransferred = `${Math.round((t.transferred || 0) / 1024)} KB`;
+              const humanTotal = `${Math.round((t.total || 0) / 1024)} KB`;
+              return (
+                <div key={id} className="mb-3 last:mb-0">
+                  <div className="flex justify-between items-center text-sm mb-1">
+                    <div className="font-semibold truncate max-w-[70%]">{directionText}: {label}</div>
+                    <div className="text-xs">{pct}%</div>
+                  </div>
+                  <div className="w-full bg-white/10 rounded h-2 overflow-hidden mb-1">
+                    <div style={{ width: `${pct}%` }} className="h-2 bg-blue-500 transition-all" />
+                  </div>
+                  <div className="text-xs text-white/60">{humanTransferred} / {humanTotal}</div>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
 
       <div className="h-[92vh] md:h-[92vh] max-w-[410px] w-full mx-auto bg-gray-50 text-purple-600 p-6 flex flex-col rounded-4xl">
         <header className="flex items-center justify-between mb-4">
@@ -2116,65 +2155,32 @@ const handleIncomingFileChunk = async (data) => {
             <div className="text-sm text-blue-600">YourID</div>
             <div className="font-mono">{myId || "..."}</div>
             <div className="text-sm text-blue-600">Name: {username}</div>
-            <div className="text-xs text-purple-500 mt-1">
-              Auto-join: {joinedBootstrap || "none"}
-            </div>
+            <div className="text-xs text-purple-500 mt-1">Auto-join: {joinedBootstrap || "none"}</div>
           </div>
 
-          {/* three-dots menu */}
           <div className="relative" ref={menuRef}>
-            <button
-              onClick={() => setMenuOpen((s) => !s)}
-              className="p-2 rounded-full bg-white/10 text-white"
-              aria-label="Menu"
-            >
-              <svg
-                width="18"
-                height="18"
-                viewBox="0 0 24 24"
-                className="inline-block"
-              >
+            <button onClick={() => setMenuOpen((s) => !s)} className="p-2 rounded-full bg-white/10 text-white" aria-label="Menu">
+              <svg width="18" height="18" viewBox="0 0 24 24" className="inline-block">
                 <circle cx="12" cy="5" r="2" fill="blue" />
                 <circle cx="12" cy="12" r="2" fill="blue" />
                 <circle cx="12" cy="19" r="2" fill="blue" />
               </svg>
             </button>
 
-            <div
-              className={`absolute right-0 mt-2 w-44 bg-white/10 backdrop-blur rounded-lg shadow-lg z-50 transform origin-top-right transition-all duration-200 ${
-                menuOpen
-                  ? "opacity-100 scale-100 pointer-events-auto"
-                  : "opacity-0 scale-95 pointer-events-none"
-              }`}
-            >
-              <button
-                onClick={handleCreateHub}
-                className="w-full text-left px-4 py-3 hover:bg-white/20 border-b border-white/5 text-green-500"
-              >
+            <div className={`absolute right-0 mt-2 w-44 bg-white/10 backdrop-blur rounded-lg shadow-lg z-50 transform origin-top-right transition-all duration-200 ${menuOpen ? "opacity-100 scale-100 pointer-events-auto" : "opacity-0 scale-95 pointer-events-none"}`}>
+              <button onClick={handleCreateHub} className="w-full text-left px-4 py-3 hover:bg-white/20 border-b border-white/5 text-green-500">
                 <span className="font-semibold">Create Hub</span>
-                <div className="text-xs text-gray-400">
-                  Make this device the host
-                </div>
+                <div className="text-xs text-gray-400">Make this device the host</div>
               </button>
 
-              <button
-                onClick={handleJoinHub}
-                className="w-full text-left px-4 py-3 hover:bg-white/20 border-b border-white/5 text-blue-500"
-              >
+              <button onClick={handleJoinHub} className="w-full text-left px-4 py-3 hover:bg-white/20 border-b border-white/5 text-blue-500">
                 <span className="font-semibold">Join Hub</span>
-                <div className="text-xs text-gray-400">
-                  Enter a host ID to join
-                </div>
+                <div className="text-xs text-gray-400">Enter a host ID to join</div>
               </button>
 
-              <button
-                onClick={handleLeaveClick}
-                className="w-full text-left px-4 py-3 hover:bg-white/20 text-red-500 rounded-b-lg"
-              >
+              <button onClick={handleLeaveClick} className="w-full text-left px-4 py-3 hover:bg-white/20 text-red-500 rounded-b-lg">
                 <span className="font-semibold">Leave</span>
-                <div className="text-xs text-gray-400">
-                  Leave and clear local history
-                </div>
+                <div className="text-xs text-gray-400">Leave and clear local history</div>
               </button>
             </div>
           </div>
@@ -2185,9 +2191,7 @@ const handleIncomingFileChunk = async (data) => {
 
         <main className="flex-1 overflow-auto mb-4 min-h-0">
           <div style={{ paddingBottom: 8 }}>
-            {messages.length === 0 && (
-              <div className="text-sm text-white/60">No messages yet</div>
-            )}
+            {messages.length === 0 && <div className="text-sm text-white/60">No messages yet</div>}
             {messages.map((m, i) => renderMessage(m, i))}
             <div ref={messagesEndRef} />
           </div>
@@ -2199,42 +2203,20 @@ const handleIncomingFileChunk = async (data) => {
         <footer className="mt-auto">
           {typingSummary()}
           <div className="mb-3 text-sm text-blue-600">
-            Connected peers:{" "}
-            {connectedNames.length === 0 ? (
-              <span className="text-red-500">none</span>
-            ) : (
-              connectedNames.join(", ")
-            )}
+            Connected peers: {connectedNames.length === 0 ? <span className="text-red-500">none</span> : connectedNames.join(", ")}
           </div>
 
           {renderIncomingFileOffers()}
 
           {replyTo && (
             <div className="mb-2 p-3 bg-white/10 text-gray-500 rounded-lg">
-              Replying to <strong>{replyTo.from}</strong>:{" "}
-              <span className="text-sm text-blue-400">{replyTo.text}</span>
-              <button
-                onClick={() => setReplyTo(null)}
-                className="ml-4 text-xs text-red-500"
-              >
-                x
-              </button>
+              Replying to <strong>{replyTo.from}</strong>: <span className="text-sm text-blue-400">{replyTo.text}</span>
+              <button onClick={() => setReplyTo(null)} className="ml-4 text-xs text-red-500">x</button>
             </div>
           )}
           <div className="relative w-full flex items-center">
             {/* clip icon inside input (left) */}
-            <svg
-              onClick={handleFileInputClick}
-              xmlns="http://www.w3.org/2000/svg"
-              viewBox="0 0 24 24"
-              fill="none"
-              stroke="currentColor"
-              strokeWidth="2"
-              strokeLinecap="round"
-              strokeLinejoin="round"
-              className="absolute left-3 top-1/2 -translate-y-1/2 w-5 h-5 text-blue-500 cursor-pointer hover:text-blue-700"
-              title="Attach File"
-            >
+            <svg onClick={handleFileInputClick} xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="absolute left-3 top-1/2 -translate-y-1/2 w-5 h-5 text-blue-500 cursor-pointer hover:text-blue-700" title="Attach File">
               <path d="M21.44 11.05l-9.19 9.19a5.5 5.5 0 01-7.78-7.78l9.19-9.19a3.5 3.5 0 015 5l-9.2 9.19a1.5 1.5 0 01-2.12-2.12l8.49-8.49" />
             </svg>
 
@@ -2249,14 +2231,7 @@ const handleIncomingFileChunk = async (data) => {
             />
 
             {/* send icon inside input (right) */}
-            <svg
-              onClick={send}
-              xmlns="http://www.w3.org/2000/svg"
-              fill="currentColor"
-              viewBox="0 0 24 24"
-              className="absolute right-3 top-1/2 -translate-y-1/2 w-5 h-5 text-blue-500 cursor-pointer hover:text-blue-700"
-              title="Send"
-            >
+            <svg onClick={send} xmlns="http://www.w3.org/2000/svg" fill="currentColor" viewBox="0 0 24 24" className="absolute right-3 top-1/2 -translate-y-1/2 w-5 h-5 text-blue-500 cursor-pointer hover:text-blue-700" title="Send">
               <path d="M3.4 20.6L21 12 3.4 3.4 3 10l11 2-11 2z" />
             </svg>
           </div>
@@ -2266,28 +2241,13 @@ const handleIncomingFileChunk = async (data) => {
       {/* Leave confirmation modal */}
       {confirmLeaveOpen && (
         <div className="fixed inset-0 z-60 flex items-center justify-center">
-          <div
-            className="absolute inset-0 bg-black/50"
-            onClick={handleCancelLeave}
-          />
+          <div className="absolute inset-0 bg-black/50" onClick={handleCancelLeave} />
           <div className="relative bg-white/10 p-6 rounded-lg backdrop-blur text-white w-80 z-70">
             <h3 className="text-lg font-bold mb-2">Leave Hub?</h3>
-            <p className="text-sm text-white/80 mb-4">
-              Leaving will clear your local chat history. Are you sure?
-            </p>
+            <p className="text-sm text-white/80 mb-4">Leaving will clear your local chat history. Are you sure?</p>
             <div className="flex justify-center gap-2">
-              <button
-                onClick={handleCancelLeave}
-                className="px-3 py-2 rounded bg-gradient-to-br from-green-500 to-green-600 text-white"
-              >
-                Cancel
-              </button>
-              <button
-                onClick={handleConfirmLeave}
-                className="px-3 py-2 rounded bg-gradient-to-br from-red-500 to-red-600 text-white"
-              >
-                Leave & Clear
-              </button>
+              <button onClick={handleCancelLeave} className="px-3 py-2 rounded bg-gradient-to-br from-green-500 to-green-600 text-white">Cancel</button>
+              <button onClick={handleConfirmLeave} className="px-3 py-2 rounded bg-gradient-to-br from-red-500 to-red-600 text-white">Leave & Clear</button>
             </div>
           </div>
         </div>
