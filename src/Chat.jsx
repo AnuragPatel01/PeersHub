@@ -851,152 +851,6 @@
 //   );
 // }
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 // src/components/Chat.jsx
 import "./App.css";
 import React, { useEffect, useState, useRef } from "react";
@@ -1015,6 +869,7 @@ import {
   respondToFileOffer,
   startSendingFile,
   supportsNativeFileSystem,
+  setOnFileProgress,
 } from "./webrtc";
 // notification helpers
 import { requestNotificationPermission, showNotification } from "./notify";
@@ -1185,7 +1040,13 @@ export default function Chat() {
     let { id: offerId, seq, chunk, final } = data || {};
     try {
       // unwrap wrapper if necessary (common PeerJS quirk)
-      if (chunk && chunk.data && (chunk.data instanceof ArrayBuffer || ArrayBuffer.isView(chunk.data) || chunk.data instanceof Blob)) {
+      if (
+        chunk &&
+        chunk.data &&
+        (chunk.data instanceof ArrayBuffer ||
+          ArrayBuffer.isView(chunk.data) ||
+          chunk.data instanceof Blob)
+      ) {
         chunk = chunk.data;
       }
 
@@ -1229,32 +1090,67 @@ export default function Chat() {
           (fileWriteStatusRef.current[offerId] || 0) + bytesWritten;
 
         // update UI transfer progress
-        const total = saveHandlesRef.current.__meta__ && saveHandlesRef.current.__meta__[offerId]
-          ? saveHandlesRef.current.__meta__[offerId].total
-          : (transfers[offerId] && transfers[offerId].total) || 0;
+        const total =
+          saveHandlesRef.current.__meta__ &&
+          saveHandlesRef.current.__meta__[offerId]
+            ? saveHandlesRef.current.__meta__[offerId].total
+            : (transfers[offerId] && transfers[offerId].total) || 0;
 
         setTransfer(offerId, {
           direction: "receiving",
-          label: saveHandlesRef.current.__meta__ && saveHandlesRef.current.__meta__[offerId]
-            ? saveHandlesRef.current.__meta__[offerId].label
-            : (transfers[offerId] && transfers[offerId].label) || `Receiving ${offerId}`,
+          label:
+            saveHandlesRef.current.__meta__ &&
+            saveHandlesRef.current.__meta__[offerId]
+              ? saveHandlesRef.current.__meta__[offerId].label
+              : (transfers[offerId] && transfers[offerId].label) ||
+                `Receiving ${offerId}`,
           total,
           transferred: fileWriteStatusRef.current[offerId] || 0,
         });
       }
 
       if (final) {
+  try {
+    // ensure final chunks are flushed to disk
+    await writer.close();
+  } catch (e) {
+    console.warn("Error closing writer for offer", offerId, e);
+  }
+
+  // mark transfer as 100% and schedule UI removal (guard against missing funcs)
+  try {
+    if (typeof setTransfer === "function" && typeof removeTransfer === "function") {
+      setTransfer(offerId, (prev) => ({
+        ...prev,
+        transferred: prev?.total ?? prev?.transferred ?? 0,
+      }));
+      // remove the floating progress bar after a short delay so user sees completion
+      setTimeout(() => {
         try {
-          await writer.close();
+          removeTransfer(offerId);
         } catch (e) {
-          console.warn("Error closing writer for offer", offerId, e);
+          console.warn("removeTransfer error", e);
         }
-        // cleanup
-        delete saveHandlesRef.current[offerId];
-        delete fileWriteStatusRef.current[offerId];
+      }, 1500);
+    }
+  } catch (e) {
+    console.warn("transfer cleanup failed", e);
+  }
+
+  // cleanup internal bookkeeping
+  try {
+    delete saveHandlesRef.current[offerId];
+    delete fileWriteStatusRef.current[offerId];
+  } catch (e) {
+    console.warn("cleanup refs failed", e);
+  }
+}
 
         // finalize UI
-        setTransfer(offerId, { transferred: (transfers[offerId] && transfers[offerId].total) || undefined });
+        setTransfer(offerId, {
+          transferred:
+            (transfers[offerId] && transfers[offerId].total) || undefined,
+        });
         setMessages((m) => {
           const sys = {
             id: `sys-file-done-${offerId}`,
@@ -1289,7 +1185,9 @@ export default function Chat() {
       removeTransfer(offerId);
       try {
         if (saveHandlesRef.current[offerId]) {
-          try { await saveHandlesRef.current[offerId].close(); } catch (er) {}
+          try {
+            await saveHandlesRef.current[offerId].close();
+          } catch (er) {}
           delete saveHandlesRef.current[offerId];
         }
       } catch (er) {}
@@ -1453,7 +1351,10 @@ export default function Chat() {
         return next;
       });
       // mark transfer finished for sender side too and remove after delay
-      setTransfer(offerId, (prev) => ({ ...prev, transferred: (prev && prev.total) || prev && prev.transferred }));
+      setTransfer(offerId, (prev) => ({
+        ...prev,
+        transferred: (prev && prev.total) || (prev && prev.transferred),
+      }));
       setTimeout(() => removeTransfer(offerId), 3000);
       return;
     }
@@ -1551,6 +1452,38 @@ export default function Chat() {
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [username]);
+
+  // register for file-send progress events from webrtc
+  useEffect(() => {
+    // callback invoked from webrtc.streamFileToConn while sending
+    const cb = (offerId, targetPeerId, bytesSent, totalBytes) => {
+      // update transfer UI for this offerId
+      setTransfers((t) => {
+        const cur = t[offerId] || {};
+        // ensure peers array contains targetPeerId
+        const peersArr = new Set((cur.peers || []).concat([targetPeerId]));
+        return {
+          ...t,
+          [offerId]: {
+            ...cur,
+            direction: cur.direction || "sending",
+            label: cur.label || `Sending ${offerId}`,
+            total: totalBytes || cur.total || 0,
+            transferred: bytesSent || cur.transferred || 0,
+            peers: Array.from(peersArr),
+          },
+        };
+      });
+    };
+
+    // set in webrtc
+    setOnFileProgress(cb);
+
+    // cleanup: clear listener on unmount
+    return () => {
+      setOnFileProgress(null);
+    };
+  }, []);
 
   // autoscroll to bottom when messages change
   useEffect(() => {
@@ -1782,7 +1715,12 @@ export default function Chat() {
   // file input handler (sender)
   const onFileSelected = async (file) => {
     if (!file) return;
-    const offerId = file && file.name ? `${getLocalPeerId() || myId}-${Date.now()}-${Math.random().toString(36).slice(2,7)}` : `offer-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+    const offerId =
+      file && file.name
+        ? `${getLocalPeerId() || myId}-${Date.now()}-${Math.random()
+            .toString(36)
+            .slice(2, 7)}`
+        : `offer-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
     outgoingPendingOffers.current[offerId] = {
       file,
       acceptingPeers: new Set(),
@@ -1889,7 +1827,8 @@ export default function Chat() {
         const writable = await handle.createWritable();
 
         // store a meta map for UI total/label lookups
-        if (!saveHandlesRef.current.__meta__) saveHandlesRef.current.__meta__ = {};
+        if (!saveHandlesRef.current.__meta__)
+          saveHandlesRef.current.__meta__ = {};
         saveHandlesRef.current.__meta__[offerId] = {
           total: offer.size || 0,
           label: `Receiving: ${offer.name}`,
@@ -2058,7 +1997,9 @@ export default function Chat() {
                 <div className="flex justify-between items-center">
                   <div className="font-medium">{t.label || id}</div>
                   <div className="text-xs opacity-80">
-                    {total > 0 ? `${pct}%` : `${(transferred / 1024).toFixed(1)} KB`}
+                    {total > 0
+                      ? `${pct}%`
+                      : `${(transferred / 1024).toFixed(1)} KB`}
                   </div>
                 </div>
                 <div className="mt-1 w-full bg-white/20 h-2 rounded overflow-hidden">
@@ -2069,7 +2010,9 @@ export default function Chat() {
                 </div>
                 <div className="mt-1 text-xs opacity-80">
                   {total > 0
-                    ? `${(transferred / 1024).toFixed(1)} KB / ${(total / 1024).toFixed(1)} KB`
+                    ? `${(transferred / 1024).toFixed(1)} KB / ${(
+                        total / 1024
+                      ).toFixed(1)} KB`
                     : `${(transferred / 1024).toFixed(1)} KB transferred`}
                 </div>
               </div>
