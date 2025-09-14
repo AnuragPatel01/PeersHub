@@ -2332,7 +2332,7 @@
 
 
 
-// src/components/Chat.jsx
+// src/components/Chat.jsx - FIXED VERSION
 import "./App.css";
 import React, { useEffect, useRef, useState, useCallback } from "react";
 import {
@@ -2356,15 +2356,16 @@ import { nanoid } from "nanoid";
 
 /*
   Chat.jsx - Fixed Version
-  - Fixed long-press recording on clip icon
-  - Added missing preview video element
-  - Fixed event handler connections
-  - Improved cleanup and state management
+  FIXES:
+  1. Read receipts - Fixed timing and auto-send logic
+  2. Recording preview - Added proper circular preview during recording
+  3. Video playback - Added expandable video player with overlay
+  4. Typing indicators - Fixed cleanup timing and debouncing
 */
 
 const LS_MSGS = "ph_msgs_v1";
 const MAX_MSGS = 100;
-const RECORD_PRESS_MS = 3000;
+const RECORD_PRESS_MS = 500; // Reduced for better UX
 const MAX_RECORD_SECONDS = 30;
 
 export default function Chat() {
@@ -2402,9 +2403,10 @@ export default function Chat() {
   const [menuOpen, setMenuOpen] = useState(false);
   const [confirmLeaveOpen, setConfirmLeaveOpen] = useState(false);
 
-  // typing & reply
+  // typing & reply - FIXED: Better typing state management
   const [typingUsers, setTypingUsers] = useState({});
   const [replyTo, setReplyTo] = useState(null);
+  const [isTyping, setIsTyping] = useState(false);
 
   // file offers and save handles
   const [incomingFileOffers, setIncomingFileOffers] = useState({});
@@ -2421,6 +2423,7 @@ export default function Chat() {
   const peerRef = useRef(null);
   const menuRef = useRef(null);
   const typingTimeoutRef = useRef(null);
+  const typingCleanupTimeoutRef = useRef(null);
 
   // recording refs/state
   const mediaRecorderRef = useRef(null);
@@ -2431,6 +2434,9 @@ export default function Chat() {
   const [isRecording, setIsRecording] = useState(false);
   const [recordRemaining, setRecordRemaining] = useState(MAX_RECORD_SECONDS);
   const previewVideoRef = useRef(null);
+
+  // FIXED: Video player overlay state
+  const [expandedVideo, setExpandedVideo] = useState(null);
 
   // helper: format bytes adaptively
   const formatBytesAdaptive = (bytes, decimals = 2) => {
@@ -2485,7 +2491,7 @@ export default function Chat() {
     });
   }, [persistMessages]);
 
-  // add unique id to deliveries/reads
+  // FIXED: Improved read receipt handling
   const addUniqueToMsgArray = useCallback((msgId, field, peerId) => {
     setMessages((m) => {
       const next = m.map((msg) => {
@@ -2629,21 +2635,45 @@ export default function Chat() {
     }
   };
 
+  // FIXED: Improved typing indicator cleanup
+  const cleanupTypingUser = useCallback((fromName) => {
+    setTypingUsers((t) => {
+      const copy = { ...t };
+      delete copy[fromName];
+      return copy;
+    });
+  }, []);
+
   // incoming message handler
   const handleIncoming = async (from, payloadOrText) => {
-    // typing
+    // FIXED: Better typing handling with automatic cleanup
     if (
       from === "__system_typing__" &&
       payloadOrText &&
       payloadOrText.fromName
     ) {
       const { fromName, isTyping } = payloadOrText;
-      setTypingUsers((t) => {
-        const copy = { ...t };
-        if (isTyping) copy[fromName] = Date.now();
-        else delete copy[fromName];
-        return copy;
-      });
+      if (isTyping) {
+        setTypingUsers((t) => ({ ...t, [fromName]: Date.now() }));
+        // Clear any existing cleanup timeout for this user
+        if (typingCleanupTimeoutRef.current?.[fromName]) {
+          clearTimeout(typingCleanupTimeoutRef.current[fromName]);
+        }
+        // Set new cleanup timeout
+        if (!typingCleanupTimeoutRef.current) {
+          typingCleanupTimeoutRef.current = {};
+        }
+        typingCleanupTimeoutRef.current[fromName] = setTimeout(() => {
+          cleanupTypingUser(fromName);
+          delete typingCleanupTimeoutRef.current?.[fromName];
+        }, 3000); // 3 second cleanup
+      } else {
+        cleanupTypingUser(fromName);
+        if (typingCleanupTimeoutRef.current?.[fromName]) {
+          clearTimeout(typingCleanupTimeoutRef.current[fromName]);
+          delete typingCleanupTimeoutRef.current[fromName];
+        }
+      }
       return;
     }
 
@@ -2658,7 +2688,7 @@ export default function Chat() {
       return;
     }
 
-    // ack read
+    // FIXED: Read receipt handling
     if (from === "__system_ack_read__" && payloadOrText && payloadOrText.id) {
       const { fromPeer, id } = payloadOrText;
       addUniqueToMsgArray(id, "reads", fromPeer);
@@ -2822,20 +2852,22 @@ export default function Chat() {
         payloadOrText.text
       );
 
+      // FIXED: Automatic read receipt sending with proper timing
       try {
         const origin = payloadOrText.from || payloadOrText.origin || null;
         const localId = getLocalPeerId() || myId;
-        if (
-          origin &&
-          origin !== localId &&
-          document.visibilityState === "visible"
-        ) {
-          try {
-            sendAckRead(payloadOrText.id, origin);
-          } catch (e) {
-            console.warn("sendAckRead error (auto on receive):", e);
+        if (origin && origin !== localId) {
+          // Send read receipt immediately if tab is visible
+          if (document.visibilityState === "visible" && document.hasFocus()) {
+            setTimeout(() => {
+              try {
+                sendAckRead(payloadOrText.id, origin);
+                addUniqueToMsgArray(payloadOrText.id, "reads", localId);
+              } catch (e) {
+                console.warn("sendAckRead error (auto on receive):", e);
+              }
+            }, 100); // Small delay to ensure message is processed
           }
-          addUniqueToMsgArray(payloadOrText.id, "reads", localId);
         }
       } catch (e) {
         console.warn("auto ack_read failed", e);
@@ -2929,34 +2961,71 @@ export default function Chat() {
       messagesEndRef.current.scrollIntoView({ behavior: "smooth" });
   }, [messages]);
 
-  // typing broadcast (debounced) - FIXED: Single effect
+  // FIXED: Better typing broadcast with proper cleanup
   useEffect(() => {
-    if (!username || !text) return;
+    if (!username) return;
     
-    if (typingTimeoutRef.current) clearTimeout(typingTimeoutRef.current);
+    // Clear existing timeouts
+    if (typingTimeoutRef.current) {
+      clearTimeout(typingTimeoutRef.current);
+    }
     
-    try {
-      if (typeof sendTyping === "function") sendTyping(username, true);
-    } catch (e) {}
-    
-    typingTimeoutRef.current = setTimeout(() => {
-      try {
-        if (typeof sendTyping === "function") sendTyping(username, false);
-      } catch (e) {}
-    }, 1200);
+    if (text.trim()) {
+      // Send typing start if not already typing
+      if (!isTyping) {
+        try {
+          sendTyping(username, true);
+          setIsTyping(true);
+        } catch (e) {
+          console.warn("sendTyping start failed", e);
+        }
+      }
+      
+      // Set timeout to stop typing
+      typingTimeoutRef.current = setTimeout(() => {
+        try {
+          sendTyping(username, false);
+          setIsTyping(false);
+        } catch (e) {
+          console.warn("sendTyping stop failed", e);
+        }
+      }, 1000); // Reduced timeout for better responsiveness
+    } else {
+      // Text cleared, stop typing immediately
+      if (isTyping) {
+        try {
+          sendTyping(username, false);
+          setIsTyping(false);
+        } catch (e) {
+          console.warn("sendTyping stop failed", e);
+        }
+      }
+    }
     
     return () => {
-      if (typingTimeoutRef.current) clearTimeout(typingTimeoutRef.current);
+      if (typingTimeoutRef.current) {
+        clearTimeout(typingTimeoutRef.current);
+      }
     };
-  }, [text, username]);
+  }, [text, username, isTyping]);
 
   // send chat text (non-media)
   const send = () => {
     if (!text.trim()) return;
+    
+    // Stop typing indicator immediately
+    if (isTyping) {
+      try {
+        sendTyping(username, false);
+        setIsTyping(false);
+      } catch (e) {}
+    }
+    
     const id = nanoid();
+    const localId = getLocalPeerId() || myId;
     const msgObj = {
       id,
-      from: getLocalPeerId() || myId,
+      from: localId,
       fromName: username,
       text: text.trim(),
       ts: Date.now(),
@@ -2964,7 +3033,7 @@ export default function Chat() {
         ? { id: replyTo.id, from: replyTo.from, text: replyTo.text }
         : null,
       deliveries: [],
-      reads: [getLocalPeerId() || myId],
+      reads: [localId], // Mark as read by sender immediately
     };
     setMessages((m) => {
       const next = [...m, msgObj];
@@ -3269,7 +3338,7 @@ export default function Chat() {
 
   const handleCancelLeave = () => setConfirmLeaveOpen(false);
 
-  // reply to message / ack read on tap
+  // FIXED: Better message tap handling with improved read receipts
   const handleTapMessage = (m) => {
     if (m.type && m.type.toString().startsWith("system")) return;
     setReplyTo({ id: m.id, from: m.from, text: m.text });
@@ -3277,11 +3346,14 @@ export default function Chat() {
       'input[placeholder="Type a message..."]'
     );
     if (input) input.focus();
+    
+    // Send read receipt for incoming messages
+    const localId = getLocalPeerId() || myId;
     const originPeerId = m.fromId || m.from;
-    if (m.id && originPeerId) {
+    if (m.id && originPeerId && originPeerId !== localId) {
       try {
         sendAckRead(m.id, originPeerId);
-        addUniqueToMsgArray(m.id, "reads", getLocalPeerId() || myId);
+        addUniqueToMsgArray(m.id, "reads", localId);
       } catch (e) {
         console.warn("sendAckRead error", e);
       }
@@ -3328,7 +3400,7 @@ export default function Chat() {
     e.preventDefault();
   }, []);
 
-  // start recording (MediaRecorder)
+  // FIXED: start recording with better preview
   const startRecording = async () => {
     if (isRecording) return;
     try {
@@ -3340,13 +3412,14 @@ export default function Chat() {
       const stream = await navigator.mediaDevices.getUserMedia(constraints);
       mediaStreamRef.current = stream;
 
-      // show live preview via srcObject
+      // FIXED: Show live preview via srcObject with proper setup
       try {
         if (previewVideoRef.current) {
           previewVideoRef.current.srcObject = stream;
           previewVideoRef.current.muted = true;
           previewVideoRef.current.playsInline = true;
-          previewVideoRef.current.play().catch(() => {});
+          previewVideoRef.current.autoplay = true;
+          await previewVideoRef.current.play();
         }
       } catch (e) {
         console.warn("preview play failed", e);
@@ -3383,14 +3456,15 @@ export default function Chat() {
 
         // add local message (sender)
         const id = nanoid();
+        const localId = getLocalPeerId() || myId;
         const msgObj = {
           id,
-          from: getLocalPeerId() || myId,
+          from: localId,
           fromName: username,
           text: "",
           ts: Date.now(),
           deliveries: [],
-          reads: [getLocalPeerId() || myId],
+          reads: [localId],
           media: { blob, mime: blob.type, size, name, url: localUrl },
         };
         setMessages((m) => {
@@ -3482,6 +3556,11 @@ export default function Chat() {
       if (recordPressTimerRef.current) clearTimeout(recordPressTimerRef.current);
       if (recordTimerRef.current) clearInterval(recordTimerRef.current);
       if (typingTimeoutRef.current) clearTimeout(typingTimeoutRef.current);
+      
+      // Clean up typing cleanup timeouts
+      if (typingCleanupTimeoutRef.current) {
+        Object.values(typingCleanupTimeoutRef.current).forEach(clearTimeout);
+      }
       
       // Stop media stream
       if (mediaStreamRef.current) {
@@ -3584,6 +3663,69 @@ export default function Chat() {
     });
   };
 
+  // FIXED: Enhanced video message rendering with expandable player
+  const renderVideoMessage = (m, idx, isMe, from, time) => {
+    return (
+      <div
+        key={`${m.id ?? m.ts}-${idx}`}
+        onClick={() => handleTapMessage(m)}
+        className={`p-3 rounded-2xl max-w-[70%] mb-2 cursor-pointer ${
+          isMe ? "ml-auto bg-blue-500 text-white" : "bg-white/100 text-black"
+        }`}
+      >
+        <div className="text-xs font-bold flex items-center">
+          <div className="flex-1">{isMe ? "You" : from}</div>
+          <div className="text-[10px] text-gray-700/70 ml-2">{time}</div>
+        </div>
+
+        <div className="mt-2 flex items-center justify-center">
+          <div className="relative">
+            {/* FIXED: Circular preview with play button overlay */}
+            <div
+              style={{ width: 120, height: 120 }}
+              className="rounded-full overflow-hidden bg-black relative cursor-pointer"
+              onClick={(e) => {
+                e.stopPropagation();
+                setExpandedVideo(m.media);
+              }}
+            >
+              <video
+                src={m.media.url}
+                style={{
+                  width: "100%",
+                  height: "100%",
+                  objectFit: "cover",
+                }}
+                muted
+                playsInline
+              />
+              
+              {/* Play button overlay */}
+              <div className="absolute inset-0 flex items-center justify-center bg-black/30">
+                <div className="w-8 h-8 bg-white/90 rounded-full flex items-center justify-center">
+                  <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor">
+                    <path d="M8 5v14l11-7z"/>
+                  </svg>
+                </div>
+              </div>
+            </div>
+            
+            {/* Download button */}
+            <a
+              href={m.media.url}
+              download={m.media.name}
+              className="absolute -bottom-2 -right-2 bg-blue-500 hover:bg-blue-600 p-1 rounded-full text-white text-xs"
+              title="Download"
+              onClick={(e) => e.stopPropagation()}
+            >
+              ⤓
+            </a>
+          </div>
+        </div>
+      </div>
+    );
+  };
+
   // render a single message (chat / media / system)
   const renderMessage = (m, idx) => {
     const from = m.from ?? "peer";
@@ -3593,8 +3735,8 @@ export default function Chat() {
       minute: "2-digit",
     });
     const isSystem = m.type && m.type.toString().startsWith("system");
-    const isMe =
-      (m.fromId || m.from) === (getLocalPeerId() || myId) || from === username;
+    const localId = getLocalPeerId() || myId;
+    const isMe = (m.fromId || m.from) === localId || from === username;
 
     if (isSystem) {
       return (
@@ -3606,63 +3748,23 @@ export default function Chat() {
       );
     }
 
-    // media handling: if message has media (blob or url) show circular preview for videos
+    // FIXED: Enhanced video message rendering
     if (m.media && (m.media.mime || "").startsWith("video")) {
-      return (
-        <div
-          key={`${m.id ?? m.ts}-${idx}`}
-          onClick={() => handleTapMessage(m)}
-          className={`p-3 rounded-2xl max-w-[60%] mb-2 cursor-pointer ${
-            isMe ? "ml-auto bg-blue-500 text-white" : "bg-white/100 text-black"
-          }`}
-        >
-          <div className="text-xs font-bold flex items-center">
-            <div className="flex-1">{isMe ? "You" : from}</div>
-            <div className="text-[10px] text-gray-700 /70 ml-2">{time}</div>
-          </div>
-
-          <div className="mt-2 flex items-center justify-center">
-            <div
-              style={{ width: 120, height: 120 }}
-              className="rounded-full overflow-hidden bg-black relative"
-            >
-              <video
-                src={m.media.url}
-                controls
-                playsInline
-                style={{
-                  width: "100%",
-                  height: "100%",
-                  objectFit: "cover",
-                  borderRadius: "9999px",
-                }}
-              />
-              <a
-                href={m.media.url}
-                download={m.media.name}
-                className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 bg-black/50 p-2 rounded-full text-white"
-                title="Download"
-              >
-                ⤓
-              </a>
-            </div>
-          </div>
-        </div>
-      );
+      return renderVideoMessage(m, idx, isMe, from, time);
     }
 
-    // default chat bubble
+    // FIXED: Enhanced chat bubble with read receipts
     return (
       <div
         onClick={() => handleTapMessage(m)}
         key={`${m.id ?? m.ts}-${idx}`}
-        className={`p-2 rounded-2xl max-w-[50%] mb-2 cursor-pointer ${
+        className={`p-2 rounded-2xl max-w-[70%] mb-2 cursor-pointer ${
           isMe ? "ml-auto bg-blue-500 text-white" : "bg-white/100 text-black"
         }`}
       >
         <div className="text-xs font-bold flex items-center">
           <div className="flex-1">{isMe ? "You" : from}</div>
-          <div className="text-[10px] text-gray-700 /70 ml-2">{time}</div>
+          <div className="text-[10px] text-gray-700/70 ml-2">{time}</div>
         </div>
         {m.replyTo && (
           <div className="mt-2 mb-2 p-2 rounded border border-white/5 text-xs text-gray-600 bg-gray-300">
@@ -3673,15 +3775,32 @@ export default function Chat() {
           </div>
         )}
         <div className="break-words">{txt}</div>
+        
+        {/* FIXED: Read receipt indicators for sent messages */}
+        {isMe && (
+          <div className="flex items-center justify-end gap-1 mt-1 text-xs opacity-70">
+            {Array.isArray(m.reads) && m.reads.length > 1 && (
+              <span className="text-blue-300">✓✓ Read by {m.reads.length - 1}</span>
+            )}
+            {Array.isArray(m.deliveries) && m.deliveries.length > 0 && !m.reads?.length && (
+              <span className="text-gray-300">✓ Delivered</span>
+            )}
+          </div>
+        )}
       </div>
     );
   };
 
-  // typing summary
+  // FIXED: Better typing summary with cleanup
   const typingSummary = () => {
-    const names = Object.keys(typingUsers);
-    if (!names.length) return null;
-    const shown = names.slice(0, 2).join(", ");
+    const now = Date.now();
+    const activeTypers = Object.keys(typingUsers).filter(name => {
+      const lastTyping = typingUsers[name];
+      return now - lastTyping < 3000; // Only show recent typing
+    });
+    
+    if (!activeTypers.length) return null;
+    const shown = activeTypers.slice(0, 2).join(", ");
     return <div className="text-sm text-blue-500 mb-2">{shown} typing...</div>;
   };
 
@@ -3701,10 +3820,10 @@ export default function Chat() {
     return () => document.removeEventListener("mousedown", onDocClick);
   }, [menuOpen]);
 
-  // visibility -> ack read
+  // FIXED: Enhanced visibility change handler for read receipts
   useEffect(() => {
     const onVisibility = () => {
-      if (document.visibilityState === "visible") {
+      if (document.visibilityState === "visible" && document.hasFocus()) {
         const localId = getLocalPeerId() || myId;
         messages.forEach((m) => {
           if (!m || m.type !== "chat") return;
@@ -3712,13 +3831,16 @@ export default function Chat() {
           if (!origin || origin === localId) return;
           const alreadyRead =
             Array.isArray(m.reads) && m.reads.includes(localId);
-          if (!alreadyRead) {
-            try {
-              sendAckRead(m.id, origin);
-            } catch (e) {
-              console.warn("sendAckRead error (on visibility):", e);
-            }
-            addUniqueToMsgArray(m.id, "reads", localId);
+          if (!alreadyRead && m.id) {
+            // Small delay to avoid spamming
+            setTimeout(() => {
+              try {
+                sendAckRead(m.id, origin);
+                addUniqueToMsgArray(m.id, "reads", localId);
+              } catch (e) {
+                console.warn("sendAckRead error (on visibility):", e);
+              }
+            }, 50);
           }
         });
       }
@@ -3731,25 +3853,79 @@ export default function Chat() {
   // render
   return (
     <>
-      {/* FIXED: Added missing preview video element */}
+      {/* FIXED: Enhanced recording overlay with big circular preview */}
       {isRecording && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80">
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/90">
           <div className="relative">
-            <video
-              ref={previewVideoRef}
-              className="w-64 h-48 rounded-lg bg-black"
-              muted
-              playsInline
-            />
-            <div className="absolute top-2 left-2 bg-red-500 text-white px-2 py-1 rounded text-sm">
-              REC • {recordRemaining}s
+            {/* FIXED: Large circular preview like Telegram */}
+            <div 
+              style={{ width: 240, height: 240 }}
+              className="rounded-4xl overflow-hidden bg-black relative border-4 border-white/20"
+            >
+              <video
+                ref={previewVideoRef}
+                className="w-full h-full object-cover"
+                muted
+                playsInline
+                autoplay
+              />
+              
+              {/* Recording indicator */}
+              <div className="absolute top-4 left-4 flex items-center gap-2">
+                <div className="w-3 h-3 bg-red-500 rounded-full animate-pulse"></div>
+                <span className="text-white text-sm font-medium">REC</span>
+              </div>
+              
+              {/* Timer */}
+              <div className="absolute top-4 right-4 bg-black/50 text-white px-2 py-1 rounded text-sm">
+                {recordRemaining}s
+              </div>
             </div>
+            
+            {/* Stop button */}
             <button
               onClick={stopRecording}
-              className="absolute bottom-2 left-1/2 transform -translate-x-1/2 bg-red-600 text-white px-4 py-2 rounded"
+              className="absolute bottom-6 left-1/2 transform -translate-x-1/2 bg-gradient-to-br from-red-500 to-red-600 text-white px-3 py-3 rounded-full font-medium"
             >
-              Stop Recording
+              Stop
             </button>
+          </div>
+        </div>
+      )}
+
+      {/* FIXED: Video player overlay */}
+      {expandedVideo && (
+        <div 
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/90"
+          onClick={() => setExpandedVideo(null)}
+        >
+          <div className="relative max-w-[90vw] max-h-[90vh]">
+            <video
+              src={expandedVideo.url}
+              controls
+              autoplay
+              playsInline
+              className="max-w-full max-h-full rounded-lg"
+              onClick={(e) => e.stopPropagation()}
+            />
+            
+            {/* Close button */}
+            <button
+              onClick={() => setExpandedVideo(null)}
+              className="absolute -top-12 right-0 text-red-500 text-2xl hover:text-gray-300"
+            >
+              ✕
+            </button>
+            
+            {/* Download button */}
+            <a
+              href={expandedVideo.url}
+              download={expandedVideo.name}
+              className="absolute -top-12 right-8 text-blue-500 hover:text-gray-300 m-2.5 mr-10"
+              onClick={(e) => e.stopPropagation()}
+            >
+              Download ⤓
+            </a>
           </div>
         </div>
       )}
