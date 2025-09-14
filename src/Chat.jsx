@@ -2180,7 +2180,6 @@
 // new ui claude
 
 
-
 import "./App.css";
 import React, { useEffect, useState, useRef } from "react";
 import {
@@ -2210,7 +2209,7 @@ const LandingPage = ({ onGetStarted }) => {
   }, []);
 
   return (
-    <div className=" h-[92vh] bg-gradient-to-br from-slate-900 via-purple-900 to-slate-900 flex items-center justify-center p-4 overflow-hidden relative">
+    <div className="min-h-screen bg-gradient-to-br from-slate-900 via-purple-900 to-slate-900 flex items-center justify-center overflow-hidden relative">
       {/* Animated background elements */}
       <div className="absolute inset-0">
         <div className="absolute top-20 left-10 w-72 h-72 bg-purple-500 rounded-full filter blur-3xl opacity-20 animate-pulse"></div>
@@ -2218,7 +2217,7 @@ const LandingPage = ({ onGetStarted }) => {
         <div className="absolute top-1/2 left-1/2 transform -translate-x-1/2 -translate-y-1/2 w-64 h-64 bg-pink-500 rounded-full filter blur-3xl opacity-10 animate-pulse delay-500"></div>
       </div>
 
-      <div className={`relative z-10 max-w-lg w-full transition-all duration-1000 transform ${isAnimated ? 'translate-y-0 opacity-100' : 'translate-y-10 opacity-0'}`}>
+      <div className={`relative z-10 max-w-sm w-full px-6 transition-all duration-1000 transform ${isAnimated ? 'translate-y-0 opacity-100' : 'translate-y-10 opacity-0'}`}>
         {/* Logo/Icon */}
         <div className="text-center mb-8">
           <div className="inline-flex items-center justify-center w-24 h-24 bg-gradient-to-br from-purple-500 to-pink-500 rounded-3xl shadow-2xl mb-6 animate-bounce">
@@ -2887,7 +2886,7 @@ export default function Chat() {
   // First-time username prompt
   if (showNamePrompt) {
     return (
-      <div className="min-h-[92vh]  bg-gradient-to-br from-slate-900 via-purple-900 to-slate-900 flex items-center justify-center p-4">
+      <div className="min-h-screen bg-gradient-to-br from-slate-900 via-purple-900 to-slate-900 flex items-center justify-center px-4">
         <div className="bg-white/10 backdrop-blur-lg p-8 rounded-3xl shadow-2xl max-w-md w-full border border-white/20">
           <div className="text-center mb-6">
             <div className="inline-flex items-center justify-center w-16 h-16 bg-gradient-to-br from-purple-500 to-pink-500 rounded-2xl shadow-lg mb-4">
@@ -2959,141 +2958,143 @@ export default function Chat() {
   };
 
   return (
-    <>
-      <div className="h-screen w-screen flex flex-col bg-gradient-to-br from-slate-900 via-blue-600 to-slate-900  items-center justify-center p-4">
-        <div className="w-full max-w-md  bg-white/10 backdrop-blur-lg rounded-3xl shadow-2xl border border-white/20 overflow-hidden">
-          {/* Header */}
-          <header className="p-4 border-b border-white/10 bg-white/5">
-            <div className="flex items-center justify-between mb-2">
-              <div className="flex items-center space-x-2">
-                <div className="w-8 h-8 bg-gradient-to-br from-purple-500 to-pink-500 rounded-full flex items-center justify-center">
-                  <span className="text-white text-xs font-bold">{username?.[0]?.toUpperCase() || "U"}</span>
-                </div>
-                <div>
-                  <div className="text-white font-medium text-sm">{username}</div>
-                  <div className="text-gray-400 text-xs font-mono">{myId || "..."}</div>
-                </div>
+    <div className="min-h-screen bg-gradient-to-br from-slate-900 via-blue-600 to-slate-900 flex flex-col">
+      <div className="flex-1 flex flex-col bg-white/10 backdrop-blur-lg shadow-2xl border-l border-r border-white/20">
+        {/* Header */}
+        <header className="p-4 border-b border-white/10 bg-white/5 shrink-0">
+          <div className="flex items-center justify-between mb-2">
+            <div className="flex items-center space-x-2">
+              <div className="w-8 h-8 bg-gradient-to-br from-purple-500 to-pink-500 rounded-full flex items-center justify-center">
+                <span className="text-white text-xs font-bold">{username?.[0]?.toUpperCase() || "U"}</span>
               </div>
+              <div>
+                <div className="text-white font-medium text-sm">{username}</div>
+                <div className="text-gray-400 text-xs font-mono">{myId || "..."}</div>
+              </div>
+            </div>
 
-              {/* Menu */}
-              <div className="relative" ref={menuRef}>
+            {/* Menu */}
+            <div className="relative" ref={menuRef}>
+              <button
+                onClick={() => setMenuOpen((s) => !s)}
+                className="p-2 rounded-full bg-white/10 text-white hover:bg-white/20 transition-colors"
+                aria-label="Menu"
+              >
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor">
+                  <circle cx="12" cy="5" r="2" />
+                  <circle cx="12" cy="12" r="2" />
+                  <circle cx="12" cy="19" r="2" />
+                </svg>
+              </button>
+
+              <div
+                className={`absolute right-0 mt-2 w-48 bg-white/10 backdrop-blur rounded-xl shadow-lg z-50 border border-white/20 transform origin-top-right transition-all duration-200 ${
+                  menuOpen
+                    ? "opacity-100 scale-100 pointer-events-auto"
+                    : "opacity-0 scale-95 pointer-events-none"
+                }`}
+              >
                 <button
-                  onClick={() => setMenuOpen((s) => !s)}
-                  className="p-2 rounded-full bg-white/10 text-blue-600 hover:bg-white/20 transition-colors"
-                  aria-label="Menu"
+                  onClick={handleCreateHub}
+                  className="w-full text-left px-4 py-3 hover:bg-white/20 border-b border-white/10 text-white rounded-t-xl"
                 >
-                  <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor">
-                    <circle cx="12" cy="5" r="2" />
-                    <circle cx="12" cy="12" r="2" />
-                    <circle cx="12" cy="19" r="2" />
-                  </svg>
+                  <span className="font-semibold text-green-400">Create Hub</span>
+                  <div className="text-xs text-gray-400">Make this device the host</div>
                 </button>
 
-                <div
-                  className={`absolute right-0 mt-2 w-48 bg-white/10 backdrop-blur rounded-xl shadow-lg z-50 border border-white/20 transform origin-top-right transition-all duration-200 ${
-                    menuOpen
-                      ? "opacity-100 scale-100 pointer-events-auto"
-                      : "opacity-0 scale-95 pointer-events-none"
-                  }`}
+                <button
+                  onClick={handleJoinHub}
+                  className="w-full text-left px-4 py-3 hover:bg-white/20 border-b border-white/10 text-white"
                 >
-                  <button
-                    onClick={handleCreateHub}
-                    className="w-full text-left px-4 py-3 hover:bg-white/20 border-b border-white/10 text-white rounded-t-xl"
-                  >
-                    <span className="font-semibold text-green-400">Create Hub</span>
-                    <div className="text-xs text-gray-400">Make this device the host</div>
-                  </button>
+                  <span className="font-semibold text-blue-400">Join Hub</span>
+                  <div className="text-xs text-gray-400">Enter a host ID to join</div>
+                </button>
 
-                  <button
-                    onClick={handleJoinHub}
-                    className="w-full text-left px-4 py-3 hover:bg-white/20 border-b border-white/10 text-white"
-                  >
-                    <span className="font-semibold text-blue-400">Join Hub</span>
-                    <div className="text-xs text-gray-400">Enter a host ID to join</div>
-                  </button>
-
-                  <button
-                    onClick={handleLeaveClick}
-                    className="w-full text-left px-4 py-3 hover:bg-white/20 text-white rounded-b-xl"
-                  >
-                    <span className="font-semibold text-red-400">Leave</span>
-                    <div className="text-xs text-gray-400">Leave and clear history</div>
-                  </button>
-                </div>
+                <button
+                  onClick={handleLeaveClick}
+                  className="w-full text-left px-4 py-3 hover:bg-white/20 text-white rounded-b-xl"
+                >
+                  <span className="font-semibold text-red-400">Leave</span>
+                  <div className="text-xs text-gray-400">Leave and clear history</div>
+                </button>
               </div>
             </div>
-            
-            {joinedBootstrap && (
-              <div className="text-xs text-purple-300 mb-2">
-                Hub: {peerNamesMap[joinedBootstrap] || joinedBootstrap}
-              </div>
+          </div>
+          
+          {joinedBootstrap && (
+            <div className="text-xs text-purple-300 mb-2">
+              Hub: {peerNamesMap[joinedBootstrap] || joinedBootstrap}
+            </div>
+          )}
+          
+          <div className="text-xs text-gray-300">
+            Connected: {connectedNames.length === 0 ? (
+              <span className="text-red-400">none</span>
+            ) : (
+              connectedNames.join(", ")
             )}
-            
-            <div className="text-xs text-gray-300">
-              Connected: {connectedNames.length === 0 ? (
-                <span className="text-red-400">none</span>
-              ) : (
-                connectedNames.join(", ")
-              )}
-            </div>
-          </header>
+          </div>
+        </header>
 
-          {/* Messages */}
-          <main className="flex-1 h-155 w-90 overflow-y-auto">
-            <div className="p-2">
-              {messages.length === 0 && (
+        {/* Messages */}
+        <main className="flex-1 overflow-y-auto">
+          <div className="min-h-full flex flex-col">
+            {messages.length === 0 && (
+              <div className="flex-1 flex items-center justify-center">
                 <div className="text-center text-gray-400 text-sm py-8">
                   No messages yet. Start a conversation!
                 </div>
-              )}
+              </div>
+            )}
+            <div className="flex-1">
               {messages.map((m, i) => renderMessage(m, i))}
               <div ref={messagesEndRef} />
             </div>
-          </main>
+          </div>
+        </main>
 
-          {/* Input */}
-          <footer className="p-4 border-t border-white/10 bg-white/5">
-            {typingSummary()}
-            
-            {replyTo && (
-              <div className="mb-3 p-3 bg-white/10 rounded-xl border-l-2 border-purple-400">
-                <div className="flex items-center justify-between mb-1">
-                  <span className="text-xs text-purple-300 font-medium">
-                    Replying to {replyTo.from}
-                  </span>
-                  <button
-                    onClick={() => setReplyTo(null)}
-                    className="text-xs text-red-400 hover:text-red-300"
-                  >
-                    ✕
-                  </button>
-                </div>
-                <div className="text-xs text-gray-300 line-clamp-2">{replyTo.text}</div>
+        {/* Input */}
+        <footer className="p-4 border-t border-white/10 bg-white/5 shrink-0">
+          {typingSummary()}
+          
+          {replyTo && (
+            <div className="mb-3 p-3 bg-white/10 rounded-xl border-l-2 border-purple-400">
+              <div className="flex items-center justify-between mb-1">
+                <span className="text-xs text-purple-300 font-medium">
+                  Replying to {replyTo.from}
+                </span>
+                <button
+                  onClick={() => setReplyTo(null)}
+                  className="text-xs text-red-400 hover:text-red-300"
+                >
+                  ✕
+                </button>
               </div>
-            )}
-            
-            <div className="relative">
-              <input
-                value={text}
-                onChange={(e) => setText(e.target.value)}
-                placeholder="Type a message..."
-                className="w-full p-3 pr-12 bg-white/10 border border-white/20 text-white placeholder-gray-400 rounded-xl focus:outline-none focus:ring-2 focus:ring-purple-500 focus:border-transparent"
-                onKeyDown={(e) => {
-                  if (e.key === "Enter") send();
-                }}
-              />
-              <button
-                onClick={send}
-                disabled={!text.trim()}
-                className="absolute right-2 top-1/2 -translate-y-1/2 p-2 rounded-lg bg-purple-500 text-blue-700 hover:bg-purple-600 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
-              >
-                <svg className="w-4 h-4" fill="currentColor" viewBox="0 0 24 24">
-                  <path d="M3.4 20.6L21 12 3.4 3.4 3 10l11 2-11 2z" />
-                </svg>
-              </button>
+              <div className="text-xs text-gray-300 line-clamp-2">{replyTo.text}</div>
             </div>
-          </footer>
-        </div>
+          )}
+          
+          <div className="relative">
+            <input
+              value={text}
+              onChange={(e) => setText(e.target.value)}
+              placeholder="Type a message..."
+              className="w-full p-3 pr-12 bg-white/10 border border-white/20 text-white placeholder-gray-400 rounded-xl focus:outline-none focus:ring-2 focus:ring-purple-500 focus:border-transparent"
+              onKeyDown={(e) => {
+                if (e.key === "Enter") send();
+              }}
+            />
+            <button
+              onClick={send}
+              disabled={!text.trim()}
+              className="absolute right-2 top-1/2 -translate-y-1/2 p-2 rounded-lg bg-purple-500 text-white hover:bg-purple-600 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+              <svg className="w-4 h-4" fill="currentColor" viewBox="0 0 24 24">
+                <path d="M3.4 20.6L21 12 3.4 3.4 3 10l11 2-11 2z" />
+              </svg>
+            </button>
+          </div>
+        </footer>
       </div>
 
       {/* Leave confirmation modal */}
@@ -3107,13 +3108,13 @@ export default function Chat() {
             <div className="flex space-x-3">
               <button
                 onClick={handleCancelLeave}
-                className="flex-1 px-4 py-2 rounded-xl bg-white/10 text-green-500 hover:bg-white/20 transition-colors"
+                className="flex-1 px-4 py-2 rounded-xl bg-white/10 text-white hover:bg-white/20 transition-colors"
               >
                 Cancel
               </button>
               <button
                 onClick={handleConfirmLeave}
-                className="flex-1 px-4 py-2 rounded-xl bg-red-500 text-red-500 hover:bg-red-600 transition-colors"
+                className="flex-1 px-4 py-2 rounded-xl bg-red-500 text-white hover:bg-red-600 transition-colors"
               >
                 Leave & Clear
               </button>
@@ -3121,13 +3122,6 @@ export default function Chat() {
           </div>
         </div>
       )}
-    </>
+    </div>
   );
 }
-
-
-
-
-
-
-
