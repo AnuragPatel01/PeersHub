@@ -3825,8 +3825,8 @@ export default function Chat() {
         <div
           onClick={() => openCenterPreview(m)}
           key={`${m.id ?? m.ts}-${idx}`}
-          className={`group p-2 rounded-2xl max-w-[50%] mb-5 cursor-pointer scale-125 ${
-            isMe ? "ml-auto text-blue-500" :" text-black"
+          className={`group p-2 rounded-2xl max-w-[50%] mb-5 cursor-pointer ${
+            isMe ? "ml-auto text-blue-500" : " text-black"
           }`}
           role="button"
           tabIndex={0}
@@ -3859,10 +3859,10 @@ export default function Chat() {
                 className="relative rounded-full overflow-hidden w-24 h-24 sm:w-32 sm:h-32 flex-shrink-0 bg-black/10 flex items-center justify-center"
                 style={{
                   borderRadius: "50%",
-                  width: 96,
-                  height: 96,
-                  minWidth: 96,
-                  minHeight: 96,
+                  width: 176,
+                  height: 176,
+                  minWidth: 176,
+                  minHeight: 176,
                 }}
               >
                 <video
@@ -4411,7 +4411,7 @@ export default function Chat() {
           <div className="relative" ref={menuRef}>
             <button
               onClick={() => setMenuOpen((s) => !s)}
-              className="p-2 rounded-full bg-white/10 text-white"
+              className="p-2 rounded-full  bg-gradient-to-r from-gray-50 to-gray-50 text-white"
               aria-label="Menu"
             >
               <svg
@@ -4509,21 +4509,12 @@ export default function Chat() {
           )}
 
           {/* Improved input container layout */}
+
           <div className="relative w-full flex items-center gap-2">
             {/* Left side controls container */}
-            <div className="flex items-center gap-2 flex-shrink-0">
-              {/* Circular video-record button */}
-              <div className="relative">
-                <CircularStream
-                  onFileRecorded={(file) =>
-                    onFileSelected(file, { directSend: true })
-                  }
-                  buttonClassName="w-10 h-10 flex items-center justify-center flex-shrink-0"
-                />
-              </div>
 
-              {/* File attachment button */}
-              {/* <button
+            {/* File attachment button */}
+            {/* <button
                 onClick={() => {
                   const input = document.createElement("input");
                   input.type = "file";
@@ -4550,39 +4541,40 @@ export default function Chat() {
                   <path d="M21.44 11.05l-9.19 9.19a5.5 5.5 0 01-7.78-7.78l9.19-9.19a3.5 3.5 0 015 5l-9.2 9.19a1.5 1.5 0 01-2.12-2.12l8.49-8.49" />
                 </svg>
               </button> */}
-            </div>
+          </div>
 
-            {/* Text input - flex-1 takes remaining space */}
-            <div className="relative flex-1">
-              <input
-                value={text}
-                onChange={(e) => setText(e.target.value)}
-                placeholder="Type a message..."
-                className="w-full p-3 pr-12 bg-white/10 placeholder-blue-300 text-blue-500 font-mono rounded-3xl border-2 border-white/20 focus:border-blue-400 focus:outline-none transition-colors duration-200"
-                onKeyDown={(e) => {
-                  if (e.key === "Enter") send();
-                }}
-              />
-
-              {/* Send button inside input */}
-              <button
-                // onClick={send}
-                className="absolute right-2 top-1/2 -translate-y-1/2 w-8 h-8 flex items-center justify-center rounded-full text-blue-500 hover:text-blue-600 transition-all duration-200"
-                // title="Send"
-                aria-label="Send message"
-              >
-                <svg
-                  onClick={send}
-                  xmlns="http://www.w3.org/2000/svg"
-                  viewBox="0 0 24 24"
-                  fill="currentColor"
-                  className="absolute right-3 top-1/2 -translate-y-1/2 w-8 h-8 text-blue-500 cursor-pointer"
-                  title="Send"
-                >
-                  <path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z" />{" "}
-                </svg>
-              </button>
+          {/* Text input - flex-1 takes remaining space */}
+          <div className="relative flex-1">
+            <div className="flex items-center gap-2 flex-shrink-0">
+              {/* Circular video-record button */}
+              <div className="absolute left-2 top-1/2 -translate-y-1/2">
+                <CircularStream
+                  onFileRecorded={(file) =>
+                    onFileSelected(file, { directSend: true })
+                  }
+                  buttonClassName="w-10 h-10 flex items-center justify-center flex-shrink-0"
+                />
+              </div>
             </div>
+            <input
+              value={text}
+              onChange={(e) => setText(e.target.value)}
+              placeholder="Type a message..."
+              className="w-full p-3 pl-12 pr-8 bg-white/10 placeholder-blue-300 text-blue-500 font-mono rounded-3xl border-2 border-white/20 focus:border-blue-400 focus:outline-none transition-colors duration-200"
+              onKeyDown={(e) => {
+                if (e.key === "Enter") send();
+              }}
+            />
+
+            {/* Send button inside input */}
+            <button
+              onClick={send}
+              className="absolute right-2 top-1/2 -translate-y-1/2 w-14 h-10 flex items-center  bg-gradient-to-r from-gray-50 to-gray-50 justify-center rounded-full text-blue-500 "
+              title="Send"
+              aria-label="Send message"
+            >
+              Send
+            </button>
           </div>
         </footer>
       </div>
@@ -4595,7 +4587,7 @@ export default function Chat() {
             <button
               onClick={closeCenterPreview}
               aria-label="Close preview"
-              className="absolute -top-12 right-0 z-10 text-white hover:text-gray-300 bg-black/50 hover:bg-black/70 p-3 rounded-full transition-all duration-200 backdrop-blur-sm"
+              className="absolute -top-12 right-0 z-10 text-white hover:text-gray-300 bg-gradient-to-br from-red-500 to-red-600 hover:bg-black/70 p-3 rounded-full transition-all duration-200 backdrop-blur-sm"
               title="Close preview"
             >
               <svg
