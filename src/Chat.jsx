@@ -2306,6 +2306,155 @@ export default function Chat() {
     window.__msgs = messages;
   }
 
+  // MirroredVideoCanvas — minimal, with audio enabled and autoplay fallback
+  function MirroredVideoCanvas({ src, autoPlay = true, className = "" }) {
+    const canvasRef = React.useRef(null);
+    const hiddenVideoRef = React.useRef(null);
+    const rafRef = React.useRef(null);
+    const [needPlayButton, setNeedPlayButton] = React.useState(false);
+
+    React.useEffect(() => {
+      const vid = hiddenVideoRef.current;
+      const canvas = canvasRef.current;
+      if (!vid || !canvas) return;
+
+      let ctx = canvas.getContext("2d");
+      let mounted = true;
+
+      const setup = async () => {
+        try {
+          // ensure src attached
+          vid.src = src;
+          vid.playsInline = true;
+          vid.preload = "metadata";
+          vid.muted = false; // IMPORTANT: allow audio
+          vid.volume = 1.0;
+
+          // wait metadata so we can size the canvas
+          await new Promise((resolve) => {
+            if (vid.readyState >= 1) return resolve();
+            const onLoaded = () => resolve();
+            const onError = () => resolve();
+            vid.addEventListener("loadedmetadata", onLoaded, { once: true });
+            vid.addEventListener("error", onError, { once: true });
+            setTimeout(resolve, 500); // fallback
+          });
+
+          // size canvas to video dimensions (CSS will scale)
+          canvas.width = vid.videoWidth || 640;
+          canvas.height = vid.videoHeight || 480;
+
+          const draw = () => {
+            if (!mounted) return;
+            try {
+              if (!ctx) ctx = canvas.getContext("2d");
+              ctx.save();
+              ctx.clearRect(0, 0, canvas.width, canvas.height);
+              // mirror horizontally
+              ctx.scale(-1, 1);
+              ctx.drawImage(vid, -canvas.width, 0, canvas.width, canvas.height);
+              ctx.restore();
+            } catch (e) {
+              // ignore transient draw errors
+            }
+            rafRef.current = requestAnimationFrame(draw);
+          };
+
+          if (autoPlay) {
+            try {
+              // Try to play; if browser blocks autoplay-with-audio, this will reject
+              await vid.play();
+              setNeedPlayButton(false);
+            } catch (e) {
+              // autoplay with audio was blocked -> show small play button overlay
+              setNeedPlayButton(true);
+            }
+          } else {
+            setNeedPlayButton(true);
+          }
+
+          rafRef.current = requestAnimationFrame(draw);
+        } catch (e) {
+          console.warn("MirroredVideoCanvas setup failed", e);
+        }
+      };
+
+      setup();
+
+      return () => {
+        mounted = false;
+        try {
+          if (rafRef.current) cancelAnimationFrame(rafRef.current);
+        } catch (e) {}
+        try {
+          if (vid) {
+            vid.pause();
+            // do NOT revoke src here (it's an external blob URL possibly used elsewhere)
+          }
+        } catch (e) {}
+      };
+    }, [src, autoPlay]);
+
+    const handlePlayClick = async () => {
+      const vid = hiddenVideoRef.current;
+      if (!vid) return;
+      try {
+        await vid.play();
+        setNeedPlayButton(false);
+      } catch (e) {
+        console.warn("Play attempt failed", e);
+      }
+    };
+
+    return (
+      <div className={`w-full h-auto ${className} relative`}>
+        {/* Hidden video drives decoding + audio */}
+        <video
+          ref={hiddenVideoRef}
+          src={src}
+          playsInline
+          // IMPORTANT: do NOT mute here
+          muted={false}
+          style={{ display: "none" }}
+          preload="metadata"
+          aria-hidden="true"
+        />
+        {/* Visible mirrored canvas */}
+        <div className="relative w-full bg-black">
+          <canvas
+            ref={canvasRef}
+            className="w-full h-auto block object-contain"
+            aria-label="Mirrored video preview"
+          />
+          {/* tiny play overlay only if autoplay-with-audio was blocked */}
+          {needPlayButton && (
+            <button
+              onClick={handlePlayClick}
+              aria-label="Play video"
+              className="absolute inset-0 m-auto w-10 h-10 flex items-center justify-center rounded-full bg-black/50 text-white"
+              style={{
+                left: "50%",
+                top: "50%",
+                transform: "translate(-50%,-50%)",
+              }}
+            >
+              {/* small play triangle */}
+              <svg
+                width="20"
+                height="20"
+                viewBox="0 0 24 24"
+                fill="currentColor"
+                aria-hidden="true"
+              >
+                <path d="M8 5v14l11-7z" />
+              </svg>
+            </button>
+          )}
+        </div>
+      </div>
+    );
+  }
+
   // file transfer
   const [incomingFileOffers, setIncomingFileOffers] = useState({});
   const [transfers, setTransfers] = useState({}); // offerId -> { direction, label, total, transferred, peers }
@@ -4044,7 +4193,9 @@ export default function Chat() {
       mime: file.type,
       from: getLocalPeerId() || myId,
       // include isMirrored in offer metadata so remote clients can preserve mirror flag
-      isMirrored: Boolean(file.name && file.name.toLowerCase().endsWith(".mirrored.webm")),
+      isMirrored: Boolean(
+        file.name && file.name.toLowerCase().endsWith(".mirrored.webm")
+      ),
     };
     try {
       offerFileToPeers(meta);
@@ -4579,7 +4730,7 @@ export default function Chat() {
               </svg>
             </button>
 
-            <div className="relative bg-black rounded-xl overflow-hidden">
+            <div className="relative bg-black rounded-2xl overflow-hidden">
               {centerPreviewIsMirrored ? (
                 <MirroredVideoCanvas
                   src={centerPreviewUrl}

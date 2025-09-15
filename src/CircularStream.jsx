@@ -1,4 +1,3 @@
-// src/components/CircularStream.jsx
 import React, { useEffect, useRef, useState } from "react";
 
 /**
@@ -52,6 +51,21 @@ export default function CircularStream({
   // crossfade state used during flips
   const [isCrossfading, setIsCrossfading] = useState(false);
 
+  // mute state (true => muted)
+  const [muted, setMuted] = useState(false);
+
+  // max duration (45s)
+  const MAX_DURATION_MS = 45 * 1000;
+  const maxTimerRef = useRef(null);
+
+  // --- Audio analyser for mic level ---
+  const audioCtxRef = useRef(null);
+  const analyserRef = useRef(null);
+  const dataArrayRef = useRef(null);
+  const micLevelRef = useRef(0);
+  const [micLevel, setMicLevel] = useState(0); // 0..1 for UI
+  const micAnimRef = useRef(null);
+
   // small helper constants for preview sizing / styling
   const PREVIEW_SIZE = "w-64 h-64 sm:w-72 sm:h-72 md:w-80 md:h-80";
   const PREVIEW_WRAPPER_CLASS = `rounded-full overflow-hidden bg-gradient-to-br from-indigo-500/20 via-purple-500/20 to-pink-500/20 backdrop-blur-sm border-2 border-white/20 p-2 flex items-center justify-center shadow-2xl`;
@@ -78,6 +92,13 @@ export default function CircularStream({
         } catch (e) {}
       }
       streamRef.current = s;
+
+      // ensure audio tracks respect muted state
+      try {
+        const audioTracks = s.getAudioTracks() || [];
+        audioTracks.forEach((t) => (t.enabled = !muted));
+      } catch (e) {}
+
       if (videoRef.current) {
         try {
           videoRef.current.srcObject = s;
@@ -88,6 +109,9 @@ export default function CircularStream({
           await videoRef.current.play().catch(() => {});
         } catch (e) {}
       }
+
+      // wire analyser
+      attachAnalyserToStream(s);
     } catch (e) {
       console.warn("CircularStream: camera preview failed", e);
       setError(e.message || String(e));
@@ -112,6 +136,9 @@ export default function CircularStream({
     } catch (e) {
       console.warn("stopPreview failed", e);
     }
+
+    // detach analyser
+    detachAnalyser();
   };
 
   useEffect(() => {
@@ -168,7 +195,9 @@ export default function CircularStream({
           renderVideoRef.current.pause();
           renderVideoRef.current.srcObject = null;
           if (renderVideoRef.current.parentNode)
-            renderVideoRef.current.parentNode.removeChild(renderVideoRef.current);
+            renderVideoRef.current.parentNode.removeChild(
+              renderVideoRef.current
+            );
         } catch (e) {}
         renderVideoRef.current = null;
       }
@@ -177,7 +206,9 @@ export default function CircularStream({
     try {
       if (captureCanvasRef.current) {
         if (captureCanvasRef.current.parentNode)
-          captureCanvasRef.current.parentNode.removeChild(captureCanvasRef.current);
+          captureCanvasRef.current.parentNode.removeChild(
+            captureCanvasRef.current
+          );
         captureCanvasRef.current = null;
       }
     } catch (e) {}
@@ -205,11 +236,18 @@ export default function CircularStream({
       }
 
       const hasDriverFrame =
-        driver && driver.videoWidth > 0 && driver.videoHeight > 0 && !driver.paused && !driver.ended;
+        driver &&
+        driver.videoWidth > 0 &&
+        driver.videoHeight > 0 &&
+        !driver.paused &&
+        !driver.ended;
 
       if (hasDriverFrame) {
         // ensure canvas pixel size matches driver for best capture results (or you can scale down)
-        if (canvas.width !== driver.videoWidth || canvas.height !== driver.videoHeight) {
+        if (
+          canvas.width !== driver.videoWidth ||
+          canvas.height !== driver.videoHeight
+        ) {
           // you can reduce these numbers for performance (e.g., 640x360)
           canvas.width = driver.videoWidth;
           canvas.height = driver.videoHeight;
@@ -338,7 +376,6 @@ export default function CircularStream({
       ensureCapturePipeline();
 
       // attach current camera stream to hidden driver so draw loop can read frames
-      // NOTE: we do not replace streamRef.current here, we just set driver.srcObject to current camera stream
       const driver = renderVideoRef.current;
       if (driver) {
         driver.srcObject = streamRef.current;
@@ -353,22 +390,28 @@ export default function CircularStream({
       drawRafRef.current = requestAnimationFrame(draw);
 
       // capture stream from canvas
-      canvasStreamRef.current = captureCanvasRef.current.captureStream(30) || null; // target 30fps
+      canvasStreamRef.current =
+        captureCanvasRef.current.captureStream(30) || null; // target 30fps
 
       // combine canvas video track with audio tracks from camera stream
       const combined = new MediaStream();
       (canvasStreamRef.current?.getVideoTracks() || []).forEach((t) =>
         combined.addTrack(t)
       );
-      (streamRef.current.getAudioTracks() || []).forEach((t) =>
-        combined.addTrack(t)
-      );
+
+      // ensure audio track enabled state reflects muted
+      try {
+        const audioTracks = streamRef.current.getAudioTracks() || [];
+        audioTracks.forEach((t) => (t.enabled = !muted));
+        audioTracks.forEach((t) => combined.addTrack(t));
+      } catch (e) {}
 
       const options = { mimeType: "video/webm;codecs=vp8,opus" };
       const mr = new MediaRecorder(combined, options);
       recorderRef.current = mr;
       mr.ondataavailable = (ev) => {
-        if (ev.data && ev.data.size > 0) recordedChunksRef.current.push(ev.data);
+        if (ev.data && ev.data.size > 0)
+          recordedChunksRef.current.push(ev.data);
       };
       mr.onstop = () => {
         try {
@@ -397,6 +440,10 @@ export default function CircularStream({
             clearInterval(timerTickRef.current);
             timerTickRef.current = null;
           }
+          if (maxTimerRef.current) {
+            clearTimeout(maxTimerRef.current);
+            maxTimerRef.current = null;
+          }
           setError(null);
         } catch (e) {
           console.warn("Error while finishing recording", e);
@@ -421,7 +468,27 @@ export default function CircularStream({
       timerTickRef.current = setInterval(() => {
         durationRef.current += 100;
         setDurationMs(durationRef.current);
+        // auto-stop at max duration
+        if (durationRef.current >= MAX_DURATION_MS) {
+          try {
+            stopRecording();
+            setError("Maximum recording length reached");
+            setTimeout(() => setError(null), 2000);
+          } catch (e) {}
+        }
       }, 100);
+
+      // as a safety, schedule a hard stop at max duration
+      if (maxTimerRef.current) clearTimeout(maxTimerRef.current);
+      maxTimerRef.current = setTimeout(() => {
+        try {
+          if (recorderRef.current && recorderRef.current.state !== "inactive")
+            recorderRef.current.stop();
+        } catch (e) {}
+      }, MAX_DURATION_MS + 500);
+
+      // start mic level animation loop
+      startMicLevelLoop();
     } catch (e) {
       console.warn("startRecording (canvas) failed", e);
       setError(e.message || String(e));
@@ -441,6 +508,10 @@ export default function CircularStream({
           clearInterval(timerTickRef.current);
           timerTickRef.current = null;
         }
+        if (maxTimerRef.current) {
+          clearTimeout(maxTimerRef.current);
+          maxTimerRef.current = null;
+        }
       }
     } catch (e) {
       console.warn("stopRecording failed", e);
@@ -448,6 +519,10 @@ export default function CircularStream({
       if (timerTickRef.current) {
         clearInterval(timerTickRef.current);
         timerTickRef.current = null;
+      }
+      if (maxTimerRef.current) {
+        clearTimeout(maxTimerRef.current);
+        maxTimerRef.current = null;
       }
     } finally {
       // stop draw loop
@@ -457,6 +532,8 @@ export default function CircularStream({
           drawRafRef.current = null;
         }
       } catch (e) {}
+      // stop mic animation
+      stopMicLevelLoop();
       // leave driver and canvas in DOM — we'll cleanup on close/retake
     }
   };
@@ -475,7 +552,11 @@ export default function CircularStream({
     try {
       // request new camera (video only)
       const constraints = {
-        video: { facingMode: next, width: { ideal: 1280 }, height: { ideal: 720 } },
+        video: {
+          facingMode: next,
+          width: { ideal: 1280 },
+          height: { ideal: 720 },
+        },
         audio: false,
       };
       const newCam = await navigator.mediaDevices.getUserMedia(constraints);
@@ -483,7 +564,10 @@ export default function CircularStream({
         console.warn("[flip] getUserMedia returned null");
         return;
       }
-      console.debug("[flip] got newCam", newCam.getVideoTracks().map((t) => t.label || t.id));
+      console.debug(
+        "[flip] got newCam",
+        newCam.getVideoTracks().map((t) => t.label || t.id)
+      );
 
       // create a new fresh hidden driver video element (avoid reusing old driver)
       const newDriver = document.createElement("video");
@@ -513,7 +597,13 @@ export default function CircularStream({
 
       // wait for the new driver to produce at least one decoded frame
       const gotFrame = await waitForVideoFrame(newDriver, 2000);
-      console.debug("[flip] newDriver gotFrame?", gotFrame, "videoW/H=", newDriver.videoWidth, newDriver.videoHeight);
+      console.debug(
+        "[flip] newDriver gotFrame?",
+        gotFrame,
+        "videoW/H=",
+        newDriver.videoWidth,
+        newDriver.videoHeight
+      );
 
       if (gotFrame) {
         // keep reference to old driver so we can remove it after swapping
@@ -543,7 +633,8 @@ export default function CircularStream({
               try {
                 oldDriver.pause();
                 oldDriver.srcObject = null;
-                if (oldDriver.parentNode) oldDriver.parentNode.removeChild(oldDriver);
+                if (oldDriver.parentNode)
+                  oldDriver.parentNode.removeChild(oldDriver);
               } catch (e) {}
             }
             // stop any leftover tracks from previous camera (if they are no longer in streamRef)
@@ -565,6 +656,28 @@ export default function CircularStream({
     } finally {
       // hide crossfade after a little fade time
       setTimeout(() => setIsCrossfading(false), 300);
+    }
+  };
+
+  // ---------------------------
+  // Mute/unmute mic toggle
+  // - toggles enabled flag on all audio tracks in streamRef.current
+  // - if recording, this will immediately affect the recorded track
+  // ---------------------------
+  const toggleMute = () => {
+    const nextMuted = !muted;
+    setMuted(nextMuted);
+    try {
+      if (streamRef.current) {
+        const audioTracks = streamRef.current.getAudioTracks() || [];
+        audioTracks.forEach((t) => {
+          try {
+            t.enabled = !nextMuted;
+          } catch (e) {}
+        });
+      }
+    } catch (e) {
+      console.warn("toggleMute failed", e);
     }
   };
 
@@ -631,6 +744,8 @@ export default function CircularStream({
 
     if (timerTickRef.current) clearInterval(timerTickRef.current);
     timerTickRef.current = null;
+    if (maxTimerRef.current) clearTimeout(maxTimerRef.current);
+    maxTimerRef.current = null;
     setDurationMs(0);
     setSending(false);
     setError(null);
@@ -646,12 +761,15 @@ export default function CircularStream({
     setSending(true);
     try {
       // Decide mirrored suffix based on the captureMirrorRef at the *start* of recording.
-      // If you flipped mid-record, this will reflect the last state; more complex heuristics possible.
       const isMirrored = !!captureMirrorRef.current;
       const suffix = isMirrored ? ".mirrored.webm" : ".webm";
-      const file = new File([recordedBlob], `video-message-${Date.now()}${suffix}`, {
-        type: "video/webm",
-      });
+      const file = new File(
+        [recordedBlob],
+        `video-message-${Date.now()}${suffix}`,
+        {
+          type: "video/webm",
+        }
+      );
 
       await (onFileRecorded ? onFileRecorded(file) : Promise.resolve());
       handleClose();
@@ -670,6 +788,92 @@ export default function CircularStream({
     const mm = String(Math.floor(s / 60)).padStart(2, "0");
     const ss = String(s % 60).padStart(2, "0");
     return `${mm}:${ss}`;
+  };
+
+  // progress ring calculations
+  const progressPercent = Math.min(1, durationMs / MAX_DURATION_MS);
+  const ringRadius = 46; // in px (visual)
+  const ringStroke = 3; // thinner
+  const circumference = 2 * Math.PI * ringRadius;
+  const dashoffset = circumference * (1 - progressPercent);
+
+  // ---------------------------
+  // Mic analyser helpers
+  // ---------------------------
+  const attachAnalyserToStream = (stream) => {
+    try {
+      if (!stream) return;
+      if (!audioCtxRef.current) {
+        const AC = window.AudioContext || window.webkitAudioContext;
+        audioCtxRef.current = new (AC || window.AudioContext)();
+      }
+      const audioCtx = audioCtxRef.current;
+      if (!audioCtx) return;
+
+      if (!analyserRef.current) {
+        analyserRef.current = audioCtx.createAnalyser();
+        analyserRef.current.fftSize = 256;
+        const bufferLength = analyserRef.current.frequencyBinCount;
+        dataArrayRef.current = new Uint8Array(bufferLength);
+      }
+
+      // create source from stream (we'll reuse: don't create multiple sources on same stream)
+      try {
+        // We create a MediaStreamSource and connect to analyser
+        const src = audioCtx.createMediaStreamSource(stream);
+        src.connect(analyserRef.current);
+      } catch (e) {
+        // if the stream is already connected or cross-origin, this may fail quietly
+      }
+    } catch (e) {
+      console.warn("attachAnalyserToStream failed", e);
+    }
+  };
+
+  const detachAnalyser = () => {
+    try {
+      if (analyserRef.current) {
+        // cannot reliably disconnect MediaStreamSource if we didn't keep ref to it
+        // we'll just stop animation and let GC handle audio nodes when context closed
+      }
+      // stop animation
+      stopMicLevelLoop();
+    } catch (e) {}
+  };
+
+  const startMicLevelLoop = () => {
+    stopMicLevelLoop();
+    const loop = () => {
+      try {
+        const analyser = analyserRef.current;
+        const data = dataArrayRef.current;
+        if (analyser && data) {
+          analyser.getByteTimeDomainData(data);
+          // compute RMS-ish level
+          let sum = 0;
+          for (let i = 0; i < data.length; i++) {
+            const v = data[i] - 128;
+            sum += v * v;
+          }
+          const rms = Math.sqrt(sum / data.length) / 128; // 0..~1
+          micLevelRef.current = Math.min(1, rms * 1.4);
+          setMicLevel(micLevelRef.current);
+        } else {
+          // fallback: zero
+          setMicLevel(0);
+        }
+      } catch (e) {}
+      micAnimRef.current = requestAnimationFrame(loop);
+    };
+    micAnimRef.current = requestAnimationFrame(loop);
+  };
+
+  const stopMicLevelLoop = () => {
+    try {
+      if (micAnimRef.current) cancelAnimationFrame(micAnimRef.current);
+    } catch (e) {}
+    micAnimRef.current = null;
+    setMicLevel(0);
   };
 
   // ---------------------------
@@ -691,9 +895,17 @@ export default function CircularStream({
         }
       } catch (e) {}
       try {
-        if (streamRef.current) streamRef.current.getTracks().forEach((t) => t.stop());
+        if (streamRef.current)
+          streamRef.current.getTracks().forEach((t) => t.stop());
       } catch (e) {}
       cleanupCapturePipeline();
+      try {
+        if (audioCtxRef.current) {
+          try {
+            audioCtxRef.current.close();
+          } catch (e) {}
+        }
+      } catch (e) {}
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -739,19 +951,49 @@ export default function CircularStream({
               {/* Header */}
               <div className="flex items-center justify-between mb-6">
                 <div className="flex items-center gap-3">
-                  <div className="flex items-center gap-2">
+                  {/* <div className="flex items-center gap-2">
                     <div className="w-2 h-2 rounded-full bg-red-500 animate-pulse" />
-                    <h3 className="text-lg font-bold text-white">Record Video</h3>
-                  </div>
-                  <div className="px-3 py-1 rounded-full bg-white/10 text-xs font-medium text-white/80">
+                    <h3 className="text-lg font-bold text-white">
+                      Record Video
+                    </h3>
+                  </div> */}
+                  <div className="px-3 py-1 rounded-full bg-white/10 text-xs font-medium text-white/80 mr-3 ">
                     {facingMode === "user" ? "Front" : "Back"} Camera
                   </div>
                 </div>
 
                 <div className="flex items-center gap-3">
-                  <div className="px-3 py-1 rounded-full bg-gradient-to-r from-indigo-500/20 to-purple-500/20 border border-white/20 text-sm font-mono text-white min-w-[60px] text-center">
-                    {formatDuration(durationMs)}
+                  {/* Mic icon + level (visible while recording) */}
+                  <div className="flex items-center gap-2">
+                    <div className="flex items-center gap-2 px-2 py-1 rounded bg-white/5">
+                      <svg
+                        className="w-4 h-4 text-white"
+                        viewBox="0 0 24 24"
+                        fill="currentColor"
+                      >
+                        <path d="M12 14a3 3 0 0 0 3-3V5a3 3 0 0 0-6 0v6a3 3 0 0 0 3 3z" />
+                        <path d="M19 11v1a7 7 0 0 1-14 0v-1" opacity="0.6" />
+                        <path d="M12 19v3" opacity="0.8" />
+                      </svg>
+                      <div
+                        style={{ width: 64, height: 8 }}
+                        className="bg-white/6 rounded overflow-hidden"
+                      >
+                        <div
+                          style={{
+                            width: `${Math.round(micLevel * 100)}%`,
+                            height: "100%",
+                          }}
+                          className="bg-emerald-400 transition-all"
+                        />
+                      </div>
+                    </div>
+
+                    <div className="px-3 py-1 rounded-full bg-gradient-to-r from-indigo-500/20 to-purple-500/20 border border-white/20 text-sm font-mono text-white min-w-[60px] text-center">
+                      {formatDuration(durationMs)}
+                    </div>
                   </div>
+
                   <button
                     onClick={handleClose}
                     aria-label="Close"
@@ -775,51 +1017,112 @@ export default function CircularStream({
 
               {/* Preview */}
               <div className="flex flex-col items-center gap-6">
-                <div className={`${PREVIEW_WRAPPER_CLASS} ${PREVIEW_SIZE} relative`}>
-                  {!previewUrl ? (
-                    <>
-                      <video
-                        ref={videoRef}
-                        autoPlay
-                        muted
-                        playsInline
-                        className={`w-full h-full rounded-full object-cover ${captureMirrorRef.current ? "transform scale-x-[-1]" : ""}`}
+                <div className="relative">
+                  {/* Circular progress ring OUTSIDE preview */}
+                  <svg
+                    className="absolute -inset-3 w-[calc(100%+24px)] h-[calc(100%+24px)] pointer-events-none z-30"
+                    viewBox={`0 0 ${ringRadius * 2 + ringStroke * 2} ${
+                      ringRadius * 2 + ringStroke * 2
+                    }`}
+                    style={{ transform: "rotate(-90deg)" }}
+                  >
+                    <g transform={`translate(${ringStroke}, ${ringStroke})`}>
+                      {/* background ring */}
+                      <circle
+                        r={ringRadius}
+                        cx={ringRadius}
+                        cy={ringRadius}
+                        stroke="rgba(255,255,255,0.06)"
+                        strokeWidth={ringStroke}
+                        fill="transparent"
                       />
-                      {recording && <div className="absolute inset-0 rounded-full border-4 border-red-500 animate-pulse" />}
-                    </>
-                  ) : (
-                    <div className="relative w-full h-full rounded-full overflow-hidden">
-                      <video
-                        src={previewUrl}
-                        playsInline
-                        autoPlay
-                        loop
-                        muted
-                        className={`w-full h-full rounded-full object-cover ${captureMirrorRef.current ? "transform scale-x-[-1]" : ""}`}
+                      {/* progress ring (green, thinner) */}
+                      <circle
+                        r={ringRadius}
+                        cx={ringRadius}
+                        cy={ringRadius}
+                        stroke="#10b981"
+                        strokeWidth={ringStroke}
+                        strokeLinecap="round"
+                        fill="transparent"
+                        strokeDasharray={circumference}
+                        strokeDashoffset={dashoffset}
+                        style={{ transition: "stroke-dashoffset 160ms linear" }}
                       />
-                      <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
-                        <svg xmlns="http://www.w3.org/2000/svg" className="w-12 h-12 text-white/80 drop-shadow-lg" fill="currentColor" viewBox="0 0 24 24">
-                          <path d="M8 5v14l11-7z" />
-                        </svg>
-                      </div>
-                      <div className="absolute inset-0 rounded-full border-2 border-green-400/50" />
-                    </div>
-                  )}
+                    </g>
+                  </svg>
 
-                  {/* Crossfade overlay */}
+                  {/* Actual preview bubble */}
                   <div
-                    aria-hidden="true"
-                    style={{
-                      pointerEvents: "none",
-                      position: "absolute",
-                      inset: 0,
-                      borderRadius: "9999px",
-                      background: "linear-gradient(90deg, rgba(255,255,255,0.06), rgba(255,255,255,0.02))",
-                      opacity: isCrossfading ? 1 : 0,
-                      transition: "opacity 260ms ease",
-                      mixBlendMode: "screen",
-                    }}
-                  />
+                    className={`${PREVIEW_WRAPPER_CLASS} ${PREVIEW_SIZE} relative z-10`}
+                  >
+                    {!previewUrl ? (
+                      <>
+                        <video
+                          ref={videoRef}
+                          autoPlay
+                          muted
+                          playsInline
+                          className={`w-full h-full rounded-full object-cover relative z-10 ${
+                            captureMirrorRef.current
+                              ? "transform scale-x-[-1]"
+                              : ""
+                          }`}
+                        />
+                        {recording && (
+                          <div className="absolute inset-0 rounded-full border-4 border-red-500 animate-pulse z-20" />
+                        )}
+                      </>
+                    ) : (
+                      <div className="relative w-full h-full rounded-full overflow-hidden">
+                        <video
+                          src={previewUrl}
+                          playsInline
+                          autoPlay
+                          loop
+                          muted
+                          className={`w-full h-full rounded-full object-cover relative z-10 ${
+                            captureMirrorRef.current
+                              ? "transform scale-x-[-1]"
+                              : ""
+                          }`}
+                        />
+                        {/* Overlay mic icon */}
+                        <div className="absolute inset-0 flex items-center justify-center pointer-events-none z-20">
+                          <svg
+                            xmlns="http://www.w3.org/2000/svg"
+                            className="w-12 h-12 text-white/80 drop-shadow-lg"
+                            fill="currentColor"
+                            viewBox="0 0 24 24"
+                          >
+                            <path d="M12 14a3 3 0 0 0 3-3V5a3 3 0 0 0-6 0v6a3 3 0 0 0 3 3z" />
+                            <path
+                              d="M19 11v1a7 7 0 0 1-14 0v-1"
+                              opacity="0.6"
+                            />
+                          </svg>
+                        </div>
+                        <div className="absolute inset-0 rounded-full border-2 border-green-400/50" />
+                      </div>
+                    )}
+
+                    {/* Crossfade overlay */}
+                    <div
+                      aria-hidden="true"
+                      style={{
+                        pointerEvents: "none",
+                        position: "absolute",
+                        inset: 0,
+                        borderRadius: "9999px",
+                        background:
+                          "linear-gradient(90deg, rgba(255,255,255,0.06), rgba(255,255,255,0.02))",
+                        opacity: isCrossfading ? 1 : 0,
+                        transition: "opacity 260ms ease",
+                        mixBlendMode: "screen",
+                        zIndex: 40,
+                      }}
+                    />
+                  </div>
                 </div>
 
                 {/* Error */}
@@ -829,34 +1132,102 @@ export default function CircularStream({
                   </div>
                 )}
 
-                {/* Controls */}
+                {/* Controls - includes mute toggle + flip + record */}
                 <div className="flex items-center justify-center gap-4 w-full">
                   {!previewUrl ? (
                     <>
-                      <button
-                        onClick={() => (recording ? stopRecording() : startRecording())}
-                        className={`relative flex items-center gap-3 px-6 py-3 rounded-full text-sm font-semibold text-white shadow-lg transition-all duration-200 hover:scale-105 active:scale-95 ${
-                          recording
-                            ? "bg-gradient-to-r from-red-500 to-red-600 hover:from-red-600 hover:to-red-700"
-                            : "bg-gradient-to-r from-red-500 to-pink-500 hover:from-red-600 hover:to-pink-600"
-                        }`}
-                        aria-pressed={recording}
-                      >
-                        <span className={`w-3 h-3 rounded-full transition-all duration-200 ${recording ? "bg-white animate-pulse" : "bg-white/80"}`} />
-                        <span>{recording ? "Stop Recording" : "Start Recording"}</span>
-                      </button>
+                      <div className="flex items-center gap-3">
+                        {/* Mute toggle */}
+                        <button
+                          onClick={toggleMute}
+                          title={muted ? "Unmute mic" : "Mute mic"}
+                          aria-pressed={muted}
+                          className={`p-3 rounded-full ${
+                            muted ? "bg-white/10" : "bg-green-600/80"
+                          } text-white border border-white/10 hover:scale-105 transition-transform`}
+                        >
+                          {muted ? (
+                            // Mic Off
+                            <svg
+                              xmlns="http://www.w3.org/2000/svg"
+                              className="w-5 h-5"
+                              fill="none"
+                              viewBox="0 0 24 24"
+                              stroke="currentColor"
+                              strokeWidth="2"
+                            >
+                              <path
+                                strokeLinecap="round"
+                                strokeLinejoin="round"
+                                d="M15 12.9V12a3 3 0 00-3-3m-2.121.879A3 3 0 0112 9m0 12a7.5 7.5 0 01-7.5-7.5M12 21a7.5 7.5 0 007.5-7.5M12 5v2m0 0a3 3 0 013 3v1m-3-4a3 3 0 00-3 3v1m9 4.5L4.5 4.5"
+                              />
+                            </svg>
+                          ) : (
+                            // Mic On
+                            <svg
+                              xmlns="http://www.w3.org/2000/svg"
+                              className="w-5 h-5"
+                              fill="none"
+                              viewBox="0 0 24 24"
+                              stroke="currentColor"
+                              strokeWidth="2"
+                            >
+                              <path
+                                strokeLinecap="round"
+                                strokeLinejoin="round"
+                                d="M12 1a3 3 0 00-3 3v6a3 3 0 006 0V4a3 3 0 00-3-3zM19.5 10.5a7.5 7.5 0 01-15 0M12 19v4m0 0h4m-4 0H8"
+                              />
+                            </svg>
+                          )}
+                        </button>
 
-                      <button
-                        onClick={handleFlipCamera}
-                        className="p-3 rounded-full bg-gradient-to-r from-green-500 to-green-600 hover:bg-white/20 text-white border border-white/20 hover:border-white/30 transition-all duration-200 hover:scale-105"
-                        title="Flip camera"
-                        aria-label="Flip camera"
-                      >
-                        <svg className="w-4 h-4 mr-2 inline" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
-                        </svg>
-                        Flip
-                      </button>
+                        {/* Record/Stop button */}
+                        <button
+                          onClick={() =>
+                            recording ? stopRecording() : startRecording()
+                          }
+                          className={`relative flex items-center gap-3 px-6 py-3 rounded-full text-sm font-semibold text-white shadow-lg transition-all duration-200 hover:scale-105 active:scale-95 ${
+                            recording
+                              ? "bg-gradient-to-r from-red-500 to-red-600 hover:from-red-600 hover:to-red-700"
+                              : "bg-gradient-to-r from-red-500 to-pink-500 hover:from-red-600 hover:to-pink-600"
+                          }`}
+                          aria-pressed={recording}
+                        >
+                          <span
+                            className={`w-3 h-3 rounded-full transition-all duration-200 ${
+                              recording
+                                ? "bg-white animate-pulse"
+                                : "bg-white/80"
+                            }`}
+                          />
+                          <span>
+                            {recording ? "Stop Recording" : "Start Recording"}
+                          </span>
+                        </button>
+
+                        {/* Camera flip */}
+                        <button
+                          onClick={handleFlipCamera}
+                          className="p-2 rounded-full bg-gradient-to-r from-green-500 to-green-600 hover:bg-white/20 text-white border border-white/20 hover:border-white/30 transition-all duration-200 hover:scale-105"
+                          title="Flip camera"
+                          aria-label="Flip camera"
+                        >
+                          <svg
+                            className="w-4 h-4 mr-2 inline"
+                            fill="none"
+                            stroke="currentColor"
+                            viewBox="0 0 24 24"
+                          >
+                            <path
+                              strokeLinecap="round"
+                              strokeLinejoin="round"
+                              strokeWidth={2}
+                              d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"
+                            />
+                          </svg>
+                          {/* Flip */}
+                        </button>
+                      </div>
                     </>
                   ) : (
                     <>
@@ -879,8 +1250,18 @@ export default function CircularStream({
                           </div>
                         ) : (
                           <div className="flex items-center gap-2">
-                            <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 19l9 2-9-18-9 18 9-2zm0 0v-8" />
+                            <svg
+                              className="w-4 h-4"
+                              fill="none"
+                              stroke="currentColor"
+                              viewBox="0 0 24 24"
+                            >
+                              <path
+                                strokeLinecap="round"
+                                strokeLinejoin="round"
+                                strokeWidth={2}
+                                d="M12 19l9 2-9-18-9 18 9-2zm0 0v-8"
+                              />
                             </svg>
                             Send
                           </div>
@@ -892,7 +1273,11 @@ export default function CircularStream({
 
                 <div className="text-center">
                   <div className="text-xs text-white/60 max-w-xs">
-                    {!previewUrl ? (recording ? "Recording in progress. Tap 'Stop Recording' when finished." : "Tap 'Start Recording' to begin. Your video will be saved as WebM format.") : "Review your recording and tap 'Send' to share, or 'Retake' to record again."}
+                    {!previewUrl
+                      ? recording
+                        ? "Recording in progress. Tap 'Stop Recording' when finished."
+                        : "Tap 'Start Recording' to begin. Your video will be saved as WebM format."
+                      : "Review your recording and tap 'Send' to share, or 'Retake' to record again."}
                   </div>
                 </div>
               </div>
