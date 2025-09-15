@@ -2338,7 +2338,6 @@ export default function Chat() {
   const createdUrlsRef = useRef(new Set());
   const incomingBuffersRef = useRef({}); // offerId -> { chunks: [], bytes: number }
 
-
   // center preview modal
   const [centerPreviewOpen, setCenterPreviewOpen] = useState(false);
   const [centerPreviewUrl, setCenterPreviewUrl] = useState(null);
@@ -2460,189 +2459,289 @@ export default function Chat() {
     });
   };
 
-  // handle incoming file chunk and write to disk using saved handle
-  // handle incoming file chunk and write to disk using saved handle
-const handleIncomingFileChunk = async (data) => {
-  // defensive: some runtimes wrap chunk under .data (PeerJS / structured clone variants)
-  let { id: offerId, seq, chunk, final } = data || {};
-  try {
-    // unwrap wrapper if necessary (common PeerJS quirk)
-    if (
-      chunk &&
-      chunk.data &&
-      (chunk.data instanceof ArrayBuffer ||
-        ArrayBuffer.isView(chunk.data) ||
-        chunk.data instanceof Blob)
-    ) {
-      chunk = chunk.data;
-    }
-
-    // If we have a FileSystem writable for this offer => write directly (preferred)
-    const writer = saveHandlesRef.current[offerId];
-    if (writer) {
-      // chunk may be Blob, ArrayBuffer, or TypedArray
-      if (chunk instanceof Blob) {
-        await writer.write(chunk);
-        fileWriteStatusRef.current[offerId] = (fileWriteStatusRef.current[offerId] || 0) + (chunk.size || 0);
-      } else if (chunk instanceof ArrayBuffer || ArrayBuffer.isView(chunk)) {
-        const buf = chunk instanceof ArrayBuffer ? new Uint8Array(chunk) : new Uint8Array(chunk.buffer || chunk);
-        await writer.write(buf);
-        fileWriteStatusRef.current[offerId] = (fileWriteStatusRef.current[offerId] || 0) + buf.byteLength;
-      } else if (chunk == null && final) {
-        // some senders send a final marker with null chunk — ignore here (closing handled below)
-      } else {
-        console.warn("Unknown chunk type for offer", offerId, seq, chunk);
-      }
-
-      // update receiver progress entry
-      setTransfer(offerId, (prev) => {
-        const total = prev?.total || 0;
-        const transferred = fileWriteStatusRef.current[offerId] || prev?.transferred || 0;
-        return { ...prev, total, transferred, direction: prev?.direction || "receiving" };
-      });
-
-      if (final) {
-        try {
-          await writer.close();
-        } catch (e) {
-          console.warn("Error closing writer for offer", offerId, e);
-        }
-        // mark 100% and schedule clean
-        try {
-          setTransfer(offerId, (prev) => ({ ...prev, transferred: prev?.total ?? fileWriteStatusRef.current[offerId] ?? prev?.transferred ?? 0 }));
-          setTimeout(() => removeTransfer(offerId), 1200);
-        } catch (e) {}
-        // cleanup
-        delete saveHandlesRef.current[offerId];
-        delete fileWriteStatusRef.current[offerId];
-
-        // notify UI + persist nothing more (file is on disk)
-        setMessages((m) => {
-          const sys = { id: `sys-file-done-${offerId}`, from: "System", text: "File received and saved to disk", ts: Date.now(), type: "system" };
-          const next = [...m, sys];
-          persistMessages(next);
-          return next;
-        });
-      }
-      return;
-    }
-
-    // ------- Fallback buffering path (no writable) -------
-    // Buffer chunks in-memory for this offerId
-    if (!incomingBuffersRef.current[offerId]) {
-      incomingBuffersRef.current[offerId] = { chunks: [], bytes: 0 };
-    }
-    const bufEntry = incomingBuffersRef.current[offerId];
-
-    if (chunk instanceof Blob) {
-      bufEntry.chunks.push(chunk);
-      bufEntry.bytes += chunk.size || 0;
-    } else if (chunk instanceof ArrayBuffer || ArrayBuffer.isView(chunk)) {
-      const blobPart = chunk instanceof ArrayBuffer ? new Blob([chunk]) : new Blob([chunk.buffer || chunk]);
-      bufEntry.chunks.push(blobPart);
-      bufEntry.bytes += blobPart.size || 0;
-    } else if (chunk == null && !final) {
-      // ignore unexpected nulls
-    } else {
-      // unknown chunk type — log and skip
-      console.warn("Unknown chunk type (buffer fallback) for offer", offerId, seq, chunk);
-    }
-
-    // update progress UI based on buffered bytes
-    setTransfer(offerId, (prev) => {
-      const total = prev?.total || 0;
-      const transferred = bufEntry.bytes || prev?.transferred || 0;
-      return { ...prev, total, transferred, direction: prev?.direction || "receiving" };
-    });
-
-    // when final chunk arrives, assemble Blob, persist, and create message
-    if (final) {
+  // hydrate persisted file blobs (run once on mount) — improved: create objectURLs on demand for messages with fileId
+  useEffect(() => {
+    let mounted = true;
+    (async () => {
       try {
-        const assembled = new Blob(bufEntry.chunks, { type: bufEntry.chunks[0]?.type || "application/octet-stream" });
-        // persist into IndexedDB using your saveBlob helper so it survives refresh
-        try {
-          await saveBlob(offerId, assembled);
-        } catch (e) {
-          console.warn("saveBlob (fallback) failed for", offerId, e);
+        // iterate over file messages and ensure fileUrl present in state when we have the blob
+        const fileMsgs = messages.filter((x) => x.type === "file" && x.fileId);
+        for (const fm of fileMsgs) {
+          if (!mounted) return;
+          // if a runtime fileUrl already exists in state, skip
+          if (fm.fileUrl) continue;
+          try {
+            const blob = await getBlob(fm.fileId);
+            if (!mounted) return;
+            if (blob) {
+              const url = URL.createObjectURL(blob);
+              createdUrlsRef.current.add(url);
+              setMessages((prev) => {
+                const next = prev.map((m) =>
+                  m.id === fm.id ? { ...m, fileUrl: url } : m
+                );
+                // persistMessages strips fileUrl for storage so no change to persisted data
+                persistMessages(next);
+                return next;
+              });
+            }
+          } catch (e) {
+            // ignore missing blobs (they may not have been persisted)
+            // console.warn("hydrate blob failed for", fm.fileId, e);
+          }
+        }
+      } catch (e) {
+        console.warn("Hydration error:", e);
+      }
+    })();
+    return () => {
+      mounted = false;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []); // run once on mount
+
+  // handle incoming file chunk and write to disk using saved handle
+  // handle incoming file chunk and write to disk using saved handle
+  const handleIncomingFileChunk = async (data) => {
+    // defensive: some runtimes wrap chunk under .data (PeerJS / structured clone variants)
+    let { id: offerId, seq, chunk, final } = data || {};
+    try {
+      // unwrap wrapper if necessary (common PeerJS quirk)
+      if (
+        chunk &&
+        chunk.data &&
+        (chunk.data instanceof ArrayBuffer ||
+          ArrayBuffer.isView(chunk.data) ||
+          chunk.data instanceof Blob)
+      ) {
+        chunk = chunk.data;
+      }
+
+      // If we have a FileSystem writable for this offer => write directly (preferred)
+      const writer = saveHandlesRef.current[offerId];
+      if (writer) {
+        // chunk may be Blob, ArrayBuffer, or TypedArray
+        if (chunk instanceof Blob) {
+          await writer.write(chunk);
+          fileWriteStatusRef.current[offerId] =
+            (fileWriteStatusRef.current[offerId] || 0) + (chunk.size || 0);
+        } else if (chunk instanceof ArrayBuffer || ArrayBuffer.isView(chunk)) {
+          const buf =
+            chunk instanceof ArrayBuffer
+              ? new Uint8Array(chunk)
+              : new Uint8Array(chunk.buffer || chunk);
+          await writer.write(buf);
+          fileWriteStatusRef.current[offerId] =
+            (fileWriteStatusRef.current[offerId] || 0) + buf.byteLength;
+        } else if (chunk == null && final) {
+          // some senders send a final marker with null chunk — ignore here (closing handled below)
+        } else {
+          console.warn("Unknown chunk type for offer", offerId, seq, chunk);
         }
 
-        // create a preview URL and message for UI
-        try {
-          const previewUrl = URL.createObjectURL(assembled);
-          // register created URL so we can revoke it later
-          createdUrlsRef.current.add(previewUrl);
+        // update receiver progress entry
+        setTransfer(offerId, (prev) => {
+          const total = prev?.total || 0;
+          const transferred =
+            fileWriteStatusRef.current[offerId] || prev?.transferred || 0;
+          return {
+            ...prev,
+            total,
+            transferred,
+            direction: prev?.direction || "receiving",
+          };
+        });
 
+        if (final) {
+          try {
+            await writer.close();
+          } catch (e) {
+            console.warn("Error closing writer for offer", offerId, e);
+          }
+          // mark 100% and schedule clean
+          try {
+            setTransfer(offerId, (prev) => ({
+              ...prev,
+              transferred:
+                prev?.total ??
+                fileWriteStatusRef.current[offerId] ??
+                prev?.transferred ??
+                0,
+            }));
+            setTimeout(() => removeTransfer(offerId), 1200);
+          } catch (e) {}
+          // cleanup
+          delete saveHandlesRef.current[offerId];
+          delete fileWriteStatusRef.current[offerId];
+
+          // notify UI + persist nothing more (file is on disk)
           setMessages((m) => {
-            // avoid duplicating message if already present
-            const exists = m.find((x) => x.id === offerId);
-            if (exists) {
-              // update fileUrl if missing
-              const next = m.map((x) => (x.id === offerId ? { ...x, fileUrl: previewUrl } : x));
-              persistMessages(next);
-              return next;
-            }
-            const sysMsg = {
-              id: offerId,
-              type: "file",
-              from: "peer",
-              fromId: null,
-              fromName: "peer",
-              fileName: `file-${offerId}`,
-              fileSize: assembled.size || 0,
-              fileType: assembled.type || "video/webm",
-              fileId: offerId,
-              fileUrl: previewUrl,
+            const sys = {
+              id: `sys-file-done-${offerId}`,
+              from: "System",
+              text: "File received and saved to disk",
               ts: Date.now(),
-              deliveries: [],
-              reads: [],
+              type: "system",
             };
-            const next = [...m, sysMsg];
+            const next = [...m, sys];
             persistMessages(next);
             return next;
           });
-
-          // final transfer UI update
-          setTransfer(offerId, (prev) => ({ ...prev, transferred: bufEntry.bytes || prev?.transferred || 0 }));
-          setTimeout(() => removeTransfer(offerId), 1200);
-        } catch (e) {
-          console.warn("preview creation after assembly failed", e);
         }
-      } catch (e) {
-        console.warn("Error assembling buffered chunks for offer", offerId, e);
-        setMessages((m) => {
-          const sys = { id: `sys-file-error-${offerId}-${Date.now()}`, from: "System", text: `Error assembling received file: ${e.message || e}`, ts: Date.now(), type: "system" };
-          const next = [...m, sys];
-          persistMessages(next);
-          return next;
-        });
-      } finally {
-        // cleanup buffer entry
-        try {
-          delete incomingBuffersRef.current[offerId];
-        } catch (e) {}
+        return;
       }
-    }
-  } catch (e) {
-    console.warn("handleIncomingFileChunk error (outer)", e);
-    setMessages((m) => {
-      const sys = { id: `sys-file-error-${Date.now()}`, from: "System", text: `Error processing incoming file chunk: ${e.message || e}`, ts: Date.now(), type: "system" };
-      const next = [...m, sys];
-      persistMessages(next);
-      return next;
-    });
-    // best-effort cleanup
-    try {
-      delete incomingBuffersRef.current[offerId];
-    } catch (er) {}
-    try {
-      delete fileWriteStatusRef.current[offerId];
-    } catch (er) {}
-    try {
-      delete saveHandlesRef.current[offerId];
-    } catch (er) {}
-  }
-};
 
+      // ------- Fallback buffering path (no writable) -------
+      // Buffer chunks in-memory for this offerId
+      if (!incomingBuffersRef.current[offerId]) {
+        incomingBuffersRef.current[offerId] = { chunks: [], bytes: 0 };
+      }
+      const bufEntry = incomingBuffersRef.current[offerId];
+
+      if (chunk instanceof Blob) {
+        bufEntry.chunks.push(chunk);
+        bufEntry.bytes += chunk.size || 0;
+      } else if (chunk instanceof ArrayBuffer || ArrayBuffer.isView(chunk)) {
+        const blobPart =
+          chunk instanceof ArrayBuffer
+            ? new Blob([chunk])
+            : new Blob([chunk.buffer || chunk]);
+        bufEntry.chunks.push(blobPart);
+        bufEntry.bytes += blobPart.size || 0;
+      } else if (chunk == null && !final) {
+        // ignore unexpected nulls
+      } else {
+        // unknown chunk type — log and skip
+        console.warn(
+          "Unknown chunk type (buffer fallback) for offer",
+          offerId,
+          seq,
+          chunk
+        );
+      }
+
+      // update progress UI based on buffered bytes
+      setTransfer(offerId, (prev) => {
+        const total = prev?.total || 0;
+        const transferred = bufEntry.bytes || prev?.transferred || 0;
+        return {
+          ...prev,
+          total,
+          transferred,
+          direction: prev?.direction || "receiving",
+        };
+      });
+
+      // when final chunk arrives, assemble Blob, persist, and create message
+      if (final) {
+        try {
+          const assembled = new Blob(bufEntry.chunks, {
+            type: bufEntry.chunks[0]?.type || "application/octet-stream",
+          });
+          // persist into IndexedDB using your saveBlob helper so it survives refresh
+          try {
+            await saveBlob(offerId, assembled);
+          } catch (e) {
+            console.warn("saveBlob (fallback) failed for", offerId, e);
+          }
+
+          // create a preview URL and message for UI
+          try {
+            const previewUrl = URL.createObjectURL(assembled);
+            // register created URL so we can revoke it later
+            createdUrlsRef.current.add(previewUrl);
+
+            setMessages((m) => {
+              // avoid duplicating message if already present
+              const exists = m.find((x) => x.id === offerId);
+              if (exists) {
+                // update fileUrl if missing
+                const next = m.map((x) =>
+                  x.id === offerId ? { ...x, fileUrl: previewUrl } : x
+                );
+                persistMessages(next);
+                return next;
+              }
+              const sysMsg = {
+                id: offerId,
+                type: "file",
+                from: "peer",
+                fromId: null,
+                fromName: "peer",
+                fileName: `file-${offerId}`,
+                fileSize: assembled.size || 0,
+                fileType: assembled.type || "video/webm",
+                fileId: offerId,
+                fileUrl: previewUrl,
+                ts: Date.now(),
+                deliveries: [],
+                reads: [],
+              };
+              const next = [...m, sysMsg];
+              persistMessages(next);
+              return next;
+            });
+
+            // final transfer UI update
+            setTransfer(offerId, (prev) => ({
+              ...prev,
+              transferred: bufEntry.bytes || prev?.transferred || 0,
+            }));
+            setTimeout(() => removeTransfer(offerId), 1200);
+          } catch (e) {
+            console.warn("preview creation after assembly failed", e);
+          }
+        } catch (e) {
+          console.warn(
+            "Error assembling buffered chunks for offer",
+            offerId,
+            e
+          );
+          setMessages((m) => {
+            const sys = {
+              id: `sys-file-error-${offerId}-${Date.now()}`,
+              from: "System",
+              text: `Error assembling received file: ${e.message || e}`,
+              ts: Date.now(),
+              type: "system",
+            };
+            const next = [...m, sys];
+            persistMessages(next);
+            return next;
+          });
+        } finally {
+          // cleanup buffer entry
+          try {
+            delete incomingBuffersRef.current[offerId];
+          } catch (e) {}
+        }
+      }
+    } catch (e) {
+      console.warn("handleIncomingFileChunk error (outer)", e);
+      setMessages((m) => {
+        const sys = {
+          id: `sys-file-error-${Date.now()}`,
+          from: "System",
+          text: `Error processing incoming file chunk: ${e.message || e}`,
+          ts: Date.now(),
+          type: "system",
+        };
+        const next = [...m, sys];
+        persistMessages(next);
+        return next;
+      });
+      // best-effort cleanup
+      try {
+        delete incomingBuffersRef.current[offerId];
+      } catch (er) {}
+      try {
+        delete fileWriteStatusRef.current[offerId];
+      } catch (er) {}
+      try {
+        delete saveHandlesRef.current[offerId];
+      } catch (er) {}
+    }
+  };
 
   // incoming messages callback from webrtc
   const handleIncoming = async (from, payloadOrText) => {
@@ -2940,12 +3039,20 @@ const handleIncomingFileChunk = async (data) => {
   useEffect(() => {
     return () => {
       try {
-        createdUrlsRef.current.forEach((u) => {
+        // copy to array to avoid surprises if something mutates the Set during iteration
+        const urls = Array.from(createdUrlsRef.current || []);
+        for (const u of urls) {
           try {
             URL.revokeObjectURL(u);
-          } catch (e) {}
-        });
-      } catch (e) {}
+          } catch (e) {
+            // ignore
+          }
+        }
+        // clear the set
+        createdUrlsRef.current && createdUrlsRef.current.clear();
+      } catch (e) {
+        // ignore
+      }
     };
   }, []);
 
@@ -3466,38 +3573,59 @@ const handleIncomingFileChunk = async (data) => {
   };
 
   // helper to open center preview for a message (file message)
-  const openCenterPreview = (msg) => {
-    if (msg.fileUrl) {
-      setCenterPreviewUrl(msg.fileUrl);
-      setCenterPreviewOpen(true);
-      return;
-    }
-    (async () => {
-      try {
-        const blob = msg.fileId ? await getBlob(msg.fileId) : null;
-        if (blob) {
-          const url = URL.createObjectURL(blob);
-          createdUrlsRef.current.add(url);
-          setCenterPreviewUrl(url);
-          setCenterPreviewOpen(true);
-        } else {
-          setMessages((m) => {
-            const sys = {
-              id: `sys-missing-${msg.id}-${Date.now()}`,
-              from: "System",
-              text: "Preview not available (file missing locally).",
-              ts: Date.now(),
-              type: "system",
-            };
-            const next = [...m, sys];
-            persistMessages(next);
-            return next;
-          });
+  // helper to open center preview for a message (file message)
+  const openCenterPreview = async (msg) => {
+    try {
+      // If message references an ID in IDB, prefer to load the blob fresh (this avoids using a revoked URL)
+      if (msg.fileId) {
+        try {
+          const blob = await getBlob(msg.fileId);
+          if (blob) {
+            const url = URL.createObjectURL(blob);
+            createdUrlsRef.current.add(url);
+
+            // update message in-memory to carry the runtime fileUrl (persistMessages will strip fileUrl)
+            setMessages((m) => {
+              const next = m.map((x) =>
+                x.id === msg.id ? { ...x, fileUrl: url } : x
+              );
+              persistMessages(next);
+              return next;
+            });
+
+            setCenterPreviewUrl(url);
+            setCenterPreviewOpen(true);
+            return;
+          }
+        } catch (e) {
+          console.warn("openCenterPreview: failed to load blob from IDB", e);
+          // fallthrough to try existing fileUrl
         }
-      } catch (e) {
-        console.warn("openCenterPreview error", e);
       }
-    })();
+
+      // fallback: if a runtime fileUrl is present on the message, use it
+      if (msg.fileUrl) {
+        setCenterPreviewUrl(msg.fileUrl);
+        setCenterPreviewOpen(true);
+        return;
+      }
+
+      // No file available: show helpful system message
+      setMessages((m) => {
+        const sys = {
+          id: `sys-missing-${msg.id}-${Date.now()}`,
+          from: "System",
+          text: "Preview not available (file not stored locally).",
+          ts: Date.now(),
+          type: "system",
+        };
+        const next = [...m, sys];
+        persistMessages(next);
+        return next;
+      });
+    } catch (e) {
+      console.warn("openCenterPreview error", e);
+    }
   };
 
   const maybeNotify = (fromDisplay, text) => {
@@ -3737,9 +3865,7 @@ const handleIncomingFileChunk = async (data) => {
 
   // show centered preview modal
   const closeCenterPreview = () => {
-    try {
-      URL.revokeObjectURL(centerPreviewUrl);
-    } catch (e) {}
+    // Do NOT revoke the URL here. We will revoke all created URLs on unmount cleanup.
     setCenterPreviewOpen(false);
     setCenterPreviewUrl(null);
   };
