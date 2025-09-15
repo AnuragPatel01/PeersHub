@@ -3340,130 +3340,127 @@ export default function Chat() {
     }
 
     if (m.type === "file") {
-      const fileType = m.fileType || "application/octet-stream";
-      const isVideo = fileType.startsWith("video/");
-      const url = m.fileUrl || null;
+  const fileType = m.fileType || "application/octet-stream";
+  const isVideo = fileType.startsWith("video/");
+  const url = m.fileUrl || null;
+  const thumbPx = 96; // size of circle thumbnail
 
-      // fixed pixel size avoids tailwind/responsive quirks; change to match your UI
-      const thumbPx = 96;
-
-      return (
-        <div
-          onClick={() => openCenterPreview(m)}
-          key={`${m.id ?? m.ts}-${idx}`}
-          className={`group p-2 rounded-2xl max-w-[50%] mb-2 cursor-pointer ${
-            isMe ? "ml-auto bg-blue-500 text-white" : "bg-white/100 text-black"
-          }`}
-          role="button"
-          tabIndex={0}
-          onKeyDown={(e) => {
-            if (e.key === "Enter" || e.key === " ") {
-              e.preventDefault();
-              openCenterPreview(m);
-            }
-          }}
-          aria-label={
-            isVideo
-              ? `Open video ${m.fileName || ""}`
-              : `Open file ${m.fileName || ""}`
-          }
-          style={{ WebkitTapHighlightColor: "transparent" }}
-        >
-          <div className="text-xs font-bold flex items-center">
-            <div className="flex-1">{isMe ? "You" : from}</div>
-            <div className="text-[10px] text-gray-700/70 ml-2">{time}</div>
-            {isMe && renderStatusDot(m)}
-          </div>
-
-          {m.replyTo && (
-            <div className="mt-2 mb-2 p-2 rounded border border-white/5 text-xs text-gray-600 bg-gray-300">
-              <strong className="text-xs text-blue-400">
-                Reply to {m.replyTo.from}:
-              </strong>{" "}
-              {m.replyTo.text}
+  return (
+    // outer container: NOT the white/blue chat bubble so the circle is visible
+    <div
+      key={`${m.id ?? m.ts}-${idx}`}
+      className="group mb-2 w-full flex items-start gap-3"
+      role="button"
+      tabIndex={0}
+      onKeyDown={(e) => {
+        if (e.key === "Enter" || e.key === " ") {
+          e.preventDefault();
+          openCenterPreview(m);
+        }
+      }}
+      onClick={() => openCenterPreview(m)}
+      aria-label={isVideo ? `Open video ${m.fileName || ""}` : `Open file ${m.fileName || ""}`}
+      // avoid default tap highlight in mobile
+      style={{ WebkitTapHighlightColor: "transparent" }}
+    >
+      {/* left: circular thumbnail */}
+      <div
+        style={{
+          width: thumbPx,
+          height: thumbPx,
+          minWidth: thumbPx,
+          minHeight: thumbPx,
+          borderRadius: 9999,
+          overflow: "hidden",
+          position: "relative",
+          flexShrink: 0,
+          background: "rgba(0,0,0,0.06)",
+          display: "inline-flex",
+          alignItems: "center",
+          justifyContent: "center",
+        }}
+        className="video-thumb"
+      >
+        {isVideo ? (
+          url ? (
+            <video
+              src={url}
+              controls
+              playsInline
+              // ensure the element fills and is clipped by the wrapper
+              style={{
+                width: "100%",
+                height: "100%",
+                objectFit: "cover",
+                display: "block",
+                borderRadius: 0, // wrapper handles rounding
+              }}
+              className="block"
+              aria-label={m.fileName || "video message"}
+            />
+          ) : (
+            <div className="w-full h-full flex items-center justify-center bg-black/20 text-xs text-white/80">
+              Loading…
             </div>
-          )}
-
-          <div className="mt-2 flex items-center">
-            {isVideo ? (
-              <div
-                // inline style is deliberate: beats global overrides and ensures exact shape/size
-                style={{
-                  borderRadius: "9999px",
-                  overflow: "hidden",
-                  width: thumbPx,
-                  height: thumbPx,
-                  minWidth: thumbPx,
-                  minHeight: thumbPx,
-                  display: "inline-flex",
-                  alignItems: "center",
-                  justifyContent: "center",
-                  background: "rgba(0,0,0,0.08)",
-                  flexShrink: 0,
-                  position: "relative",
-                }}
-                className="flex-shrink-0"
-              >
-                {url ? (
-                  <video
-                    controls
-                    playsInline
-                    src={url}
-                    // force cover and ensure the element doesn't show square corners
-                    style={{
-                      width: "100%",
-                      height: "100%",
-                      objectFit: "cover",
-                      display: "block",
-                      borderRadius: "0", // wrapper handles clipping
-                    }}
-                    className="block"
-                    aria-label={m.fileName || "video message"}
-                  />
-                ) : (
-                  <div className="w-full h-full flex items-center justify-center bg-black/20 text-xs text-white/80">
-                    Loading…
-                  </div>
-                )}
-
-                {/* subtle play overlay — pointer-events none so click goes through to openCenterPreview */}
-                <div
-                  className="absolute inset-0 flex items-center justify-center pointer-events-none"
-                  aria-hidden="true"
-                >
-                  <div
-                    style={{ width: 40, height: 40, borderRadius: 9999 }}
-                    className="bg-black/30 transition-opacity duration-200 opacity-60 group-hover:opacity-80"
-                  />
-                  <svg
-                    style={{ width: 20, height: 20 }}
-                    className="absolute text-white drop-shadow-md transition-transform duration-200 transform scale-95 group-hover:scale-100"
-                    viewBox="0 0 24 24"
-                    fill="none"
-                    stroke="currentColor"
-                    strokeWidth="1.2"
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
-                    aria-hidden="true"
-                  >
-                    <polygon points="5 3 19 12 5 21 5 3" fill="currentColor" />
-                  </svg>
-                </div>
-              </div>
-            ) : (
-              <div className="break-words">{m.fileName || m.text}</div>
-            )}
-
-            <div className="ml-3 text-xs text-gray-500">
-              <div>{m.fileName || ""}</div>
-              <div>
-                {m.fileSize ? `${Math.round(m.fileSize / 1024)} KB` : ""}
-              </div>
-            </div>
+          )
+        ) : (
+          // non-video placeholder inside circle
+          <div className="w-full h-full flex items-center justify-center text-xs text-gray-700 px-2 text-center break-words">
+            {m.fileName || "file"}
           </div>
+        )}
+
+        {/* subtle play overlay (pointer-events: none so click passes through) */}
+        {isVideo && (
+          <div
+            className="absolute inset-0 flex items-center justify-center pointer-events-none"
+            aria-hidden="true"
+          >
+            <div
+              style={{ width: 40, height: 40, borderRadius: 9999 }}
+              className="bg-black/30 transition-opacity duration-150 opacity-60 group-hover:opacity-80"
+            />
+            <svg
+              style={{ width: 20, height: 20 }}
+              className="absolute text-white drop-shadow-md transition-transform duration-150 transform scale-95 group-hover:scale-100"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="1.2"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              aria-hidden="true"
+            >
+              <polygon points="5 3 19 12 5 21 5 3" fill="currentColor" />
+            </svg>
+          </div>
+        )}
+      </div>
+
+      {/* right: meta text (sender/time/size) */}
+      <div className="flex-1 min-w-0">
+        <div className="flex items-center text-xs font-bold">
+          <div className="flex-1">{isMe ? "You" : from}</div>
+          <div className="ml-2 text-[10px] text-gray-500">{time}</div>
+          {isMe && renderStatusDot(m)}
         </div>
-      );
-    }
+
+        {m.replyTo && (
+          <div className="mt-2 mb-2 p-2 rounded border border-white/5 text-xs text-gray-600 bg-gray-100">
+            <strong className="text-xs text-blue-400">Reply to {m.replyTo.from}:</strong>{" "}
+            {m.replyTo.text}
+          </div>
+        )}
+
+        <div className="mt-2 text-xs text-gray-600">
+          <div className="font-medium break-words">{m.fileName || ""}</div>
+          {m.fileSize ? <div className="text-[11px] text-gray-500 mt-1">{`${Math.round(m.fileSize / 1024)} KB`}</div> : null}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 
     return (
       <div
