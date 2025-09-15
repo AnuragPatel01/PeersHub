@@ -421,17 +421,20 @@ const file = new File([recordedBlob], `video-message-${Date.now()}${suffix}`, { 
                         title="Flip camera"
                         aria-label="Flip camera"
                       >
-                        <svg
-                          xmlns="http://www.w3.org/2000/svg"
-                          width="20"
-                          height="20"
-                          viewBox="0 0 24 24"
+                       <svg
+                          className="w-4 h-4 mr-2 inline"
                           fill="none"
                           stroke="currentColor"
-                          strokeWidth="2"
+                          viewBox="0 0 24 24"
                         >
-                          <path d="M21 2l-2 2m-7.61 2.61a5.5 5.5 0 1 1-7.778 7.778 5.5 5.5 0 0 1 7.777-7.777zm0 0L15.5 7.5m0 0l3 3L22 8l-3-3m-3.5 3.5L19 5" />
+                          <path
+                            strokeLinecap="round"
+                            strokeLinejoin="round"
+                            strokeWidth={2}
+                            d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"
+                          />
                         </svg>
+                        Flip
                       </button>
                     </>
                   ) : (

@@ -3859,10 +3859,10 @@ export default function Chat() {
                 className="relative rounded-full overflow-hidden w-24 h-24 sm:w-32 sm:h-32 flex-shrink-0 bg-black/10 flex items-center justify-center"
                 style={{
                   borderRadius: "50%",
-                  width: 176,
-                  height: 176,
-                  minWidth: 176,
-                  minHeight: 176,
+                  width: 170,
+                  height: 170,
+                  minWidth: 170,
+                  minHeight: 170,
                 }}
               >
                 <video
@@ -4512,42 +4512,9 @@ export default function Chat() {
 
           <div className="relative w-full flex items-center gap-2">
             {/* Left side controls container */}
-
-            {/* File attachment button */}
-            {/* <button
-                onClick={() => {
-                  const input = document.createElement("input");
-                  input.type = "file";
-                  input.onchange = (e) => {
-                    const f = e.target.files && e.target.files[0];
-                    if (f) onFileSelected(f, { directSend: false });
-                  };
-                  input.click();
-                }}
-                className="w-10 h-10 flex items-center justify-center rounded-full bg-white/10 hover:bg-white/20 text-blue-500 hover:text-blue-600 transition-all duration-200 flex-shrink-0"
-                title="Attach File"
-                aria-label="Attach File"
-              >
-                <svg
-                  xmlns="http://www.w3.org/2000/svg"
-                  viewBox="0 0 24 24"
-                  fill="none"
-                  stroke="currentColor"
-                  strokeWidth="2"
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                  className="w-5 h-5"
-                >
-                  <path d="M21.44 11.05l-9.19 9.19a5.5 5.5 0 01-7.78-7.78l9.19-9.19a3.5 3.5 0 015 5l-9.2 9.19a1.5 1.5 0 01-2.12-2.12l8.49-8.49" />
-                </svg>
-              </button> */}
-          </div>
-
-          {/* Text input - flex-1 takes remaining space */}
-          <div className="relative flex-1">
             <div className="flex items-center gap-2 flex-shrink-0">
               {/* Circular video-record button */}
-              <div className="absolute left-2 top-1/2 -translate-y-1/2">
+              <div className="relative ">
                 <CircularStream
                   onFileRecorded={(file) =>
                     onFileSelected(file, { directSend: true })
@@ -4556,25 +4523,29 @@ export default function Chat() {
                 />
               </div>
             </div>
-            <input
-              value={text}
-              onChange={(e) => setText(e.target.value)}
-              placeholder="Type a message..."
-              className="w-full p-3 pl-12 pr-8 bg-white/10 placeholder-blue-300 text-blue-500 font-mono rounded-3xl border-2 border-white/20 focus:border-blue-400 focus:outline-none transition-colors duration-200"
-              onKeyDown={(e) => {
-                if (e.key === "Enter") send();
-              }}
-            />
 
-            {/* Send button inside input */}
-            <button
-              onClick={send}
-              className="absolute right-2 top-1/2 -translate-y-1/2 w-14 h-10 flex items-center  bg-gradient-to-r from-gray-50 to-gray-50 justify-center rounded-full text-blue-500 "
-              title="Send"
-              aria-label="Send message"
-            >
-              Send
-            </button>
+            {/* Text input - flex-1 takes remaining space */}
+            <div className="relative flex-1">
+              <input
+                value={text}
+                onChange={(e) => setText(e.target.value)}
+                placeholder="Type a message..."
+                className="w-full p-3 pr-12 bg-white/10 placeholder-blue-300 text-blue-500 font-mono rounded-3xl border-2 border-white/20 focus:border-blue-400 focus:outline-none transition-colors duration-200"
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") send();
+                }}
+              />
+
+              {/* Send button inside input */}
+              <button
+                onClick={send}
+                className="absolute right-2 top-1/2 -translate-y-1/2 w-14 h-10 flex items-center  bg-gradient-to-r from-gray-50 to-gray-50 justify-center rounded-full text-blue-500 "
+                title="Send"
+                aria-label="Send message"
+              >
+                Send
+              </button>
+            </div>
           </div>
         </footer>
       </div>
