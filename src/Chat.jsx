@@ -3543,6 +3543,10 @@ export default function Chat() {
       const fileType = m.fileType || "application/octet-stream";
       const isVideo = fileType.startsWith("video/");
       const url = m.fileUrl || null;
+      const time = new Date(m.ts).toLocaleTimeString([], {
+        hour: "2-digit",
+        minute: "2-digit",
+      });
 
       return (
         <div
@@ -3559,20 +3563,11 @@ export default function Chat() {
               openCenterPreview(m);
             }
           }}
-          aria-label={
-            isVideo
-              ? `Open video ${m.fileName || ""}`
-              : `Open file ${m.fileName || ""}`
-          }
+          aria-label={isVideo ? "Open video message" : "Open file"}
         >
           <div className="text-xs font-bold flex items-center">
             <div className="flex-1">{isMe ? "You" : m.from}</div>
-            <div className="text-[10px] text-gray-700/70 ml-2">
-              {new Date(m.ts).toLocaleTimeString([], {
-                hour: "2-digit",
-                minute: "2-digit",
-              })}
-            </div>
+            <div className="text-[10px] text-gray-700/70 ml-2">{time}</div>
             {isMe && renderStatusDot(m)}
           </div>
 
@@ -3585,74 +3580,51 @@ export default function Chat() {
             </div>
           )}
 
-          <div className="mt-2 flex items-center">
-            {isVideo ? (
-              /* circular video wrapper */
+          <div className="mt-2 flex items-center justify-center">
+            {isVideo && url ? (
               <div
-                className="relative rounded-full overflow-hidden flex-shrink-0 bg-black/10 flex items-center justify-center"
+                className="relative rounded-full overflow-hidden w-24 h-24 sm:w-32 sm:h-32 flex-shrink-0 bg-black/10 flex items-center justify-center"
                 style={{
+                  borderRadius: "50%",
                   width: 96,
                   height: 96,
                   minWidth: 96,
                   minHeight: 96,
-                  borderRadius: "50%",
                 }}
               >
-                {url ? (
-                  <video
-                    src={url}
-                    muted
-                    playsInline
-                    autoPlay
-                    loop
-                    preload="metadata"
-                    // ensure it covers the circle
-                    style={{
-                      width: "100%",
-                      height: "100%",
-                      objectFit: "cover",
-                      borderRadius: "50%",
-                      display: "block",
-                    }}
-                    className="block"
-                    aria-label={m.fileName || "video message"}
-                    onLoadedMetadata={(e) => {
-                      // try to play (some browsers restrict autoplay unless muted — we are muted)
-                      try {
-                        const v = e.target;
-                        if (v && typeof v.play === "function") {
-                          v.play().catch(() => {
-                            // ignore play rejection
-                          });
-                        }
-                      } catch (err) {}
-                    }}
-                  />
-                ) : (
-                  <div
-                    style={{
-                      width: 96,
-                      height: 96,
-                      borderRadius: "50%",
-                      display: "flex",
-                      alignItems: "center",
-                      justifyContent: "center",
-                      background: "rgba(0,0,0,0.06)",
-                    }}
-                    aria-hidden="true"
-                  >
-                    <div className="w-6 h-6 border-2 border-white border-t-transparent rounded-full animate-spin" />
-                  </div>
-                )}
+                <video
+                  src={url}
+                  muted
+                  autoPlay
+                  loop
+                  playsInline
+                  controls={false}
+                  preload="metadata"
+                  style={{
+                    width: "100%",
+                    height: "100%",
+                    objectFit: "cover",
+                    borderRadius: "50%",
+                    display: "block",
+                  }}
+                  className="block pointer-events-none"
+                  onLoadedMetadata={(e) => {
+                    try {
+                      if (e.target && e.target.currentTime === 0) {
+                        e.target.currentTime = 0.001;
+                      }
+                    } catch (err) {}
+                  }}
+                />
 
-                {/* subtle play overlay so it looks tappable */}
+                {/* subtle play overlay */}
                 <div
                   className="absolute inset-0 flex items-center justify-center pointer-events-none"
                   aria-hidden="true"
                 >
-                  <div className="rounded-full w-10 h-10 bg-black/30 opacity-60 group-hover:opacity-80" />
+                  <div className="rounded-full w-10 h-10 sm:w-12 sm:h-12 bg-black/30 transition-opacity duration-200 opacity-60 group-hover:opacity-80" />
                   <svg
-                    className="absolute w-5 h-5 text-white"
+                    className="absolute w-5 h-5 sm:w-6 sm:h-6 text-white drop-shadow-md transition-transform duration-200 transform scale-95 group-hover:scale-100"
                     viewBox="0 0 24 24"
                     fill="none"
                     stroke="currentColor"
@@ -3664,20 +3636,10 @@ export default function Chat() {
                     <polygon points="5 3 19 12 5 21 5 3" fill="currentColor" />
                   </svg>
                 </div>
-
-                {/* focus ring for keyboard users */}
-                <span className="absolute -inset-1 rounded-full ring-2 ring-transparent group-focus-within:ring-white/30" />
               </div>
             ) : (
-              <div className="break-words">{m.fileName || m.text}</div>
+              <div className="text-xs text-gray-500">Unsupported file</div>
             )}
-
-            <div className="ml-3 text-xs text-gray-500">
-              <div>{m.fileName || ""}</div>
-              <div>
-                {m.fileSize ? `${Math.round(m.fileSize / 1024)} KB` : ""}
-              </div>
-            </div>
           </div>
         </div>
       );
