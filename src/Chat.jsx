@@ -2663,23 +2663,38 @@ export default function Chat() {
       ) {
         chunk = chunk.data;
       }
-
       // If we have a FileSystem writable for this offer => write directly (preferred)
       const writer = saveHandlesRef.current[offerId];
       if (writer) {
         // chunk may be Blob, ArrayBuffer, or TypedArray
         if (chunk instanceof Blob) {
-          await writer.write(chunk);
-          fileWriteStatusRef.current[offerId] =
-            (fileWriteStatusRef.current[offerId] || 0) + (chunk.size || 0);
+          try {
+            await writer.write(chunk);
+            fileWriteStatusRef.current[offerId] =
+              (fileWriteStatusRef.current[offerId] || 0) + (chunk.size || 0);
+          } catch (e) {
+            console.warn(
+              "Error writing blob chunk to writer for offer",
+              offerId,
+              e
+            );
+          }
         } else if (chunk instanceof ArrayBuffer || ArrayBuffer.isView(chunk)) {
-          const buf =
-            chunk instanceof ArrayBuffer
-              ? new Uint8Array(chunk)
-              : new Uint8Array(chunk.buffer || chunk);
-          await writer.write(buf);
-          fileWriteStatusRef.current[offerId] =
-            (fileWriteStatusRef.current[offerId] || 0) + buf.byteLength;
+          try {
+            const buf =
+              chunk instanceof ArrayBuffer
+                ? new Uint8Array(chunk)
+                : new Uint8Array(chunk.buffer || chunk);
+            await writer.write(buf);
+            fileWriteStatusRef.current[offerId] =
+              (fileWriteStatusRef.current[offerId] || 0) + buf.byteLength;
+          } catch (e) {
+            console.warn(
+              "Error writing ArrayBuffer/TypedArray chunk to writer for offer",
+              offerId,
+              e
+            );
+          }
         } else if (chunk == null && final) {
           // some senders send a final marker with null chunk — ignore here (closing handled below)
         } else {
@@ -2698,51 +2713,103 @@ export default function Chat() {
             direction: prev?.direction || "receiving",
           };
         });
+
+        // If this is the final chunk, close writer and create a chat-like file message (no system msg)
         if (final) {
           try {
-            const assembled = new Blob(bufEntry.chunks, {
-              type: bufEntry.chunks[0]?.type || "video/webm",
+            // close the file writer (best-effort)
+            try {
+              await writer.close();
+            } catch (e) {
+              console.warn("Error closing writer for offer", offerId, e);
+            }
+
+            // prepare metadata for the message from any stored meta (populated when offer arrived)
+            const meta = incomingBuffersRef.current[offerId]?.meta || {};
+            const fromPeerId = meta.from || null;
+            const fromName = fromPeerId
+              ? peerNamesMap[fromPeerId] || fromPeerId
+              : meta.fromName || "peer";
+
+            // Build a chat-style file message. NOTE: we do NOT set fileUrl here
+            // because the file was written to disk; the hydrate code or reading
+            // back from the file handle / IDB should produce a preview later.
+            const fileMsg = {
+              id: offerId,
+              type: "file",
+              from: fromName,
+              fromId: fromPeerId,
+              fromName,
+              fileName: meta.name || meta.filename || `file-${offerId}`,
+              fileSize:
+                meta.size ||
+                fileWriteStatusRef.current[offerId] ||
+                incomingBuffersRef.current[offerId]?.bytes ||
+                0 ||
+                0,
+              fileType: meta.mime || "application/octet-stream",
+              fileId: offerId,
+              // intentionally no fileUrl
+              ts: Date.now(),
+              deliveries: [],
+              reads: [],
+            };
+
+            // Remove writer handle and write status (we already closed)
+            try {
+              delete saveHandlesRef.current[offerId];
+            } catch (e) {}
+            try {
+              delete fileWriteStatusRef.current[offerId];
+            } catch (e) {}
+
+            // Insert the file message into chat (treat as normal message, not a system message)
+            setMessages((m) => {
+              const exists = m.find((x) => x.id === offerId);
+              if (exists) {
+                // update existing entry (e.g. if offer message was inserted earlier)
+                const next = m.map((x) =>
+                  x.id === offerId ? { ...x, ...fileMsg } : x
+                );
+                persistMessages(next);
+                return next;
+              }
+              const next = [...m, fileMsg];
+              persistMessages(next);
+              return next;
             });
 
-            // save blob persistently
-            await saveBlob(offerId, assembled);
-
-            // create preview url
-            const previewUrl = URL.createObjectURL(assembled);
-            createdUrlsRef.current.add(previewUrl);
-
-            setMessages((prev) => {
-              const exists = prev.find((x) => x.id === offerId);
-
-              if (exists) {
-                // update existing msg
-                return prev.map((x) =>
-                  x.id === offerId ? { ...x, fileUrl: previewUrl } : x
-                );
-              }
-
-              // add new file msg
-              return [
-                ...prev,
-                {
-                  id: offerId,
-                  type: "file",
-                  from: "peer",
-                  fromId: null,
-                  fromName: "peer",
-                  fileName: `video-${offerId}.webm`,
-                  fileSize: assembled.size,
-                  fileType: assembled.type,
-                  fileId: offerId,
-                  fileUrl: previewUrl,
-                  ts: Date.now(),
-                  deliveries: [],
-                  reads: [],
-                },
-              ];
+            // Update transfer UI and schedule cleanup
+            setTransfer(offerId, (prev) => ({
+              ...prev,
+              transferred:
+                prev?.total ?? prev?.transferred ?? fileMsg.fileSize ?? 0,
+              direction: "receiving",
+            }));
+            setTimeout(() => removeTransfer(offerId), 1200);
+          } catch (e) {
+            console.warn(
+              "Error handling final chunk with FileSystem writer for offer",
+              offerId,
+              e
+            );
+            setMessages((m) => {
+              const sys = {
+                id: `sys-file-error-${offerId}-${Date.now()}`,
+                from: "System",
+                text: `Error processing received file: ${e.message || e}`,
+                ts: Date.now(),
+                type: "system",
+              };
+              const next = [...m, sys];
+              persistMessages(next);
+              return next;
             });
           } finally {
-            delete incomingBuffersRef.current[offerId];
+            // cleanup any temporary buffer/meta we stored
+            try {
+              delete incomingBuffersRef.current[offerId];
+            } catch (e) {}
           }
         }
 
@@ -2968,31 +3035,57 @@ export default function Chat() {
     }
 
     // system messages
+    // file message delivered as a chat-like payload
     if (
       payloadOrText &&
       typeof payloadOrText === "object" &&
-      payloadOrText.type &&
-      payloadOrText.id &&
-      payloadOrText.type.toString().startsWith("system")
+      payloadOrText.type === "file" &&
+      payloadOrText.id
     ) {
-      const { type, text: txt, id } = payloadOrText;
-      if (seenSystemIdsRef.current.has(id)) return;
-      seenSystemIdsRef.current.add(id);
-      const msg = {
-        id,
-        from: "System",
-        text: txt,
-        ts: Date.now(),
-        type,
-        deliveries: [],
-        reads: [],
-      };
+      // treat like a message (persist fileUrl if present in payload)
       setMessages((m) => {
-        const next = [...m, msg];
+        const exists = m.find((x) => x.id === payloadOrText.id);
+        if (exists) {
+          const next = m.map((x) =>
+            x.id === payloadOrText.id ? { ...x, ...payloadOrText } : x
+          );
+          persistMessages(next);
+          return next;
+        }
+        const msgObj = {
+          ...payloadOrText,
+          // ensure fields exist
+          from: payloadOrText.fromName || payloadOrText.from || "peer",
+          deliveries: payloadOrText.deliveries || [],
+          reads: payloadOrText.reads || [],
+        };
+        const next = [...m, msgObj];
         persistMessages(next);
         return next;
       });
-      if (type === "system_public") maybeNotify("System", txt);
+
+      // notify user (same as chat)
+      maybeNotify(
+        payloadOrText.fromName || payloadOrText.from,
+        payloadOrText.fileName || "Video"
+      );
+
+      // auto-send ack_read if visible (same as chat)
+      try {
+        const origin = payloadOrText.from || payloadOrText.fromId || null;
+        const localId = getLocalPeerId() || myId;
+        if (
+          origin &&
+          origin !== localId &&
+          document.visibilityState === "visible"
+        ) {
+          try {
+            sendAckRead(payloadOrText.id, origin);
+          } catch (e) {}
+          addUniqueToMsgArray(payloadOrText.id, "reads", localId);
+        }
+      } catch (e) {}
+
       return;
     }
 
@@ -3703,13 +3796,14 @@ export default function Chat() {
     }
 
     // create local preview URL and add file message immediately
+    // inside onFileSelected, after you create previewUrl and msg
     try {
       const previewUrl = URL.createObjectURL(file);
       createdUrlsRef.current.add(previewUrl);
 
       const msg = {
         id: offerId,
-        type: "file",
+        type: "file", // keep as file so UI renders it as video bubble
         from: getLocalPeerId() || myId,
         fromName: username,
         fileName: file.name,
@@ -3721,11 +3815,21 @@ export default function Chat() {
         deliveries: [],
         reads: [getLocalPeerId() || myId],
       };
+
+      // add to local UI
       setMessages((m) => {
         const next = [...m, msg];
         persistMessages(next);
         return next;
       });
+
+      // send the message to peers as a chat-like message so they get notifications/read receipts
+      try {
+        // sendChat expects the same message shape as chat messages in your app
+        sendChat(msg);
+      } catch (e) {
+        console.warn("sendChat (file msg) failed", e);
+      }
     } catch (e) {
       console.warn("preview creation failed", e);
     }
@@ -3789,19 +3893,6 @@ export default function Chat() {
     } catch (e) {
       console.warn("offerFileToPeers failed", e);
     }
-
-    setMessages((m) => {
-      const sys = {
-        id: `sys-offer-${offerId}`,
-        from: "System",
-        text: `Offered file: ${file.name} (${Math.round(file.size / 1024)} KB)`,
-        ts: Date.now(),
-        type: "system",
-      };
-      const next = [...m, sys];
-      persistMessages(next);
-      return next;
-    });
 
     // cleanup if nobody accepts after 10s (keeps compatibility)
     setTimeout(() => {
