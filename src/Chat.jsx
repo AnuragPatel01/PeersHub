@@ -3343,17 +3343,32 @@ export default function Chat() {
       const fileType = m.fileType || "application/octet-stream";
       const isVideo = fileType.startsWith("video/");
       const url = m.fileUrl || null;
+
       return (
+        // use group so overlay can animate on hover/focus
         <div
           onClick={() => openCenterPreview(m)}
           key={`${m.id ?? m.ts}-${idx}`}
-          className={`p-2 rounded-2xl max-w-[50%] mb-2 cursor-pointer ${
-            isMe ? "ml-auto bg-blue-500 text-white" : "bg-white/100  text-black"
+          className={`group p-2 rounded-2xl max-w-[50%] mb-2 cursor-pointer ${
+            isMe ? "ml-auto bg-blue-500 text-white" : "bg-white/100 text-black"
           }`}
+          role="button"
+          tabIndex={0}
+          onKeyDown={(e) => {
+            if (e.key === "Enter" || e.key === " ") {
+              e.preventDefault();
+              openCenterPreview(m);
+            }
+          }}
+          aria-label={
+            isVideo
+              ? `Open video ${m.fileName || ""}`
+              : `Open file ${m.fileName || ""}`
+          }
         >
           <div className="text-xs font-bold flex items-center">
             <div className="flex-1">{isMe ? "You" : from}</div>
-            <div className="text-[10px] text-gray-700 /70 ml-2">{time}</div>
+            <div className="text-[10px] text-gray-700/70 ml-2">{time}</div>
             {isMe && renderStatusDot(m)}
           </div>
 
@@ -3366,23 +3381,61 @@ export default function Chat() {
             </div>
           )}
 
-          <div className="mt-2">
+          <div className="mt-2 flex items-center">
             {isVideo ? (
-              url ? (
-                <video
-                  controls
-                  playsInline
-                  src={url}
-                  className="w-32 h-32 rounded-full object-cover"
-                />
-              ) : (
-                <div className="w-32 h-32 rounded-full bg-black/30 flex items-center justify-center text-xs">
-                  Loading…
+              // wrapper is group-relative so overlay can be absolute inside it
+              <div className="relative rounded-full overflow-hidden w-24 h-24 sm:w-32 sm:h-32 flex-shrink-0 bg-black/10 flex items-center justify-center">
+                {url ? (
+                  <video
+                    controls
+                    playsInline
+                    src={url}
+                    className="w-full h-full object-cover"
+                    aria-label={m.fileName || "video message"}
+                  />
+                ) : (
+                  <div className="w-full h-full flex items-center justify-center bg-black/20 text-xs text-white/80">
+                    Loading…
+                  </div>
+                )}
+
+                {/* Subtle circular overlay with play icon */}
+                <div
+                  className="absolute inset-0 flex items-center justify-center pointer-events-none"
+                  aria-hidden="true"
+                >
+                  {/* overlay background (slightly visible always, clearer on hover) */}
+                  <div className="rounded-full w-10 h-10 sm:w-12 sm:h-12 bg-black/30 transition-opacity duration-200 opacity-60 group-hover:opacity-80 group-focus:opacity-80" />
+
+                  {/* play icon on top */}
+                  <svg
+                    className="absolute w-5 h-5 sm:w-6 sm:h-6 text-white drop-shadow-md transition-transform duration-200 transform scale-95 group-hover:scale-100 group-focus:scale-100"
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    stroke="currentColor"
+                    strokeWidth="1.5"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                    aria-hidden="true"
+                  >
+                    <polygon points="5 3 19 12 5 21 5 3" fill="currentColor" />
+                  </svg>
                 </div>
-              )
+
+                {/* Invisible focus ring for keyboard users */}
+                <span className="absolute -inset-1 rounded-full ring-2 ring-transparent group-focus-within:ring-white/30" />
+              </div>
             ) : (
               <div className="break-words">{m.fileName || m.text}</div>
             )}
+
+            {/* optional meta to the right of the circle */}
+            <div className="ml-3 text-xs text-gray-500">
+              <div>{m.fileName || ""}</div>
+              <div>
+                {m.fileSize ? `${Math.round(m.fileSize / 1024)} KB` : ""}
+              </div>
+            </div>
           </div>
         </div>
       );
