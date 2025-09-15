@@ -2260,7 +2260,6 @@
 // }
 
 // Round Video Streaming
-
 // src/components/Chat.jsx
 import "./App.css";
 import React, { useEffect, useState, useRef } from "react";
@@ -2346,6 +2345,7 @@ export default function Chat() {
   // center preview modal
   const [centerPreviewOpen, setCenterPreviewOpen] = useState(false);
   const [centerPreviewUrl, setCenterPreviewUrl] = useState(null);
+  const [centerPreviewIsMirrored, setCenterPreviewIsMirrored] = useState(false);
 
   // inside Chat() component, before renderMessage (or at top of function)
   function VideoThumb({ url, size = 96, className = "" }) {
@@ -3098,6 +3098,8 @@ export default function Chat() {
                 fileType: mime || "video/webm",
                 fileId: offerId,
                 fileUrl: previewUrl,
+                // New: preserve isMirrored if remote provided it in meta
+                isMirrored: meta.isMirrored || false,
                 ts: Date.now(),
                 deliveries: [],
                 reads: [],
@@ -3204,7 +3206,6 @@ export default function Chat() {
       return;
     }
 
-    // system messages
     // file message delivered as a chat-like payload
     if (
       payloadOrText &&
@@ -3810,16 +3811,8 @@ export default function Chat() {
         minute: "2-digit",
       });
 
-      // detect mirrored marker in the filename (preferred) or fallback to a substring in the URL
-      const isMirrored =
-        Boolean(
-          m.fileName && m.fileName.toLowerCase().endsWith(".mirrored.webm")
-        ) ||
-        Boolean(
-          !m.fileName &&
-            typeof m.fileUrl === "string" &&
-            m.fileUrl.toLowerCase().includes(".mirrored.webm")
-        );
+      // Use explicit isMirrored flag if present; fallback to false
+      const isMirrored = Boolean(m.isMirrored);
 
       return (
         <div
@@ -3936,7 +3929,7 @@ export default function Chat() {
         {m.replyTo && (
           <div className="mt-2 mb-2 p-2 rounded border border-white/5 text-xs text-gray-600 bg-gray-300">
             <strong className="text-xs text-blue-400">
-              Reply to {m.replyTo.from}:
+              Reply to {m.replyTo.from}
             </strong>{" "}
             {m.replyTo.text}
           </div>
@@ -3983,6 +3976,11 @@ export default function Chat() {
       const previewUrl = URL.createObjectURL(file);
       createdUrlsRef.current.add(previewUrl);
 
+      // Determine mirrored flag explicitly from filename (set by recorder) — this is reliable now
+      const isMirrored = Boolean(
+        file.name && file.name.toLowerCase().endsWith(".mirrored.webm")
+      );
+
       const msg = {
         id: offerId,
         type: "file", // keep as file so UI renders it as video bubble
@@ -3993,6 +3991,7 @@ export default function Chat() {
         fileType: file.type || "application/octet-stream",
         fileId: offerId,
         fileUrl: previewUrl,
+        isMirrored, // NEW: explicit mirror flag
         ts: Date.now(),
         deliveries: [],
         reads: [getLocalPeerId() || myId],
@@ -4044,6 +4043,8 @@ export default function Chat() {
       size: file.size,
       mime: file.type,
       from: getLocalPeerId() || myId,
+      // include isMirrored in offer metadata so remote clients can preserve mirror flag
+      isMirrored: Boolean(file.name && file.name.toLowerCase().endsWith(".mirrored.webm")),
     };
     try {
       offerFileToPeers(meta);
@@ -4067,7 +4068,6 @@ export default function Chat() {
   };
 
   // helper to open center preview for a message (file message)
-  // helper to open center preview for a message (file message)
   const openCenterPreview = async (msg) => {
     try {
       // If message references an ID in IDB, prefer to load the blob fresh (this avoids using a revoked URL)
@@ -4088,6 +4088,7 @@ export default function Chat() {
             });
 
             setCenterPreviewUrl(url);
+            setCenterPreviewIsMirrored(Boolean(msg.isMirrored));
             setCenterPreviewOpen(true);
             return;
           }
@@ -4100,6 +4101,7 @@ export default function Chat() {
       // fallback: if a runtime fileUrl is present on the message, use it
       if (msg.fileUrl) {
         setCenterPreviewUrl(msg.fileUrl);
+        setCenterPreviewIsMirrored(Boolean(msg.isMirrored));
         setCenterPreviewOpen(true);
         return;
       }
@@ -4350,6 +4352,7 @@ export default function Chat() {
     // Do NOT revoke the URL here. We will revoke all created URLs on unmount cleanup.
     setCenterPreviewOpen(false);
     setCenterPreviewUrl(null);
+    setCenterPreviewIsMirrored(false);
   };
 
   // wire up progress/completion callbacks (already done above)
@@ -4577,8 +4580,7 @@ export default function Chat() {
             </button>
 
             <div className="relative bg-black rounded-xl overflow-hidden">
-              {centerPreviewUrl &&
-              centerPreviewUrl.endsWith(".mirrored.webm") ? (
+              {centerPreviewIsMirrored ? (
                 <MirroredVideoCanvas
                   src={centerPreviewUrl}
                   autoPlay={true}
@@ -4586,6 +4588,7 @@ export default function Chat() {
                   onClose={() => {
                     setCenterPreviewOpen(false);
                     setCenterPreviewUrl(null);
+                    setCenterPreviewIsMirrored(false);
                   }}
                 />
               ) : (
