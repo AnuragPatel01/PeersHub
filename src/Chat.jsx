@@ -3640,6 +3640,17 @@ export default function Chat() {
         minute: "2-digit",
       });
 
+      // detect mirrored marker in the filename (preferred) or fallback to a substring in the URL
+      const isMirrored =
+        Boolean(
+          m.fileName && m.fileName.toLowerCase().endsWith(".mirrored.webm")
+        ) ||
+        Boolean(
+          !m.fileName &&
+            typeof m.fileUrl === "string" &&
+            m.fileUrl.toLowerCase().includes(".mirrored.webm")
+        );
+
       return (
         <div
           onClick={() => openCenterPreview(m)}
@@ -3675,89 +3686,60 @@ export default function Chat() {
           <div className="mt-2 flex items-center justify-center">
             {isVideo && url ? (
               <div
-                className="mt-2 flex items-center justify-center"
-                aria-hidden="true"
+                className="relative rounded-full overflow-hidden w-24 h-24 sm:w-32 sm:h-32 flex-shrink-0 bg-black/10 flex items-center justify-center"
                 style={{
-                  width: "100%",
-                  display: "flex",
-                  justifyContent: "center",
+                  borderRadius: "50%",
+                  width: 96,
+                  height: 96,
+                  minWidth: 96,
+                  minHeight: 96,
                 }}
               >
-                {/* Outer circular bubble (acts as the message bubble) */}
-                <div
-                  className={`relative rounded-full overflow-hidden flex-shrink-0`}
+                <video
+                  src={url}
+                  muted
+                  autoPlay
+                  loop
+                  playsInline
+                  controls={false}
+                  preload="metadata"
                   style={{
-                    // size of the circular bubble
-                    width: 96,
-                    height: 96,
-                    minWidth: 96,
-                    minHeight: 96,
-                    // bubble background: use same color as message bubble
-                    background: isMe ? undefined : "transparent",
-                    // remove inner spacing (visual zero padding)
-                    padding: 0,
-                    // we keep the message bubble shadow / border implicitly by parent bg,
-                    // if you want an explicit border for non-sender bubbles, add it here:
-                    // border: isMe ? 'none' : '1px solid rgba(0,0,0,0.04)'
+                    width: "100%",
+                    height: "100%",
+                    objectFit: "cover",
+                    borderRadius: "50%",
+                    display: "block",
                   }}
-                >
-                  {/* video fills whole circle */}
-                  <video
-                    src={url}
-                    muted
-                    autoPlay
-                    loop
-                    playsInline
-                    controls={false}
-                    preload="metadata"
-                    className="w-full h-full object-cover"
-                    style={{
-                      display: "block",
-                    }}
-                    onLoadedMetadata={(e) => {
-                      try {
-                        if (e.target && e.target.currentTime === 0) {
-                          e.target.currentTime = 0.001;
-                        }
-                      } catch (err) {}
-                    }}
-                  />
+                  className={`block pointer-events-none ${
+                    isMirrored ? "transform scale-x-[-1]" : ""
+                  }`}
+                  onLoadedMetadata={(e) => {
+                    try {
+                      if (e.target && e.target.currentTime === 0) {
+                        e.target.currentTime = 0.001;
+                      }
+                    } catch (err) {}
+                  }}
+                />
 
-                  {/* subtle play overlay center (purely decorative) */}
-                  <div
-                    className="absolute inset-0 flex items-center justify-center pointer-events-none"
+                {/* subtle play overlay */}
+                <div
+                  className="absolute inset-0 flex items-center justify-center pointer-events-none"
+                  aria-hidden="true"
+                >
+                  <div className="rounded-full w-10 h-10 sm:w-12 sm:h-12 bg-black/30 transition-opacity duration-200 opacity-60 group-hover:opacity-80" />
+                  <svg
+                    className="absolute w-5 h-5 sm:w-6 sm:h-6 text-white drop-shadow-md transition-transform duration-200 transform scale-95 group-hover:scale-100"
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    stroke="currentColor"
+                    strokeWidth="1.2"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
                     aria-hidden="true"
                   >
-                    <div className="rounded-full w-10 h-10 bg-black/30 opacity-70" />
-                    <svg
-                      className="absolute w-6 h-6 text-white"
-                      viewBox="0 0 24 24"
-                      fill="none"
-                      stroke="currentColor"
-                      strokeWidth="1.2"
-                      strokeLinecap="round"
-                      strokeLinejoin="round"
-                    >
-                      <polygon
-                        points="5 3 19 12 5 21 5 3"
-                        fill="currentColor"
-                      />
-                    </svg>
-                  </div>
-
-                  {/* small read/delivery dot in the top-right of the circle (if you want) */}
-                  {isMe && (
-                    <span
-                      className="absolute -top-2 -right-2 w-3 h-3 rounded-full"
-                      style={{
-                        background:
-                          (m.reads || []).length > (peers?.length || 0)
-                            ? "green"
-                            : "#f97316", // fallback orange/red indicator
-                        boxShadow: "0 0 0 3px rgba(255,255,255,0.55)",
-                      }}
-                    />
-                  )}
+                    <polygon points="5 3 19 12 5 21 5 3" fill="currentColor" />
+                  </svg>
                 </div>
               </div>
             ) : (
@@ -4400,33 +4382,37 @@ export default function Chat() {
               </button> */}
             </div>
 
-              {/* Text input - flex-1 takes remaining space */}
-              <div className="relative flex-1">
-                <input
-                  value={text}
-                  onChange={(e) => setText(e.target.value)}
-                  placeholder="Type a message..."
-                  className="w-full p-3 pr-12 bg-white/10 placeholder-blue-300 text-blue-500 font-mono rounded-3xl border-2 border-white/20 focus:border-blue-400 focus:outline-none transition-colors duration-200"
-                  onKeyDown={(e) => {
-                    if (e.key === "Enter") send();
-                  }}
-                />
+            {/* Text input - flex-1 takes remaining space */}
+            <div className="relative flex-1">
+              <input
+                value={text}
+                onChange={(e) => setText(e.target.value)}
+                placeholder="Type a message..."
+                className="w-full p-3 pr-12 bg-white/10 placeholder-blue-300 text-blue-500 font-mono rounded-3xl border-2 border-white/20 focus:border-blue-400 focus:outline-none transition-colors duration-200"
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") send();
+                }}
+              />
 
-                {/* Send button inside input */}
-                <button
-                  // onClick={send}
-                  className="absolute right-2 top-1/2 -translate-y-1/2 w-8 h-8 flex items-center justify-center rounded-full text-blue-500 hover:text-blue-600 transition-all duration-200"
-                  // title="Send"  
-                  aria-label="Send message"
+              {/* Send button inside input */}
+              <button
+                // onClick={send}
+                className="absolute right-2 top-1/2 -translate-y-1/2 w-8 h-8 flex items-center justify-center rounded-full text-blue-500 hover:text-blue-600 transition-all duration-200"
+                // title="Send"
+                aria-label="Send message"
+              >
+                <svg
+                  onClick={send}
+                  xmlns="http://www.w3.org/2000/svg"
+                  viewBox="0 0 24 24"
+                  fill="currentColor"
+                  className="absolute right-3 top-1/2 -translate-y-1/2 w-8 h-8 text-blue-500 cursor-pointer"
+                  title="Send"
                 >
-                <svg  onClick={send} xmlns="http://www.w3.org/2000/svg" 
-                viewBox="0 0 24 24" 
-                fill="currentColor" 
-                className="absolute right-3 top-1/2 -translate-y-1/2 w-8 h-8 text-blue-500 cursor-pointer" 
-                title="Send" > 
-                <path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z" /> </svg>
-                </button>
-              </div>
+                  <path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z" />{" "}
+                </svg>
+              </button>
+            </div>
           </div>
         </footer>
       </div>
@@ -4458,13 +4444,18 @@ export default function Chat() {
             </button>
 
             {/* Video container */}
-            <div className="relative bg-black rounded-xl overflow-hidden shadow-2xl">
+            <div className="relative bg-black rounded-xl overflow-hidden">
               <video
                 src={centerPreviewUrl}
                 controls
                 autoPlay
                 playsInline
-                className="w-full h-auto max-h-[80vh] object-contain"
+                className={`${
+                  centerPreviewUrl &&
+                  centerPreviewUrl.toLowerCase().includes(".mirrored.webm")
+                    ? "transform scale-x-[-1]"
+                    : ""
+                } w-full h-auto max-h-[80vh] object-contain`}
                 onLoadedMetadata={(e) => {
                   // Auto-focus the video for better UX
                   e.target.focus();
