@@ -2793,42 +2793,72 @@ export default function Chat() {
       // when final chunk arrives, assemble Blob, persist, and create message
       if (final) {
         try {
-          const assembled = new Blob(bufEntry.chunks, {
-            type: bufEntry.chunks[0]?.type || "application/octet-stream",
-          });
-          // persist into IndexedDB using your saveBlob helper so it survives refresh
+          const bufEntry = incomingBuffersRef.current[offerId] || {
+            chunks: [],
+            bytes: 0,
+          };
+          // Prefer metadata from buffer.offer (populated when offer arrived) if present
+          const meta = bufEntry.meta || {};
+
+          // Choose mime: prefer meta.mime -> first chunk type -> guess from name -> fallback to video/webm or octet-stream
+          let mime =
+            meta.mime ||
+            bufEntry.chunks[0]?.type ||
+            (meta.name && meta.name.toLowerCase().endsWith(".webm")
+              ? "video/webm"
+              : null) ||
+            null;
+
+          // If it's still unknown, and chunks appear to be video-like, fall back to video/webm
+          if (!mime) {
+            mime = "video/webm";
+          }
+
+          // Assemble blob with chosen mime
+          const assembled = new Blob(bufEntry.chunks, { type: mime });
+
+          // Persist into IndexedDB (best-effort)
           try {
             await saveBlob(offerId, assembled);
           } catch (e) {
             console.warn("saveBlob (fallback) failed for", offerId, e);
           }
 
-          // create a preview URL and message for UI
+          // create preview URL and message for UI
           try {
             const previewUrl = URL.createObjectURL(assembled);
-            // register created URL so we can revoke it later
             createdUrlsRef.current.add(previewUrl);
 
+            // update or insert message
             setMessages((m) => {
               // avoid duplicating message if already present
               const exists = m.find((x) => x.id === offerId);
               if (exists) {
-                // update fileUrl if missing
                 const next = m.map((x) =>
-                  x.id === offerId ? { ...x, fileUrl: previewUrl } : x
+                  x.id === offerId
+                    ? {
+                        ...x,
+                        fileUrl: previewUrl,
+                        fileType: mime,
+                        fileName: x.fileName || meta.name || `file-${offerId}`,
+                        fileSize:
+                          x.fileSize || assembled.size || meta.size || 0,
+                      }
+                    : x
                 );
                 persistMessages(next);
                 return next;
               }
+
               const sysMsg = {
                 id: offerId,
                 type: "file",
                 from: "peer",
-                fromId: null,
-                fromName: "peer",
-                fileName: `file-${offerId}`,
-                fileSize: assembled.size || 0,
-                fileType: assembled.type || "video/webm",
+                fromId: meta.from || null,
+                fromName: meta.fromName || meta.from || "peer",
+                fileName: meta.name || `file-${offerId}`,
+                fileSize: assembled.size || meta.size || 0,
+                fileType: mime || "video/webm",
                 fileId: offerId,
                 fileUrl: previewUrl,
                 ts: Date.now(),
@@ -2972,6 +3002,7 @@ export default function Chat() {
       const offerId =
         offer.id ||
         `offer-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+
       setIncomingFileOffers((s) => {
         const copy = { ...s };
         copy[offerId] = {
@@ -2979,17 +3010,29 @@ export default function Chat() {
           expiresAt: Date.now() + 10000,
           origin: offer.from,
         };
+
+        // 🔑 Ensure we have a buffer entry with metadata
+        incomingBuffersRef.current[offerId] = incomingBuffersRef.current[
+          offerId
+        ] || {
+          chunks: [],
+          bytes: 0,
+          meta: offer, // <-- attach original offer metadata
+        };
+
         return copy;
       });
 
+      // cleanup expired offer after 10s
       setTimeout(() => {
         setIncomingFileOffers((s) => {
           const copy = { ...s };
-          if (!copy[offerId]) return s;
-          try {
-            respondToFileOffer(offerId, offer.from, false);
-          } catch (e) {}
-          delete copy[offerId];
+          if (copy[offerId] && copy[offerId].expiresAt <= Date.now()) {
+            try {
+              respondToFileOffer(offerId, offer.from, false);
+            } catch (e) {}
+            delete copy[offerId];
+          }
           return copy;
         });
       }, 10000);
