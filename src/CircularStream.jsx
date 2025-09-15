@@ -232,12 +232,8 @@ export default function CircularStream({
         facingMode === "user"
           ? `${nameBase}.mirrored.webm`
           : `${nameBase}.webm`;
-      const suffix = facingMode === "user" ? ".mirrored.webm" : ".webm";
-      const file = new File(
-        [recordedBlob],
-        `video-message-${Date.now()}${suffix}`,
-        { type: "video/webm" }
-      );
+      const suffix = facingMode === 'user' ? '.mirrored.webm' : '.webm';
+const file = new File([recordedBlob], `video-message-${Date.now()}${suffix}`, { type: "video/webm" });
 
       await (onFileRecorded ? onFileRecorded(file) : Promise.resolve());
       handleClose();

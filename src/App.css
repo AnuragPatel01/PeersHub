@@ -42,3 +42,15 @@
 }
 
 
+/* Add to App.css (global) */
+.video-mirrored {
+  transform: scaleX(-1);
+  -webkit-transform: scaleX(-1);
+}
+
+/* Ensure fullscreen uses the same transform (some browsers) */
+:fullscreen .video-mirrored,
+:-webkit-full-screen .video-mirrored {
+  transform: scaleX(-1);
+  -webkit-transform: scaleX(-1);
+}

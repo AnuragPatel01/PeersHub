@@ -2468,6 +2468,176 @@ export default function Chat() {
       );
     }
 
+    // Place this above your Chat component or inside it (but before usage)
+    function MirroredVideoCanvas({
+      src,
+      autoPlay = true,
+      controls = true,
+      className = "",
+      onClose,
+    }) {
+      const canvasRef = React.useRef(null);
+      const hiddenVideoRef = React.useRef(null);
+      const rafRef = React.useRef(null);
+      const playingRef = React.useRef(false);
+      const [playing, setPlaying] = React.useState(Boolean(autoPlay));
+      const [muted] = React.useState(false);
+
+      useEffect(() => {
+        const vid = hiddenVideoRef.current;
+        const canvas = canvasRef.current;
+        if (!vid || !canvas) return;
+
+        let ctx = canvas.getContext("2d");
+        let mounted = true;
+
+        // Ensure video is ready
+        const setup = async () => {
+          try {
+            // load metadata so we know dims
+            await new Promise((resolve, reject) => {
+              if (vid.readyState >= 1) return resolve();
+              vid.onloadedmetadata = () => resolve();
+              vid.onerror = (e) => reject(e);
+            });
+
+            // match canvas to video aspect (fit to container with CSS will scale)
+            canvas.width = vid.videoWidth || 640;
+            canvas.height = vid.videoHeight || 480;
+
+            const draw = () => {
+              if (!mounted) return;
+              if (!ctx) ctx = canvas.getContext("2d");
+              try {
+                // draw mirrored horizontally
+                ctx.save();
+                ctx.clearRect(0, 0, canvas.width, canvas.height);
+                ctx.scale(-1, 1);
+                ctx.drawImage(
+                  vid,
+                  -canvas.width,
+                  0,
+                  canvas.width,
+                  canvas.height
+                );
+                ctx.restore();
+              } catch (e) {
+                // ignore transient draw errors
+              }
+              rafRef.current = requestAnimationFrame(draw);
+            };
+
+            if (autoPlay) {
+              try {
+                await vid.play();
+                playingRef.current = true;
+                setPlaying(true);
+              } catch (e) {
+                // autoplay may fail, leave paused
+                playingRef.current = false;
+                setPlaying(false);
+              }
+            }
+
+            // start draw loop if playing (we'll keep drawing even if paused so thumbnail shows)
+            rafRef.current = requestAnimationFrame(draw);
+          } catch (e) {
+            console.warn("MirroredVideoCanvas setup failed", e);
+          }
+        };
+
+        setup();
+
+        return () => {
+          mounted = false;
+          try {
+            if (rafRef.current) cancelAnimationFrame(rafRef.current);
+          } catch (e) {}
+        };
+      }, [src, autoPlay]);
+
+      // play / pause handlers: control both hidden video and rendering
+      const togglePlay = async () => {
+        const vid = hiddenVideoRef.current;
+        if (!vid) return;
+        if (playingRef.current) {
+          try {
+            vid.pause();
+          } catch (e) {}
+          playingRef.current = false;
+          setPlaying(false);
+        } else {
+          try {
+            await vid.play();
+            playingRef.current = true;
+            setPlaying(true);
+          } catch (e) {
+            console.warn("play failed", e);
+          }
+        }
+      };
+
+      // request fullscreen on canvas
+      const goFullscreen = async () => {
+        const el = canvasRef.current;
+        if (!el) return;
+        try {
+          if (el.requestFullscreen) await el.requestFullscreen();
+          else if (el.webkitRequestFullscreen) el.webkitRequestFullscreen();
+          else if (el.msRequestFullscreen) el.msRequestFullscreen();
+        } catch (e) {
+          console.warn("requestFullscreen failed", e);
+        }
+      };
+
+      return (
+        <div className={`w-full h-auto ${className}`}>
+          {/* Hidden video drives audio + decoding */}
+          <video
+            ref={hiddenVideoRef}
+            src={src}
+            playsInline
+            muted={muted}
+            style={{ display: "none" }}
+            preload="metadata"
+          />
+          {/* Visible canvas showing mirrored frames */}
+          <div className="relative w-full bg-black">
+            <canvas
+              ref={canvasRef}
+              className="w-full h-auto block object-contain"
+              aria-label="Mirrored video preview"
+            />
+            {/* simple control overlay */}
+            <div className="absolute left-3 bottom-3 flex gap-2 items-center">
+              <button
+                onClick={togglePlay}
+                className="px-3 py-1 rounded bg-black/40 text-white text-sm"
+                aria-label={playing ? "Pause" : "Play"}
+              >
+                {playing ? "Pause" : "Play"}
+              </button>
+              <button
+                onClick={goFullscreen}
+                className="px-3 py-1 rounded bg-black/40 text-white text-sm"
+                aria-label="Fullscreen"
+              >
+                Fullscreen
+              </button>
+              {onClose && (
+                <button
+                  onClick={onClose}
+                  className="px-3 py-1 rounded bg-black/40 text-white text-sm"
+                >
+                  Close
+                </button>
+              )}
+            </div>
+          </div>
+        </div>
+      );
+    }
+
     // final fallback: show the video element clipped to circle (may show black frame)
     return (
       <video
@@ -3655,8 +3825,8 @@ export default function Chat() {
         <div
           onClick={() => openCenterPreview(m)}
           key={`${m.id ?? m.ts}-${idx}`}
-          className={`group p-2 rounded-2xl max-w-[50%] mb-2 cursor-pointer ${
-            isMe ? "ml-auto bg-blue-500 text-white" : "bg-white/100 text-black"
+          className={`group p-2 rounded-2xl max-w-[50%] mb-5 cursor-pointer scale-125 ${
+            isMe ? "ml-auto text-blue-500" :" text-black"
           }`}
           role="button"
           tabIndex={0}
@@ -4443,24 +4613,30 @@ export default function Chat() {
               </svg>
             </button>
 
-            {/* Video container */}
             <div className="relative bg-black rounded-xl overflow-hidden">
-              <video
-                src={centerPreviewUrl}
-                controls
-                autoPlay
-                playsInline
-                className={`${
-                  centerPreviewUrl &&
-                  centerPreviewUrl.toLowerCase().includes(".mirrored.webm")
-                    ? "transform scale-x-[-1]"
-                    : ""
-                } w-full h-auto max-h-[80vh] object-contain`}
-                onLoadedMetadata={(e) => {
-                  // Auto-focus the video for better UX
-                  e.target.focus();
-                }}
-              />
+              {centerPreviewUrl &&
+              centerPreviewUrl.endsWith(".mirrored.webm") ? (
+                <MirroredVideoCanvas
+                  src={centerPreviewUrl}
+                  autoPlay={true}
+                  className="max-h-[80vh]"
+                  onClose={() => {
+                    setCenterPreviewOpen(false);
+                    setCenterPreviewUrl(null);
+                  }}
+                />
+              ) : (
+                <video
+                  src={centerPreviewUrl}
+                  controls
+                  autoPlay
+                  playsInline
+                  className="w-full h-auto max-h-[80vh] object-contain"
+                  onLoadedMetadata={(e) => {
+                    e.target.focus();
+                  }}
+                />
+              )}
             </div>
           </div>
 
