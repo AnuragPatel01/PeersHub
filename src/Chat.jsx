@@ -3859,10 +3859,10 @@ export default function Chat() {
                 className="relative rounded-full overflow-hidden w-24 h-24 sm:w-32 sm:h-32 flex-shrink-0 bg-black/10 flex items-center justify-center"
                 style={{
                   borderRadius: "50%",
-                  width: 170,
-                  height: 170,
-                  minWidth: 170,
-                  minHeight: 170,
+                  width: 150,
+                  height: 150,
+                  minWidth: 150,
+                  minHeight: 150,
                 }}
               >
                 <video
