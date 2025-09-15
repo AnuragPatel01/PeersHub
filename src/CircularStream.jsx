@@ -35,25 +35,41 @@ export default function CircularStream({
   const drawRafRef = useRef(null);
   const canvasStreamRef = useRef(null);
 
+  const lastFrameImageRef = useRef(null); // stores ImageBitmap of last good frame
+  const waitingForNewCameraRef = useRef(false);
+
   // --- Add helper to ensure driver video and canvas exist ---
+
   const ensureCapturePipeline = () => {
-    // create driver video that will hold the camera stream (off-DOM or hidden DOM element)
+    // create driver video that will hold the camera stream (hidden but kept in DOM so decoding happens)
     if (!renderVideoRef.current) {
       const v = document.createElement("video");
       v.playsInline = true;
       v.muted = true;
       v.autoplay = true;
-      v.style.display = "none";
+      // keep it in DOM but offscreen + invisible so browsers keep decoding
+      v.style.position = "fixed";
+      v.style.left = "-9999px";
+      v.style.width = "1px";
+      v.style.height = "1px";
+      v.style.opacity = "0";
+      v.style.pointerEvents = "none";
       renderVideoRef.current = v;
-      document.body.appendChild(v); // append hidden so decoding works on all browsers
+      document.body.appendChild(v);
     }
 
-    // create an in-memory canvas used for capture
+    // create an in-DOM canvas used for capture (must NOT be display:none)
     if (!captureCanvasRef.current) {
       const c = document.createElement("canvas");
-      c.style.display = "none";
+      // keep it offscreen but renderable
+      c.style.position = "fixed";
+      c.style.left = "-9999px";
+      c.style.width = "160px"; // CSS size (we use .width/.height for actual pixel size)
+      c.style.height = "90px";
+      c.style.opacity = "0";
+      c.style.pointerEvents = "none";
       captureCanvasRef.current = c;
-      document.body.appendChild(c); // append hidden
+      document.body.appendChild(c);
     }
   };
 
@@ -116,6 +132,7 @@ export default function CircularStream({
   };
 
   // inside CircularStream component, after stopRecording or near handleClose
+
   const cleanupCapturePipeline = () => {
     try {
       if (renderVideoRef.current) {
@@ -140,6 +157,12 @@ export default function CircularStream({
         captureCanvasRef.current = null;
       }
     } catch (e) {}
+
+    try {
+      if (lastFrameImageRef.current && lastFrameImageRef.current.close)
+        lastFrameImageRef.current.close();
+    } catch (e) {}
+    lastFrameImageRef.current = null;
   };
 
   useEffect(() => {
@@ -153,16 +176,57 @@ export default function CircularStream({
   // --- New: replace video track seamlessly while recording ---
   // This attempts to acquire a new video track with the requested facingMode
   // and swap it into the existing MediaStream so MediaRecorder keeps recording.
+
+  const waitForDriverPlaying = (driver, timeout = 1200) =>
+    new Promise((resolve) => {
+      if (!driver) return resolve(false);
+      if (driver.readyState >= 3 && !driver.paused && !driver.ended)
+        return resolve(true);
+
+      let settled = false;
+      const onPlaying = () => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        resolve(true);
+      };
+      const onError = () => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        resolve(false);
+      };
+      const cleanup = () => {
+        driver.removeEventListener("playing", onPlaying);
+        driver.removeEventListener("canplay", onPlaying);
+        driver.removeEventListener("error", onError);
+      };
+      driver.addEventListener("playing", onPlaying);
+      driver.addEventListener("canplay", onPlaying);
+      driver.addEventListener("error", onError);
+
+      // fallback timeout
+      setTimeout(() => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        // If readyState is still low we consider it failed
+        resolve(driver.readyState >= 2);
+      }, timeout);
+    });
+
   const replaceVideoTrack = async (newFacing) => {
     try {
       if (!streamRef.current) {
-        // no active stream — fallback to startPreview which will set streamRef
         setFacingMode(newFacing);
         await startPreview();
         return;
       }
 
-      // Acquire a new video-only stream for the requested facing mode
+      // Start waiting mode so draw loop will use last frame
+      waitingForNewCameraRef.current = true;
+
+      // Acquire new video-only stream
       const constraints = {
         video: {
           facingMode: newFacing,
@@ -175,39 +239,46 @@ export default function CircularStream({
       const newVideoTrack = tmpStream.getVideoTracks()[0];
       if (!newVideoTrack) {
         tmpStream.getTracks().forEach((t) => t.stop());
+        waitingForNewCameraRef.current = false;
         return;
       }
 
-      // Collect current video tracks (we will remove them after adding new)
+      // Keep reference to old video tracks
       const oldVideoTracks = streamRef.current.getVideoTracks();
 
-      // Add the new track to the existing stream object (this does not recreate the stream)
+      // Add newVideoTrack to existing streamRef (so MediaRecorder unaffected)
       try {
         streamRef.current.addTrack(newVideoTrack);
       } catch (e) {
-        // some browsers can be strict; still proceed to set srcObject below
         console.warn("addTrack threw", e);
       }
 
-      // Make sure the <video> element uses the same streamRef (it should already)
+      // Attach the updated stream to hidden driver and visible preview
+      if (renderVideoRef.current) {
+        renderVideoRef.current.srcObject = streamRef.current;
+        // attempt to play (some browsers require user gesture; ignore errors)
+        renderVideoRef.current.play().catch(() => {});
+      }
       if (videoRef.current) {
-        try {
-          // reassigning srcObject triggers the player to pick up the new track if needed
-          videoRef.current.srcObject = null;
-          videoRef.current.srcObject = streamRef.current;
-          videoRef.current.play && videoRef.current.play().catch(() => {});
-        } catch (e) {}
+        videoRef.current.srcObject = streamRef.current;
+        videoRef.current.play().catch(() => {});
       }
 
-      // Remove old video tracks from the stream _without_ stopping them immediately.
-      // We'll stop them after a tiny delay so MediaRecorder doesn't see a sudden 'ended' state.
+      // Wait for the driver to produce frames
+      const ok = await waitForDriverPlaying(renderVideoRef.current, 1500);
+
+      if (!ok) {
+        // if driver couldn't start quickly, fall back to short delay, but still proceed
+        await new Promise((r) => setTimeout(r, 200));
+      }
+
+      // Now it's safe to remove old video tracks from the stream (and stop them)
       for (const t of oldVideoTracks) {
         try {
           streamRef.current.removeTrack(t);
         } catch (e) {}
       }
-
-      // Delay stopping the old tracks to avoid killing MediaRecorder on flaky browsers
+      // stop old tracks after very small delay to be extra-safe
       setTimeout(() => {
         try {
           for (const t of oldVideoTracks) {
@@ -216,36 +287,188 @@ export default function CircularStream({
             } catch (e) {}
           }
         } catch (e) {}
-      }, 150); // 150ms — adjust between 50..300ms depending on device reliability
+      }, 80);
 
-      // cleanup tmpStream audio tracks (if any) so they don't leak
+      // cleanup temporary getUserMedia audio tracks (if present on tmpStream)
       try {
         tmpStream.getAudioTracks().forEach((t) => t.stop());
       } catch (e) {}
 
-      // update facingMode state for UI mirroring
+      // done waiting — resume drawing from driver frames
+      waitingForNewCameraRef.current = false;
       setFacingMode(newFacing);
     } catch (e) {
       console.warn("replaceVideoTrack failed", e);
+      waitingForNewCameraRef.current = false;
       setError(e.message || String(e));
     }
   };
-  // Updated flip handler — if currently recording, swap track seamlessly; otherwise rely on normal flow
+  // wait up to timeout ms for the <video> to have at least one decoded frame
+  const waitForVideoFrame = (videoEl, timeout = 2000) =>
+    new Promise((resolve) => {
+      if (!videoEl) return resolve(false);
+      // If browser exposes getVideoPlaybackQuality / requestVideoFrameCallback we can detect frames
+      let settled = false;
+      const done = (ok) => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        resolve(Boolean(ok));
+      };
+      const onCanPlay = () => {
+        // some browsers show canplay before decoded frame; give a short tick
+        setTimeout(() => {
+          // if we have width/height, likely a decoded frame is available
+          if (videoEl.videoWidth > 0 && videoEl.videoHeight > 0) done(true);
+          else done(false);
+        }, 80);
+      };
+      const onPlaying = () => done(true);
+      const onError = () => done(false);
+
+      const cleanup = () => {
+        videoEl.removeEventListener("playing", onPlaying);
+        videoEl.removeEventListener("canplay", onCanPlay);
+        videoEl.removeEventListener("error", onError);
+      };
+
+      videoEl.addEventListener("playing", onPlaying);
+      videoEl.addEventListener("canplay", onCanPlay);
+      videoEl.addEventListener("error", onError);
+
+      // If requestVideoFrameCallback available, that's best
+      if (videoEl.requestVideoFrameCallback) {
+        try {
+          let called = false;
+          const cb = () => {
+            if (called) return;
+            called = true;
+            done(true);
+          };
+          videoEl.requestVideoFrameCallback(cb);
+        } catch (e) {}
+      }
+
+      // fallback timeout
+      setTimeout(() => {
+        if (!settled) {
+          cleanup();
+          // consider it failed if no dimensions
+          resolve(videoEl.videoWidth > 0 && videoEl.videoHeight > 0);
+        }
+      }, timeout);
+    });
+
   const handleFlipCamera = async () => {
     const next = facingMode === "user" ? "environment" : "user";
+    console.debug("[flip] requested ->", next);
+
     try {
-      if (recording) {
-        // swap the video track on-the-fly while keeping MediaRecorder attached
-        await replaceVideoTrack(next);
-      } else {
-        // not recording: normal preview restart flow
-        stopPreview();
-        setFacingMode(next);
-        await startPreview();
+      // get a fresh camera stream for the new facing mode (video only)
+      const constraints = {
+        video: {
+          facingMode: next,
+          width: { ideal: 1280 },
+          height: { ideal: 720 },
+        },
+        audio: false,
+      };
+
+      const newCam = await navigator.mediaDevices.getUserMedia(constraints);
+      if (!newCam) {
+        console.warn("[flip] getUserMedia returned null");
+        return;
       }
-    } catch (e) {
-      console.warn("handleFlipCamera failed", e);
-      setFacingMode(next);
+      console.debug(
+        "[flip] got newCam",
+        newCam.getVideoTracks().map((t) => t.label || t.id)
+      );
+
+      // create a new fresh hidden driver video element (avoid reusing old driver)
+      const newDriver = document.createElement("video");
+      newDriver.playsInline = true;
+      newDriver.muted = true;
+      newDriver.autoplay = true;
+      Object.assign(newDriver.style, {
+        position: "fixed",
+        left: "-9999px",
+        width: "1px",
+        height: "1px",
+        opacity: "0",
+        pointerEvents: "none",
+      });
+      document.body.appendChild(newDriver);
+
+      // point the driver at the newly acquired camera stream
+      newDriver.srcObject = newCam;
+      try {
+        await newDriver.play();
+      } catch (e) {
+        // play() might be rejected due to autoplay policies, but since it's muted it usually works
+        console.warn("[flip] newDriver.play() rejected", e);
+      }
+
+      // Wait until we actually have a decoded frame (or timeout)
+      const gotFrame = await waitForVideoFrame(newDriver, 1800);
+      console.debug(
+        "[flip] newDriver gotFrame?",
+        gotFrame,
+        "videoW/H=",
+        newDriver.videoWidth,
+        newDriver.videoHeight
+      );
+
+      // If driver produced frames, swap it in for the canvas draw source
+      if (gotFrame) {
+        // keep reference to old driver so we can remove it after swapping
+        const oldDriver = renderVideoRef.current;
+
+        // swap pointers (the draw loop reads renderVideoRef.current)
+        renderVideoRef.current = newDriver;
+
+        // update visible preview if you also use videoRef for visible preview
+        if (videoRef.current) {
+          // we *do not* change streamRef.current here (recorder stream) - just change visible preview
+          videoRef.current.srcObject = newCam;
+          try {
+            videoRef.current.play().catch(() => {});
+          } catch (e) {}
+        }
+
+        // update facingMode for UI
+        setFacingMode(next);
+
+        // stop and remove old driver after a small delay to be safe
+        setTimeout(() => {
+          try {
+            if (oldDriver) {
+              oldDriver.pause();
+              oldDriver.srcObject = null;
+              if (oldDriver.parentNode)
+                oldDriver.parentNode.removeChild(oldDriver);
+            }
+          } catch (e) {}
+        }, 120);
+      } else {
+        // no frames -> newCam couldn't decode/produce frames for some reason
+        // fallback: keep using previous driver (do not swap), and stop newCam to avoid leaks
+        console.warn("[flip] new camera produced no frames; aborting swap");
+        try {
+          newCam.getTracks().forEach((t) => t.stop());
+        } catch (e) {}
+        // remove the newDriver element
+        try {
+          if (newDriver.parentNode) newDriver.parentNode.removeChild(newDriver);
+        } catch (e) {}
+        return;
+      }
+
+      // IMPORTANT: We stopped using newCam as the camera for recorder's audio/video.
+      // If you want audio from the flipped camera included you should swap audio tracks
+      // into the recorder's combined stream — do that carefully (may need small delay).
+      // For now we focused on getting video frames into the canvas.
+    } catch (err) {
+      console.warn("[flip] error", err);
     }
   };
 
@@ -287,27 +510,92 @@ export default function CircularStream({
       }
 
       // draw loop: copy frames from driver video into canvas (mirror if front camera)
+
       const draw = () => {
         try {
           const canvas = captureCanvasRef.current;
-          const ctx = canvas.getContext("2d");
-          if (ctx && driver.videoWidth && driver.videoHeight) {
-            // keep aspect cover behavior - drawImage will stretch; we keep original dims
-            ctx.save();
-            // mirror horizontally when front camera (facingMode === 'user')
-            if (facingMode === "user") {
-              ctx.translate(canvas.width, 0);
-              ctx.scale(-1, 1);
+          const ctx = canvas && canvas.getContext && canvas.getContext("2d");
+          const driver = renderVideoRef.current;
+          if (!ctx || !canvas) {
+            drawRafRef.current = requestAnimationFrame(draw);
+            return;
+          }
+
+          const hasDriverFrame =
+            driver &&
+            driver.videoWidth > 0 &&
+            driver.videoHeight > 0 &&
+            !driver.paused &&
+            !driver.ended;
+
+          if (hasDriverFrame && !waitingForNewCameraRef.current) {
+            // When the driver is ready and we're not waiting for a new camera, draw normally.
+            try {
+              // If canvas pixel size doesn't match driver, resize it (keeps captureStream stable)
+              if (
+                canvas.width !== driver.videoWidth ||
+                canvas.height !== driver.videoHeight
+              ) {
+                // pick a capture resolution you want — match driver for best quality
+                canvas.width = driver.videoWidth;
+                canvas.height = driver.videoHeight;
+              }
+
+              ctx.save();
+              if (facingMode === "user") {
+                ctx.translate(canvas.width, 0);
+                ctx.scale(-1, 1);
+              }
+              ctx.drawImage(driver, 0, 0, canvas.width, canvas.height);
+              ctx.restore();
+
+              // store last frame as ImageBitmap for quick redraw if new camera not ready
+              if (typeof createImageBitmap === "function") {
+                // do not await here to avoid blocking; promise will set bitmap when ready
+                createImageBitmap(canvas)
+                  .then((bmp) => {
+                    try {
+                      const prev = lastFrameImageRef.current;
+                      if (prev && prev.close) prev.close();
+                    } catch (e) {}
+                    lastFrameImageRef.current = bmp;
+                  })
+                  .catch(() => {});
+              }
+            } catch (e) {
+              // ignore transient draw errors
             }
-            ctx.clearRect(0, 0, canvas.width, canvas.height);
-            ctx.drawImage(driver, 0, 0, canvas.width, canvas.height);
-            ctx.restore();
+          } else {
+            // driver not ready: draw last frame (ImageBitmap) if available; else don't clear canvas
+            const bmp = lastFrameImageRef.current;
+            if (bmp) {
+              try {
+                // ensure canvas has some pixel size (fallback to small size)
+                if (!canvas.width || !canvas.height) {
+                  canvas.width = bmp.width || 640;
+                  canvas.height = bmp.height || 360;
+                }
+                ctx.save();
+                if (facingMode === "user") {
+                  ctx.translate(canvas.width, 0);
+                  ctx.scale(-1, 1);
+                }
+                // drawImage of ImageBitmap preserves previous pixels quickly
+                ctx.drawImage(bmp, 0, 0, canvas.width, canvas.height);
+                ctx.restore();
+              } catch (e) {
+                // fallback: do nothing (preserve existing canvas pixels)
+              }
+            } else {
+              // no last frame — do nothing to avoid clearing the canvas (prevents black)
+            }
           }
         } catch (e) {
-          // ignore transient draw errors
+          // swallow draw errors
         }
         drawRafRef.current = requestAnimationFrame(draw);
       };
+
       // start drawing immediately (it will no-op until metadata)
       drawRafRef.current = requestAnimationFrame(draw);
 
