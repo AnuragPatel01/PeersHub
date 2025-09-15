@@ -3182,18 +3182,17 @@ export default function Chat() {
         }));
         setTimeout(() => removeTransfer(offerId), 1200);
       } catch (e) {}
+      // optionally update or mark file message transferred, but don't create a system message
       setMessages((m) => {
-        const sys = {
-          id: `sys-file-complete-${offerId}`,
-          from: "System",
-          text: "File transfer completed",
-          ts: Date.now(),
-          type: "system",
-        };
-        const next = [...m, sys];
+        const next = m.map((msg) =>
+          msg.id === offerId && msg.type === "file"
+            ? { ...msg, transferredAt: Date.now() }
+            : msg
+        );
         persistMessages(next);
         return next;
       });
+
       return;
     }
 
@@ -3835,45 +3834,20 @@ export default function Chat() {
     }
 
     if (opts.directSend) {
-      // Direct-send path: stream immediately to all connected peers
       try {
         const targetPeers = Array.isArray(peers) ? [...peers] : [];
         if (targetPeers.length === 0) {
-          setMessages((m) => {
-            const sys = {
-              id: `sys-offer-local-${offerId}`,
-              from: "System",
-              text: `No connected peers — saved locally: ${file.name}`,
-              ts: Date.now(),
-              type: "system",
-            };
-            const next = [...m, sys];
-            persistMessages(next);
-            return next;
-          });
+          // nothing to send to — just keep local message (no system msg)
           return;
         }
 
         try {
-          // start sending file to each peer
           startSendingFile(file, offerId, targetPeers);
         } catch (e) {
           console.warn("startSendingFile failed", e);
         }
 
-        // optional system message for UI
-        setMessages((m) => {
-          const sys = {
-            id: `sys-send-${offerId}`,
-            from: "System",
-            text: `Sending video to ${targetPeers.length} peer(s): ${file.name}`,
-            ts: Date.now(),
-            type: "system",
-          };
-          const next = [...m, sys];
-          persistMessages(next);
-          return next;
-        });
+        // no system message — the file chat msg already exists and was sent via sendChat(msg)
       } catch (e) {
         console.warn("direct send failed", e);
       }
@@ -3900,18 +3874,7 @@ export default function Chat() {
         const pending = outgoingPendingOffers.current[offerId];
         if (!pending) return;
         if (pending.acceptingPeers.size === 0) {
-          setMessages((m) => {
-            const sys = {
-              id: `sys-offer-expire-${offerId}`,
-              from: "System",
-              text: `No one accepted the file offer: ${file.name}`,
-              ts: Date.now(),
-              type: "system",
-            };
-            const next = [...m, sys];
-            persistMessages(next);
-            return next;
-          });
+          // silently expire the offer (don't create a system message).
           setTimeout(() => removeTransfer(offerId), 800);
         }
       } catch (e) {
@@ -4143,18 +4106,6 @@ export default function Chat() {
           const copy = { ...s };
           delete copy[offerId];
           return copy;
-        });
-        setMessages((m) => {
-          const sys = {
-            id: `sys-accept-${offerId}`,
-            from: "System",
-            text: `Accepted file: ${offer.name}`,
-            ts: Date.now(),
-            type: "system",
-          };
-          const next = [...m, sys];
-          persistMessages(next);
-          return next;
         });
       } else {
         respondToFileOffer(offerId, offer.from, true);
