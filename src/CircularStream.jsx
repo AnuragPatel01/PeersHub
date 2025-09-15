@@ -30,6 +30,33 @@ export default function CircularStream({
   const durationRef = useRef(0);
   const timerTickRef = useRef(null);
 
+  const renderVideoRef = useRef(null); // hidden driver video element (we'll create it)
+  const captureCanvasRef = useRef(null);
+  const drawRafRef = useRef(null);
+  const canvasStreamRef = useRef(null);
+
+  // --- Add helper to ensure driver video and canvas exist ---
+  const ensureCapturePipeline = () => {
+    // create driver video that will hold the camera stream (off-DOM or hidden DOM element)
+    if (!renderVideoRef.current) {
+      const v = document.createElement("video");
+      v.playsInline = true;
+      v.muted = true;
+      v.autoplay = true;
+      v.style.display = "none";
+      renderVideoRef.current = v;
+      document.body.appendChild(v); // append hidden so decoding works on all browsers
+    }
+
+    // create an in-memory canvas used for capture
+    if (!captureCanvasRef.current) {
+      const c = document.createElement("canvas");
+      c.style.display = "none";
+      captureCanvasRef.current = c;
+      document.body.appendChild(c); // append hidden
+    }
+  };
+
   // sending state
   const [sending, setSending] = useState(false);
 
@@ -86,6 +113,33 @@ export default function CircularStream({
     } catch (e) {
       console.warn("stopPreview failed", e);
     }
+  };
+
+  // inside CircularStream component, after stopRecording or near handleClose
+  const cleanupCapturePipeline = () => {
+    try {
+      if (renderVideoRef.current) {
+        try {
+          renderVideoRef.current.pause();
+          renderVideoRef.current.srcObject = null;
+          if (renderVideoRef.current.parentNode)
+            renderVideoRef.current.parentNode.removeChild(
+              renderVideoRef.current
+            );
+        } catch (e) {}
+        renderVideoRef.current = null;
+      }
+    } catch (e) {}
+
+    try {
+      if (captureCanvasRef.current) {
+        if (captureCanvasRef.current.parentNode)
+          captureCanvasRef.current.parentNode.removeChild(
+            captureCanvasRef.current
+          );
+        captureCanvasRef.current = null;
+      }
+    } catch (e) {}
   };
 
   useEffect(() => {
@@ -195,6 +249,7 @@ export default function CircularStream({
     }
   };
 
+  // --- Replace startRecording with this (records canvas + audio) ---
   const startRecording = () => {
     if (!streamRef.current) {
       setError("Camera not ready");
@@ -203,37 +258,102 @@ export default function CircularStream({
     recordedChunksRef.current = [];
     durationRef.current = 0;
     setDurationMs(0);
+
     try {
+      ensureCapturePipeline();
+
+      // set driver video srcObject to the current camera stream (so it decodes frames)
+      const driver = renderVideoRef.current;
+      driver.srcObject = streamRef.current;
+      driver.play().catch(() => {});
+
+      // set canvas size to match incoming video (use small wait for metadata)
+      const setupCanvas = () => {
+        try {
+          const w = driver.videoWidth || 1280;
+          const h = driver.videoHeight || 720;
+          const canvas = captureCanvasRef.current;
+          canvas.width = w;
+          canvas.height = h;
+        } catch (e) {}
+      };
+
+      if (driver.readyState >= 1) {
+        setupCanvas();
+      } else {
+        driver.onloadedmetadata = () => {
+          setupCanvas();
+        };
+      }
+
+      // draw loop: copy frames from driver video into canvas (mirror if front camera)
+      const draw = () => {
+        try {
+          const canvas = captureCanvasRef.current;
+          const ctx = canvas.getContext("2d");
+          if (ctx && driver.videoWidth && driver.videoHeight) {
+            // keep aspect cover behavior - drawImage will stretch; we keep original dims
+            ctx.save();
+            // mirror horizontally when front camera (facingMode === 'user')
+            if (facingMode === "user") {
+              ctx.translate(canvas.width, 0);
+              ctx.scale(-1, 1);
+            }
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+            ctx.drawImage(driver, 0, 0, canvas.width, canvas.height);
+            ctx.restore();
+          }
+        } catch (e) {
+          // ignore transient draw errors
+        }
+        drawRafRef.current = requestAnimationFrame(draw);
+      };
+      // start drawing immediately (it will no-op until metadata)
+      drawRafRef.current = requestAnimationFrame(draw);
+
+      // get a video stream from canvas
+      canvasStreamRef.current =
+        captureCanvasRef.current.captureStream(30) || null; // 30 fps target
+
+      // combine canvas video track with audio tracks from camera stream
+      const audioTracks = streamRef.current.getAudioTracks() || [];
+      const combined = new MediaStream();
+      // add canvas video tracks
+      (canvasStreamRef.current?.getVideoTracks() || []).forEach((t) =>
+        combined.addTrack(t)
+      );
+      // add audio tracks (from original camera)
+      audioTracks.forEach((t) => combined.addTrack(t));
+
+      // now create MediaRecorder on combined stream
       const options = { mimeType: "video/webm;codecs=vp8,opus" };
-      const mr = new MediaRecorder(streamRef.current, options);
+      const mr = new MediaRecorder(combined, options);
       recorderRef.current = mr;
       mr.ondataavailable = (ev) => {
         if (ev.data && ev.data.size > 0)
           recordedChunksRef.current.push(ev.data);
       };
       mr.onstop = () => {
-        // assemble quickly and present preview immediately (no heavy processing)
+        // assemble blob and present preview (same as before)
         try {
           const blob = new Blob(recordedChunksRef.current, {
             type: "video/webm",
           });
 
-          // Stop preview camera immediately (we don't need it while previewing)
+          // NOTE: we DON'T call stopPreview here because we want to keep audio/video elements consistent.
+          // However original code calls stopPreview() — keep same UX: stop camera preview
           stopPreview();
 
-          // Clear any previous preview URL
           if (previewUrl) {
             try {
               URL.revokeObjectURL(previewUrl);
             } catch (e) {}
           }
 
-          // set states quickly so preview shows instantly
           setRecordedBlob(blob);
           const url = URL.createObjectURL(blob);
           setPreviewUrl(url);
 
-          // recording ended — stop timer & update UI flags
           setRecording(false);
           if (timerTickRef.current) {
             clearInterval(timerTickRef.current);
@@ -257,17 +377,17 @@ export default function CircularStream({
         setDurationMs(durationRef.current);
       }, 100);
     } catch (e) {
-      console.warn("startRecording failed", e);
+      console.warn("startRecording (canvas) failed", e);
       setError(e.message || String(e));
     }
   };
 
+  // --- Replace stopRecording with this cleanup ---
   const stopRecording = () => {
     try {
       if (recorderRef.current && recorderRef.current.state !== "inactive") {
         recorderRef.current.stop();
       } else {
-        // Defensive: ensure UI state is consistent
         setRecording(false);
         if (timerTickRef.current) {
           clearInterval(timerTickRef.current);
@@ -281,6 +401,23 @@ export default function CircularStream({
         clearInterval(timerTickRef.current);
         timerTickRef.current = null;
       }
+    } finally {
+      // stop the canvas draw loop
+      try {
+        if (drawRafRef.current) {
+          cancelAnimationFrame(drawRafRef.current);
+          drawRafRef.current = null;
+        }
+      } catch (e) {}
+      // stop canvas stream tracks (if any)
+      try {
+        if (canvasStreamRef.current) {
+          canvasStreamRef.current.getTracks().forEach((t) => t.stop());
+          canvasStreamRef.current = null;
+        }
+      } catch (e) {}
+      // leave driver video attached to streamRef (do not destroy the camera stream)
+      // but we can remove the hidden elements if we want on final close
     }
   };
 
@@ -315,6 +452,9 @@ export default function CircularStream({
     setDurationMs(0);
     setSending(false);
     setError(null);
+
+    // 🔑 clean up hidden driver video + canvas
+    cleanupCapturePipeline();
   };
 
   const formatDuration = (ms) => {
@@ -360,6 +500,9 @@ export default function CircularStream({
     setPreviewUrl(null);
     setRecordedBlob(null);
     setDurationMs(0);
+
+    cleanupCapturePipeline(); // 🔑 here
+
     // resume camera preview for retake
     startPreview();
   };
