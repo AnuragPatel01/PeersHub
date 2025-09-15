@@ -2302,6 +2302,11 @@ export default function Chat() {
     return [];
   });
 
+  // DEBUG: expose to console
+  if (typeof window !== "undefined") {
+    window.__msgs = messages;
+  }
+
   // file transfer
   const [incomingFileOffers, setIncomingFileOffers] = useState({});
   const [transfers, setTransfers] = useState({}); // offerId -> { direction, label, total, transferred, peers }
@@ -2693,43 +2698,54 @@ export default function Chat() {
             direction: prev?.direction || "receiving",
           };
         });
-
         if (final) {
           try {
-            await writer.close();
-          } catch (e) {
-            console.warn("Error closing writer for offer", offerId, e);
-          }
-          // mark 100% and schedule clean
-          try {
-            setTransfer(offerId, (prev) => ({
-              ...prev,
-              transferred:
-                prev?.total ??
-                fileWriteStatusRef.current[offerId] ??
-                prev?.transferred ??
-                0,
-            }));
-            setTimeout(() => removeTransfer(offerId), 1200);
-          } catch (e) {}
-          // cleanup
-          delete saveHandlesRef.current[offerId];
-          delete fileWriteStatusRef.current[offerId];
+            const assembled = new Blob(bufEntry.chunks, {
+              type: bufEntry.chunks[0]?.type || "video/webm",
+            });
 
-          // notify UI + persist nothing more (file is on disk)
-          setMessages((m) => {
-            const sys = {
-              id: `sys-file-done-${offerId}`,
-              from: "System",
-              text: "File received and saved to disk",
-              ts: Date.now(),
-              type: "system",
-            };
-            const next = [...m, sys];
-            persistMessages(next);
-            return next;
-          });
+            // save blob persistently
+            await saveBlob(offerId, assembled);
+
+            // create preview url
+            const previewUrl = URL.createObjectURL(assembled);
+            createdUrlsRef.current.add(previewUrl);
+
+            setMessages((prev) => {
+              const exists = prev.find((x) => x.id === offerId);
+
+              if (exists) {
+                // update existing msg
+                return prev.map((x) =>
+                  x.id === offerId ? { ...x, fileUrl: previewUrl } : x
+                );
+              }
+
+              // add new file msg
+              return [
+                ...prev,
+                {
+                  id: offerId,
+                  type: "file",
+                  from: "peer",
+                  fromId: null,
+                  fromName: "peer",
+                  fileName: `video-${offerId}.webm`,
+                  fileSize: assembled.size,
+                  fileType: assembled.type,
+                  fileId: offerId,
+                  fileUrl: previewUrl,
+                  ts: Date.now(),
+                  deliveries: [],
+                  reads: [],
+                },
+              ];
+            });
+          } finally {
+            delete incomingBuffersRef.current[offerId];
+          }
         }
+
         return;
       }
 
@@ -3480,92 +3496,149 @@ export default function Chat() {
         </div>
       );
     }
-
     if (m.type === "file") {
-  const fileType = m.fileType || "application/octet-stream";
-  const isVideo = fileType.startsWith("video/");
-  const url = m.fileUrl || null;
+      const fileType = m.fileType || "application/octet-stream";
+      const isVideo = fileType.startsWith("video/");
+      const url = m.fileUrl || null;
 
-  return (
-    <div
-      onClick={() => openCenterPreview(m)}
-      key={`${m.id ?? m.ts}-${idx}`}
-      className={`group p-2 rounded-2xl max-w-[50%] mb-2 cursor-pointer ${
-        isMe ? "ml-auto bg-blue-500 text-white" : "bg-white/100 text-black"
-      }`}
-      role="button"
-      tabIndex={0}
-      onKeyDown={(e) => {
-        if (e.key === "Enter" || e.key === " ") {
-          e.preventDefault();
-          openCenterPreview(m);
-        }
-      }}
-      aria-label={
-        isVideo ? `Open video ${m.fileName || ""}` : `Open file ${m.fileName || ""}`
-      }
-    >
-      <div className="text-xs font-bold flex items-center">
-        <div className="flex-1">{isMe ? "You" : m.from}</div>
-        <div className="text-[10px] text-gray-700/70 ml-2">
-          {new Date(m.ts).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
-        </div>
-        {isMe && renderStatusDot(m)}
-      </div>
-
-      {m.replyTo && (
-        <div className="mt-2 mb-2 p-2 rounded border border-white/5 text-xs text-gray-600 bg-gray-300">
-          <strong className="text-xs text-blue-400">Reply to {m.replyTo.from}:</strong>{" "}
-          {m.replyTo.text}
-        </div>
-      )}
-
-      <div className="mt-2 flex items-center">
-        {isVideo ? (
-          /* circular video thumbnail wrapper — uses VideoThumb helper (must be defined above) */
-          <div
-            className="relative rounded-full overflow-hidden w-24 h-24 sm:w-32 sm:h-32 flex-shrink-0 bg-black/10 flex items-center justify-center"
-            style={{ borderRadius: "50%", width: 96, height: 96, minWidth: 96, minHeight: 96 }}
-          >
-            {/* VideoThumb should capture a poster image or fall back to a clipped <video> */}
-            <VideoThumb url={url} size={96} className="block" />
-
-            {/* subtle play overlay to indicate tappable */}
-            <div
-              className="absolute inset-0 flex items-center justify-center pointer-events-none"
-              aria-hidden="true"
-            >
-              <div className="rounded-full w-10 h-10 sm:w-12 sm:h-12 bg-black/30 transition-opacity duration-200 opacity-60 group-hover:opacity-80" />
-              <svg
-                className="absolute w-5 h-5 sm:w-6 sm:h-6 text-white drop-shadow-md transition-transform duration-200 transform scale-95 group-hover:scale-100"
-                viewBox="0 0 24 24"
-                fill="none"
-                stroke="currentColor"
-                strokeWidth="1.2"
-                strokeLinecap="round"
-                strokeLinejoin="round"
-                aria-hidden="true"
-              >
-                <polygon points="5 3 19 12 5 21 5 3" fill="currentColor" />
-              </svg>
+      return (
+        <div
+          onClick={() => openCenterPreview(m)}
+          key={`${m.id ?? m.ts}-${idx}`}
+          className={`group p-2 rounded-2xl max-w-[50%] mb-2 cursor-pointer ${
+            isMe ? "ml-auto bg-blue-500 text-white" : "bg-white/100 text-black"
+          }`}
+          role="button"
+          tabIndex={0}
+          onKeyDown={(e) => {
+            if (e.key === "Enter" || e.key === " ") {
+              e.preventDefault();
+              openCenterPreview(m);
+            }
+          }}
+          aria-label={
+            isVideo
+              ? `Open video ${m.fileName || ""}`
+              : `Open file ${m.fileName || ""}`
+          }
+        >
+          <div className="text-xs font-bold flex items-center">
+            <div className="flex-1">{isMe ? "You" : m.from}</div>
+            <div className="text-[10px] text-gray-700/70 ml-2">
+              {new Date(m.ts).toLocaleTimeString([], {
+                hour: "2-digit",
+                minute: "2-digit",
+              })}
             </div>
-
-            {/* focus indicator for keyboard users */}
-            <span className="absolute -inset-1 rounded-full ring-2 ring-transparent group-focus-within:ring-white/30" />
+            {isMe && renderStatusDot(m)}
           </div>
-        ) : (
-          <div className="break-words">{m.fileName || m.text}</div>
-        )}
 
-        <div className="ml-3 text-xs text-gray-500">
-          <div>{m.fileName || ""}</div>
-          <div>{m.fileSize ? `${Math.round(m.fileSize / 1024)} KB` : ""}</div>
+          {m.replyTo && (
+            <div className="mt-2 mb-2 p-2 rounded border border-white/5 text-xs text-gray-600 bg-gray-300">
+              <strong className="text-xs text-blue-400">
+                Reply to {m.replyTo.from}:
+              </strong>{" "}
+              {m.replyTo.text}
+            </div>
+          )}
+
+          <div className="mt-2 flex items-center">
+            {isVideo ? (
+              /* circular video wrapper */
+              <div
+                className="relative rounded-full overflow-hidden flex-shrink-0 bg-black/10 flex items-center justify-center"
+                style={{
+                  width: 96,
+                  height: 96,
+                  minWidth: 96,
+                  minHeight: 96,
+                  borderRadius: "50%",
+                }}
+              >
+                {url ? (
+                  <video
+                    src={url}
+                    muted
+                    playsInline
+                    autoPlay
+                    loop
+                    preload="metadata"
+                    // ensure it covers the circle
+                    style={{
+                      width: "100%",
+                      height: "100%",
+                      objectFit: "cover",
+                      borderRadius: "50%",
+                      display: "block",
+                    }}
+                    className="block"
+                    aria-label={m.fileName || "video message"}
+                    onLoadedMetadata={(e) => {
+                      // try to play (some browsers restrict autoplay unless muted — we are muted)
+                      try {
+                        const v = e.target;
+                        if (v && typeof v.play === "function") {
+                          v.play().catch(() => {
+                            // ignore play rejection
+                          });
+                        }
+                      } catch (err) {}
+                    }}
+                  />
+                ) : (
+                  <div
+                    style={{
+                      width: 96,
+                      height: 96,
+                      borderRadius: "50%",
+                      display: "flex",
+                      alignItems: "center",
+                      justifyContent: "center",
+                      background: "rgba(0,0,0,0.06)",
+                    }}
+                    aria-hidden="true"
+                  >
+                    <div className="w-6 h-6 border-2 border-white border-t-transparent rounded-full animate-spin" />
+                  </div>
+                )}
+
+                {/* subtle play overlay so it looks tappable */}
+                <div
+                  className="absolute inset-0 flex items-center justify-center pointer-events-none"
+                  aria-hidden="true"
+                >
+                  <div className="rounded-full w-10 h-10 bg-black/30 opacity-60 group-hover:opacity-80" />
+                  <svg
+                    className="absolute w-5 h-5 text-white"
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    stroke="currentColor"
+                    strokeWidth="1.2"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                    aria-hidden="true"
+                  >
+                    <polygon points="5 3 19 12 5 21 5 3" fill="currentColor" />
+                  </svg>
+                </div>
+
+                {/* focus ring for keyboard users */}
+                <span className="absolute -inset-1 rounded-full ring-2 ring-transparent group-focus-within:ring-white/30" />
+              </div>
+            ) : (
+              <div className="break-words">{m.fileName || m.text}</div>
+            )}
+
+            <div className="ml-3 text-xs text-gray-500">
+              <div>{m.fileName || ""}</div>
+              <div>
+                {m.fileSize ? `${Math.round(m.fileSize / 1024)} KB` : ""}
+              </div>
+            </div>
+          </div>
         </div>
-      </div>
-    </div>
-  );
-}
-
+      );
+    }
 
     return (
       <div
