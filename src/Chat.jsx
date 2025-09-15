@@ -2260,7 +2260,11 @@
 // }
 
 // Round Video Streaming
-// src/components/Chat.jsx
+// src/components/Chat.jsx// Chat.jsx
+
+
+
+
 import "./App.css";
 import React, { useEffect, useState, useRef } from "react";
 import CircularStream from "./CircularStream"; // adjust path if your CircularStream is in same folder use "./CircularStream"
@@ -2307,153 +2311,285 @@ export default function Chat() {
   }
 
   // MirroredVideoCanvas — minimal, with audio enabled and autoplay fallback
-  function MirroredVideoCanvas({ src, autoPlay = true, className = "" }) {
-    const canvasRef = React.useRef(null);
-    const hiddenVideoRef = React.useRef(null);
-    const rafRef = React.useRef(null);
-    const [needPlayButton, setNeedPlayButton] = React.useState(false);
+  function MirroredVideoCanvas({
+  src,
+  autoPlay = true,
+  mirror = true,       // keep the canvas mirrored horizontally when true
+  cover = true,        // use center-crop cover mode (prevents stretching inside fixed containers)
+  className = "",
+  onClose,
+}) {
+  const canvasRef = React.useRef(null);
+  const hiddenVideoRef = React.useRef(null);
+  const rafRef = React.useRef(null);
+  const [needPlayButton, setNeedPlayButton] = React.useState(false);
+  const [playing, setPlaying] = React.useState(Boolean(autoPlay));
+  const mutedRef = React.useRef(true); // start muted to allow autoplay, restored later
 
-    React.useEffect(() => {
-      const vid = hiddenVideoRef.current;
-      const canvas = canvasRef.current;
-      if (!vid || !canvas) return;
-
-      let ctx = canvas.getContext("2d");
-      let mounted = true;
-
-      const setup = async () => {
-        try {
-          // ensure src attached
-          vid.src = src;
-          vid.playsInline = true;
-          vid.preload = "metadata";
-          vid.muted = false; // IMPORTANT: allow audio
-          vid.volume = 1.0;
-
-          // wait metadata so we can size the canvas
-          await new Promise((resolve) => {
-            if (vid.readyState >= 1) return resolve();
-            const onLoaded = () => resolve();
-            const onError = () => resolve();
-            vid.addEventListener("loadedmetadata", onLoaded, { once: true });
-            vid.addEventListener("error", onError, { once: true });
-            setTimeout(resolve, 500); // fallback
-          });
-
-          // size canvas to video dimensions (CSS will scale)
-          canvas.width = vid.videoWidth || 640;
-          canvas.height = vid.videoHeight || 480;
-
-          const draw = () => {
-            if (!mounted) return;
-            try {
-              if (!ctx) ctx = canvas.getContext("2d");
-              ctx.save();
-              ctx.clearRect(0, 0, canvas.width, canvas.height);
-              // mirror horizontally
-              ctx.scale(-1, 1);
-              ctx.drawImage(vid, -canvas.width, 0, canvas.width, canvas.height);
-              ctx.restore();
-            } catch (e) {
-              // ignore transient draw errors
-            }
-            rafRef.current = requestAnimationFrame(draw);
-          };
-
-          if (autoPlay) {
-            try {
-              // Try to play; if browser blocks autoplay-with-audio, this will reject
-              await vid.play();
-              setNeedPlayButton(false);
-            } catch (e) {
-              // autoplay with audio was blocked -> show small play button overlay
-              setNeedPlayButton(true);
-            }
-          } else {
-            setNeedPlayButton(true);
-          }
-
-          rafRef.current = requestAnimationFrame(draw);
-        } catch (e) {
-          console.warn("MirroredVideoCanvas setup failed", e);
+  // Helper: attach src (MediaStream or URL)
+  React.useEffect(() => {
+    const vid = hiddenVideoRef.current;
+    if (!vid) return;
+    try {
+      if (src && typeof src === "object" && typeof src.getTracks === "function") {
+        // MediaStream
+        if (vid.srcObject !== src) {
+          vid.srcObject = src;
         }
-      };
+      } else {
+        // URL or empty
+        if (vid.srcObject) vid.srcObject = null;
+        if (vid.src !== (src || "")) vid.src = src || "";
+      }
+    } catch (e) {
+      console.warn("MirroredVideoCanvas: failed to attach src", e);
+    }
+  }, [src]);
 
-      setup();
+  // Main setup + draw loop
+  React.useEffect(() => {
+    const vid = hiddenVideoRef.current;
+    const canvas = canvasRef.current;
+    if (!vid || !canvas) return;
 
-      return () => {
-        mounted = false;
-        try {
-          if (rafRef.current) cancelAnimationFrame(rafRef.current);
-        } catch (e) {}
-        try {
-          if (vid) {
-            vid.pause();
-            // do NOT revoke src here (it's an external blob URL possibly used elsewhere)
-          }
-        } catch (e) {}
-      };
-    }, [src, autoPlay]);
+    let mounted = true;
+    let ctx = canvas.getContext("2d");
 
-    const handlePlayClick = async () => {
-      const vid = hiddenVideoRef.current;
-      if (!vid) return;
+    const safePauseAndClear = () => {
       try {
+        vid.pause();
+      } catch (e) {}
+      try {
+        if (vid.srcObject) vid.srcObject = null;
+        else vid.removeAttribute("src");
+      } catch (e) {}
+    };
+
+    // draw function that supports cover center-crop and mirror
+    const drawFrame = () => {
+      if (!mounted) return;
+      try {
+        const vw = vid.videoWidth || canvas.width || 640;
+        const vh = vid.videoHeight || canvas.height || 480;
+        // ensure canvas pixel size equals video natural size for best quality
+        if (canvas.width !== vw || canvas.height !== vh) {
+          canvas.width = vw;
+          canvas.height = vh;
+        }
+
+        // compute draw source rectangle (cover/crop) so final display won't look stretched
+        let sx = 0,
+          sy = 0,
+          sw = vw,
+          sh = vh;
+
+        if (cover) {
+          // Desired aspect is canvas display aspect (CSS container might differ, but we can aim to maintain video natural aspect)
+          // Compute target aspect from canvas CSS size (clientWidth/clientHeight) if available
+          const cw = canvas.clientWidth || canvas.width;
+          const ch = canvas.clientHeight || canvas.height;
+          const tgtAspect = cw / (ch || 1) || canvas.width / canvas.height;
+          const vidAspect = vw / (vh || 1);
+
+          if (vidAspect > tgtAspect) {
+            // video is wider than target -> crop sides
+            const neededW = Math.round(vh * tgtAspect);
+            sx = Math.round((vw - neededW) / 2);
+            sw = neededW;
+            sy = 0;
+            sh = vh;
+          } else {
+            // video is taller -> crop top/bottom
+            const neededH = Math.round(vw / tgtAspect);
+            sy = Math.round((vh - neededH) / 2);
+            sh = neededH;
+            sx = 0;
+            sw = vw;
+          }
+        }
+
+        ctx.save();
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+        if (mirror) {
+          ctx.translate(canvas.width, 0);
+          ctx.scale(-1, 1);
+          ctx.drawImage(vid, sx, sy, sw, sh, 0, 0, canvas.width, canvas.height);
+        } else {
+          ctx.drawImage(vid, sx, sy, sw, sh, 0, 0, canvas.width, canvas.height);
+        }
+        ctx.restore();
+      } catch (e) {
+        // ignore transient draw errors
+      }
+      rafRef.current = requestAnimationFrame(drawFrame);
+    };
+
+    const setup = async () => {
+      // try muted autoplay first — browsers allow muted autoplay more reliably
+      try {
+        mutedRef.current = true;
+        vid.muted = true;
+        // ensure playsInline to avoid fullscreen on iOS
+        vid.playsInline = true;
         await vid.play();
         setNeedPlayButton(false);
+        setPlaying(true);
       } catch (e) {
-        console.warn("Play attempt failed", e);
+        // autoplay failed (likely due to audio policy) -> show play button
+        setNeedPlayButton(true);
+        setPlaying(false);
+      } finally {
+        // Start draw loop anyway so a poster/thumbnail appears even if not playing
+        rafRef.current = requestAnimationFrame(drawFrame);
       }
     };
 
-    return (
-      <div className={`w-full h-auto ${className} relative`}>
-        {/* Hidden video drives decoding + audio */}
-        <video
-          ref={hiddenVideoRef}
-          src={src}
-          playsInline
-          // IMPORTANT: do NOT mute here
-          muted={false}
-          style={{ display: "none" }}
-          preload="metadata"
-          aria-hidden="true"
+    // Wait briefly for metadata (dimensions) so canvas can size properly
+    const waitMeta = () =>
+      new Promise((resolve) => {
+        if (vid.readyState >= 1) return resolve();
+        const onLoaded = () => {
+          cleanupListeners();
+          resolve();
+        };
+        const onError = () => {
+          cleanupListeners();
+          resolve();
+        };
+        const cleanupListeners = () => {
+          vid.removeEventListener("loadedmetadata", onLoaded);
+          vid.removeEventListener("error", onError);
+        };
+        vid.addEventListener("loadedmetadata", onLoaded);
+        vid.addEventListener("error", onError);
+        // fallback resolve after 700ms
+        setTimeout(() => {
+          cleanupListeners();
+          resolve();
+        }, 700);
+      });
+
+    let mountedSetup = true;
+    (async () => {
+      await waitMeta();
+      if (!mountedSetup) return;
+      setup();
+    })();
+
+    return () => {
+      mounted = false;
+      mountedSetup = false;
+      try {
+        if (rafRef.current) cancelAnimationFrame(rafRef.current);
+      } catch (e) {}
+      try {
+        // pause and clear video references to free decoder
+        safePauseAndClear();
+      } catch (e) {}
+    };
+  }, [src, autoPlay, mirror, cover]);
+
+  // play button to recover when autoplay blocked — also un-mute so audio will play
+  const handlePlayClick = async () => {
+    const vid = hiddenVideoRef.current;
+    if (!vid) return;
+    try {
+      vid.muted = false;
+      mutedRef.current = false;
+      await vid.play();
+      setNeedPlayButton(false);
+      setPlaying(true);
+    } catch (e) {
+      console.warn("MirroredVideoCanvas: user play failed", e);
+    }
+  };
+
+  // Request fullscreen of canvas
+  const goFullscreen = async () => {
+    const el = canvasRef.current;
+    if (!el) return;
+    try {
+      if (el.requestFullscreen) await el.requestFullscreen();
+      else if (el.webkitRequestFullscreen) el.webkitRequestFullscreen();
+      else if (el.msRequestFullscreen) el.msRequestFullscreen();
+    } catch (e) {
+      console.warn("requestFullscreen failed", e);
+    }
+  };
+
+  return (
+    <div className={`w-full h-auto ${className} relative`}>
+      <video
+        ref={hiddenVideoRef}
+        playsInline
+        // start muted so autoplay attempts are allowed; we un-mute if user interacts
+        muted={true}
+        style={{ display: "none" }}
+        preload="metadata"
+        aria-hidden="true"
+      />
+      <div className="relative w-full bg-black">
+        <canvas
+          ref={canvasRef}
+          className="w-full h-auto block object-contain"
+          aria-label="Mirrored video preview"
         />
-        {/* Visible mirrored canvas */}
-        <div className="relative w-full bg-black">
-          <canvas
-            ref={canvasRef}
-            className="w-full h-auto block object-contain"
-            aria-label="Mirrored video preview"
-          />
-          {/* tiny play overlay only if autoplay-with-audio was blocked */}
-          {needPlayButton && (
+        {/* play overlay if autoplay blocked */}
+        {needPlayButton && (
+          <button
+            onClick={handlePlayClick}
+            aria-label="Play video"
+            className="absolute inset-0 m-auto w-12 h-12 flex items-center justify-center rounded-full bg-black/50 text-white"
+            style={{ left: "50%", top: "50%", transform: "translate(-50%,-50%)" }}
+          >
+            <svg width="22" height="22" viewBox="0 0 24 24" fill="currentColor">
+              <path d="M8 5v14l11-7z" />
+            </svg>
+          </button>
+        )}
+
+        {/* controls */}
+        <div className="absolute left-3 bottom-3 flex gap-2 items-center">
+          <button
+            onClick={() => {
+              const vid = hiddenVideoRef.current;
+              if (!vid) return;
+              if (playing) {
+                vid.pause();
+                setPlaying(false);
+              } else {
+                vid.muted = false;
+                vid.play().catch(() => {});
+                setPlaying(true);
+              }
+            }}
+            className="px-3 py-1 rounded bg-black/40 text-white text-sm"
+            aria-label={playing ? "Pause" : "Play"}
+          >
+            {playing ? "Pause" : "Play"}
+          </button>
+
+          <button
+            onClick={goFullscreen}
+            className="px-3 py-1 rounded bg-black/40 text-white text-sm"
+            aria-label="Fullscreen"
+          >
+            Fullscreen
+          </button>
+
+          {onClose && (
             <button
-              onClick={handlePlayClick}
-              aria-label="Play video"
-              className="absolute inset-0 m-auto w-10 h-10 flex items-center justify-center rounded-full bg-black/50 text-white"
-              style={{
-                left: "50%",
-                top: "50%",
-                transform: "translate(-50%,-50%)",
-              }}
+              onClick={onClose}
+              className="px-3 py-1 rounded bg-black/40 text-white text-sm"
             >
-              {/* small play triangle */}
-              <svg
-                width="20"
-                height="20"
-                viewBox="0 0 24 24"
-                fill="currentColor"
-                aria-hidden="true"
-              >
-                <path d="M8 5v14l11-7z" />
-              </svg>
+              Close
             </button>
           )}
         </div>
       </div>
-    );
-  }
+    </div>
+  );
+}
 
   // file transfer
   const [incomingFileOffers, setIncomingFileOffers] = useState({});
@@ -2618,175 +2754,7 @@ export default function Chat() {
     }
 
     // Place this above your Chat component or inside it (but before usage)
-    function MirroredVideoCanvas({
-      src,
-      autoPlay = true,
-      controls = true,
-      className = "",
-      onClose,
-    }) {
-      const canvasRef = React.useRef(null);
-      const hiddenVideoRef = React.useRef(null);
-      const rafRef = React.useRef(null);
-      const playingRef = React.useRef(false);
-      const [playing, setPlaying] = React.useState(Boolean(autoPlay));
-      const [muted] = React.useState(false);
-
-      useEffect(() => {
-        const vid = hiddenVideoRef.current;
-        const canvas = canvasRef.current;
-        if (!vid || !canvas) return;
-
-        let ctx = canvas.getContext("2d");
-        let mounted = true;
-
-        // Ensure video is ready
-        const setup = async () => {
-          try {
-            // load metadata so we know dims
-            await new Promise((resolve, reject) => {
-              if (vid.readyState >= 1) return resolve();
-              vid.onloadedmetadata = () => resolve();
-              vid.onerror = (e) => reject(e);
-            });
-
-            // match canvas to video aspect (fit to container with CSS will scale)
-            canvas.width = vid.videoWidth || 640;
-            canvas.height = vid.videoHeight || 480;
-
-            const draw = () => {
-              if (!mounted) return;
-              if (!ctx) ctx = canvas.getContext("2d");
-              try {
-                // draw mirrored horizontally
-                ctx.save();
-                ctx.clearRect(0, 0, canvas.width, canvas.height);
-                ctx.scale(-1, 1);
-                ctx.drawImage(
-                  vid,
-                  -canvas.width,
-                  0,
-                  canvas.width,
-                  canvas.height
-                );
-                ctx.restore();
-              } catch (e) {
-                // ignore transient draw errors
-              }
-              rafRef.current = requestAnimationFrame(draw);
-            };
-
-            if (autoPlay) {
-              try {
-                await vid.play();
-                playingRef.current = true;
-                setPlaying(true);
-              } catch (e) {
-                // autoplay may fail, leave paused
-                playingRef.current = false;
-                setPlaying(false);
-              }
-            }
-
-            // start draw loop if playing (we'll keep drawing even if paused so thumbnail shows)
-            rafRef.current = requestAnimationFrame(draw);
-          } catch (e) {
-            console.warn("MirroredVideoCanvas setup failed", e);
-          }
-        };
-
-        setup();
-
-        return () => {
-          mounted = false;
-          try {
-            if (rafRef.current) cancelAnimationFrame(rafRef.current);
-          } catch (e) {}
-        };
-      }, [src, autoPlay]);
-
-      // play / pause handlers: control both hidden video and rendering
-      const togglePlay = async () => {
-        const vid = hiddenVideoRef.current;
-        if (!vid) return;
-        if (playingRef.current) {
-          try {
-            vid.pause();
-          } catch (e) {}
-          playingRef.current = false;
-          setPlaying(false);
-        } else {
-          try {
-            await vid.play();
-            playingRef.current = true;
-            setPlaying(true);
-          } catch (e) {
-            console.warn("play failed", e);
-          }
-        }
-      };
-
-      // request fullscreen on canvas
-      const goFullscreen = async () => {
-        const el = canvasRef.current;
-        if (!el) return;
-        try {
-          if (el.requestFullscreen) await el.requestFullscreen();
-          else if (el.webkitRequestFullscreen) el.webkitRequestFullscreen();
-          else if (el.msRequestFullscreen) el.msRequestFullscreen();
-        } catch (e) {
-          console.warn("requestFullscreen failed", e);
-        }
-      };
-
-      return (
-        <div className={`w-full h-auto ${className}`}>
-          {/* Hidden video drives audio + decoding */}
-          <video
-            ref={hiddenVideoRef}
-            src={src}
-            playsInline
-            muted={muted}
-            style={{ display: "none" }}
-            preload="metadata"
-          />
-          {/* Visible canvas showing mirrored frames */}
-          <div className="relative w-full bg-black">
-            <canvas
-              ref={canvasRef}
-              className="w-full h-auto block object-contain"
-              aria-label="Mirrored video preview"
-            />
-            {/* simple control overlay */}
-            <div className="absolute left-3 bottom-3 flex gap-2 items-center">
-              <button
-                onClick={togglePlay}
-                className="px-3 py-1 rounded bg-black/40 text-white text-sm"
-                aria-label={playing ? "Pause" : "Play"}
-              >
-                {playing ? "Pause" : "Play"}
-              </button>
-              <button
-                onClick={goFullscreen}
-                className="px-3 py-1 rounded bg-black/40 text-white text-sm"
-                aria-label="Fullscreen"
-              >
-                Fullscreen
-              </button>
-              {onClose && (
-                <button
-                  onClick={onClose}
-                  className="px-3 py-1 rounded bg-black/40 text-white text-sm"
-                >
-                  Close
-                </button>
-              )}
-            </div>
-          </div>
-        </div>
-      );
-    }
-
+    
     // final fallback: show the video element clipped to circle (may show black frame)
     return (
       <video

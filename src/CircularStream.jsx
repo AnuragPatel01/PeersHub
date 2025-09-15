@@ -1201,7 +1201,7 @@ export default function CircularStream({
                             }`}
                           />
                           <span>
-                            {recording ? "Stop" : "Start"}
+                            {recording ? "Stop Recording" : "Start Recording"}
                           </span>
                         </button>
 
@@ -1288,3 +1288,4 @@ export default function CircularStream({
     </>
   );
 }
+
