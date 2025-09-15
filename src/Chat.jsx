@@ -4397,7 +4397,7 @@ export default function Chat() {
         </div>
       )}
 
-      <div className="h-[92vh] md:h-[92vh] max-w-[420px] w-full mx-auto bg-gray-50 text-purple-600 p-6 flex flex-col rounded-4xl">
+      <div className="h-[92vh] md:h-[92vh] max-w-[430px] w-full mx-auto bg-gray-50 text-purple-600 p-6 flex flex-col rounded-4xl">
         <header className="flex items-center justify-between mb-4">
           <div className="flex gap-2.5">
             <div className="text-sm text-blue-600">YourID</div>

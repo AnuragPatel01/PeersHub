@@ -1,4 +1,5 @@
 // src/CircularStream.jsx
+
 import React, { useEffect, useRef, useState } from "react";
 
 /**
@@ -49,6 +50,12 @@ export default function CircularStream({
         audio: true,
       };
       const s = await navigator.mediaDevices.getUserMedia(constraints);
+      // If we already have a previous streamRef (e.g. switching while not recording), stop it cleanly
+      if (streamRef.current) {
+        try {
+          streamRef.current.getVideoTracks().forEach((t) => t.stop());
+        } catch (e) {}
+      }
       streamRef.current = s;
       if (videoRef.current) {
         try {
@@ -89,8 +96,104 @@ export default function CircularStream({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open, facingMode]);
 
-  const toggleFacing = () =>
-    setFacingMode((f) => (f === "user" ? "environment" : "user"));
+  // --- New: replace video track seamlessly while recording ---
+  // This attempts to acquire a new video track with the requested facingMode
+  // and swap it into the existing MediaStream so MediaRecorder keeps recording.
+  const replaceVideoTrack = async (newFacing) => {
+    try {
+      if (!streamRef.current) {
+        // no active stream — fallback to startPreview which will set streamRef
+        setFacingMode(newFacing);
+        await startPreview();
+        return;
+      }
+
+      // Acquire a new video-only stream for the requested facing mode
+      const constraints = {
+        video: {
+          facingMode: newFacing,
+          width: { ideal: 1280 },
+          height: { ideal: 720 },
+        },
+        audio: false,
+      };
+      const tmpStream = await navigator.mediaDevices.getUserMedia(constraints);
+      const newVideoTrack = tmpStream.getVideoTracks()[0];
+      if (!newVideoTrack) {
+        tmpStream.getTracks().forEach((t) => t.stop());
+        return;
+      }
+
+      // Collect current video tracks (we will remove them after adding new)
+      const oldVideoTracks = streamRef.current.getVideoTracks();
+
+      // Add the new track to the existing stream object (this does not recreate the stream)
+      try {
+        streamRef.current.addTrack(newVideoTrack);
+      } catch (e) {
+        // some browsers can be strict; still proceed to set srcObject below
+        console.warn("addTrack threw", e);
+      }
+
+      // Make sure the <video> element uses the same streamRef (it should already)
+      if (videoRef.current) {
+        try {
+          // reassigning srcObject triggers the player to pick up the new track if needed
+          videoRef.current.srcObject = null;
+          videoRef.current.srcObject = streamRef.current;
+          videoRef.current.play && videoRef.current.play().catch(() => {});
+        } catch (e) {}
+      }
+
+      // Remove old video tracks from the stream _without_ stopping them immediately.
+      // We'll stop them after a tiny delay so MediaRecorder doesn't see a sudden 'ended' state.
+      for (const t of oldVideoTracks) {
+        try {
+          streamRef.current.removeTrack(t);
+        } catch (e) {}
+      }
+
+      // Delay stopping the old tracks to avoid killing MediaRecorder on flaky browsers
+      setTimeout(() => {
+        try {
+          for (const t of oldVideoTracks) {
+            try {
+              t.stop();
+            } catch (e) {}
+          }
+        } catch (e) {}
+      }, 150); // 150ms — adjust between 50..300ms depending on device reliability
+
+      // cleanup tmpStream audio tracks (if any) so they don't leak
+      try {
+        tmpStream.getAudioTracks().forEach((t) => t.stop());
+      } catch (e) {}
+
+      // update facingMode state for UI mirroring
+      setFacingMode(newFacing);
+    } catch (e) {
+      console.warn("replaceVideoTrack failed", e);
+      setError(e.message || String(e));
+    }
+  };
+  // Updated flip handler — if currently recording, swap track seamlessly; otherwise rely on normal flow
+  const handleFlipCamera = async () => {
+    const next = facingMode === "user" ? "environment" : "user";
+    try {
+      if (recording) {
+        // swap the video track on-the-fly while keeping MediaRecorder attached
+        await replaceVideoTrack(next);
+      } else {
+        // not recording: normal preview restart flow
+        stopPreview();
+        setFacingMode(next);
+        await startPreview();
+      }
+    } catch (e) {
+      console.warn("handleFlipCamera failed", e);
+      setFacingMode(next);
+    }
+  };
 
   const startRecording = () => {
     if (!streamRef.current) {
@@ -232,8 +335,12 @@ export default function CircularStream({
         facingMode === "user"
           ? `${nameBase}.mirrored.webm`
           : `${nameBase}.webm`;
-      const suffix = facingMode === 'user' ? '.mirrored.webm' : '.webm';
-const file = new File([recordedBlob], `video-message-${Date.now()}${suffix}`, { type: "video/webm" });
+      const suffix = facingMode === "user" ? ".mirrored.webm" : ".webm";
+      const file = new File(
+        [recordedBlob],
+        `video-message-${Date.now()}${suffix}`,
+        { type: "video/webm" }
+      );
 
       await (onFileRecorded ? onFileRecorded(file) : Promise.resolve());
       handleClose();
@@ -414,14 +521,14 @@ const file = new File([recordedBlob], `video-message-${Date.now()}${suffix}`, { 
                         </span>
                       </button>
 
-                      {/* Camera flip button */}
+                      {/* Camera flip button (UPDATED) */}
                       <button
-                        onClick={toggleFacing}
+                        onClick={handleFlipCamera}
                         className="p-3 rounded-full bg-gradient-to-r from-green-500 to-green-600 hover:bg-white/20 text-white border border-white/20 hover:border-white/30 transition-all duration-200 hover:scale-105"
                         title="Flip camera"
                         aria-label="Flip camera"
                       >
-                       <svg
+                        <svg
                           className="w-4 h-4 mr-2 inline"
                           fill="none"
                           stroke="currentColor"
