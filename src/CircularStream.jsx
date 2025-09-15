@@ -11,12 +11,6 @@ export default function CircularStream({
   onFileRecorded,
   buttonClassName = "",
 }) {
-  // --- PERFORMANCE TUNABLES ---
-  const isMobile = /Android|iPhone|iPad|Mobi/i.test(navigator.userAgent);
-  const CAPTURE_WIDTH = isMobile ? 480 : 640; // pixels captured by canvas
-  const CAPTURE_HEIGHT = isMobile ? 270 : 360;
-  const CAPTURE_FPS = isMobile ? 15 : 24; // target fps for captureStream/encoder
-
   // visible preview element
   const videoRef = useRef(null);
 
@@ -34,7 +28,6 @@ export default function CircularStream({
   const captureCanvasRef = useRef(null);
   const canvasStreamRef = useRef(null);
   const drawRafRef = useRef(null);
-  const vfrHandleRef = useRef(null); // requestVideoFrameCallback handle id
 
   // last ImageBitmap frame cache
   const lastFrameImageRef = useRef(null);
@@ -69,7 +62,6 @@ export default function CircularStream({
   const audioCtxRef = useRef(null);
   const analyserRef = useRef(null);
   const dataArrayRef = useRef(null);
-  const mediaSourceRef = useRef(null);
   const micLevelRef = useRef(0);
   const [micLevel, setMicLevel] = useState(0); // 0..1 for UI
   const micAnimRef = useRef(null);
@@ -184,9 +176,6 @@ export default function CircularStream({
     // canvas used to capture frames (must be in DOM and renderable)
     if (!captureCanvasRef.current) {
       const c = document.createElement("canvas");
-      // set to capture resolution for better encoder consistency
-      c.width = CAPTURE_WIDTH;
-      c.height = CAPTURE_HEIGHT;
       c.style.position = "fixed";
       c.style.left = "-9999px";
       c.style.width = "160px";
@@ -233,16 +222,18 @@ export default function CircularStream({
 
   // ---------------------------
   // draw loop: copy frames from renderVideoRef.current into canvas
-  // prefer requestVideoFrameCallback when available; fallback to RAF at limited fps
   // never clear canvas if driver not ready -> preserves last frame (prevents black)
   // uses captureMirrorRef to decide mirroring
   // ---------------------------
-  const drawOnce = async () => {
+  const draw = () => {
     try {
       const canvas = captureCanvasRef.current;
       const ctx = canvas && canvas.getContext && canvas.getContext("2d");
       const driver = renderVideoRef.current;
-      if (!ctx || !canvas) return;
+      if (!ctx || !canvas) {
+        drawRafRef.current = requestAnimationFrame(draw);
+        return;
+      }
 
       const hasDriverFrame =
         driver &&
@@ -251,59 +242,16 @@ export default function CircularStream({
         !driver.paused &&
         !driver.ended;
 
-      // target capture size (fixed)
-      const outW = CAPTURE_WIDTH;
-      const outH = CAPTURE_HEIGHT;
-
       if (hasDriverFrame) {
-        const vidW = driver.videoWidth;
-        const vidH = driver.videoHeight;
-
-        // Compute center-crop source rectangle (cover)
-        const scale = Math.max(outW / vidW, outH / vidH);
-        const sw = Math.round(outW / scale);
-        const sh = Math.round(outH / scale);
-        const sx = Math.round(Math.max(0, (vidW - sw) / 2));
-        const sy = Math.round(Math.max(0, (vidH - sh) / 2));
-
-        // ensure canvas pixel size is fixed to capture target
-        if (canvas.width !== outW || canvas.height !== outH) {
-          canvas.width = outW;
-          canvas.height = outH;
+        // ensure canvas pixel size matches driver for best capture results (or you can scale down)
+        if (
+          canvas.width !== driver.videoWidth ||
+          canvas.height !== driver.videoHeight
+        ) {
+          // you can reduce these numbers for performance (e.g., 640x360)
+          canvas.width = driver.videoWidth;
+          canvas.height = driver.videoHeight;
         }
-
-        // Prefer createImageBitmap cropping path when available (faster on some platforms)
-        if (typeof createImageBitmap === "function") {
-          try {
-            // createImageBitmap accepts source rectangle args when source is a video element
-            // (some browsers support it). If it fails we fall back to drawing directly.
-            const bmp = await createImageBitmap(driver, sx, sy, sw, sh);
-            try {
-              const prev = lastFrameImageRef.current;
-              if (prev && prev.close) prev.close();
-            } catch (e) {}
-            lastFrameImageRef.current = bmp;
-
-            ctx.save();
-            if (captureMirrorRef.current) {
-              // mirror horizontally if needed
-              ctx.translate(canvas.width, 0);
-              ctx.scale(-1, 1);
-            }
-            ctx.clearRect(0, 0, canvas.width, canvas.height);
-            ctx.drawImage(bmp, 0, 0, canvas.width, canvas.height);
-            ctx.restore();
-
-            try {
-              bmp.close && bmp.close();
-            } catch (e) {}
-            return;
-          } catch (e) {
-            // createImageBitmap cropping not supported or failed — fall back to drawImage with sx/sy
-          }
-        }
-
-        // Fallback: drawImage with source rectangle -> preserves aspect ratio (center-crop)
         try {
           ctx.save();
           if (captureMirrorRef.current) {
@@ -311,13 +259,13 @@ export default function CircularStream({
             ctx.scale(-1, 1);
           }
           ctx.clearRect(0, 0, canvas.width, canvas.height);
-          ctx.drawImage(driver, sx, sy, sw, sh, 0, 0, outW, outH);
+          ctx.drawImage(driver, 0, 0, canvas.width, canvas.height);
           ctx.restore();
         } catch (e) {
-          // transient draw error; ignore
+          // ignore drawing errors
         }
 
-        // Cache last frame as ImageBitmap for fallback redraws
+        // try to cache last frame as ImageBitmap for quick re-draw during swaps
         if (typeof createImageBitmap === "function") {
           try {
             createImageBitmap(canvas)
@@ -329,16 +277,18 @@ export default function CircularStream({
                 lastFrameImageRef.current = bmp;
               })
               .catch(() => {});
-          } catch (e) {}
+          } catch (e) {
+            // ignore
+          }
         }
       } else {
-        // No new frame -> redraw last known frame if possible (prevents black)
+        // draw last known frame if available, else do nothing (preserve canvas contents)
         const bmp = lastFrameImageRef.current;
         if (bmp) {
           try {
             if (!canvas.width || !canvas.height) {
-              canvas.width = bmp.width || outW;
-              canvas.height = bmp.height || outH;
+              canvas.width = bmp.width || 640;
+              canvas.height = bmp.height || 360;
             }
             ctx.save();
             if (captureMirrorRef.current) {
@@ -350,75 +300,14 @@ export default function CircularStream({
           } catch (e) {
             // ignore
           }
+        } else {
+          // no last frame; preserve existing canvas pixels (do nothing)
         }
-        // else: preserve existing pixels (do nothing)
       }
     } catch (e) {
       // swallow
-      console.warn("drawOnce error", e);
     }
-  };
-
-  const scheduleDrawFromVideo = () => {
-    // cancel previous handlers
-    try {
-      if (
-        vfrHandleRef.current &&
-        renderVideoRef.current &&
-        renderVideoRef.current.cancelVideoFrameCallback
-      ) {
-        try {
-          renderVideoRef.current.cancelVideoFrameCallback(vfrHandleRef.current);
-        } catch (e) {}
-        vfrHandleRef.current = null;
-      }
-      if (drawRafRef.current) {
-        cancelAnimationFrame(drawRafRef.current);
-        drawRafRef.current = null;
-      }
-    } catch (e) {}
-
-    const driver = renderVideoRef.current;
-    if (!driver) return;
-
-    if (typeof driver.requestVideoFrameCallback === "function") {
-      const cb = async () => {
-        await drawOnce();
-        // schedule next frame
-        try {
-          vfrHandleRef.current = driver.requestVideoFrameCallback(cb);
-        } catch (e) {
-          // fallback to RAF loop
-          const loop = async () => {
-            await drawOnce();
-            drawRafRef.current = requestAnimationFrame(loop);
-          };
-          drawRafRef.current = requestAnimationFrame(loop);
-        }
-      };
-      try {
-        vfrHandleRef.current = driver.requestVideoFrameCallback(cb);
-      } catch (e) {
-        // fallback
-        const loop = async () => {
-          await drawOnce();
-          drawRafRef.current = requestAnimationFrame(loop);
-        };
-        drawRafRef.current = requestAnimationFrame(loop);
-      }
-    } else {
-      // fallback: throttled RAF to CAPTURE_FPS
-      let last = performance.now();
-      const tick = async () => {
-        const now = performance.now();
-        if (now - last >= 1000 / CAPTURE_FPS) {
-          last = now;
-          await drawOnce();
-        }
-        drawRafRef.current = requestAnimationFrame(tick);
-      };
-      drawRafRef.current = requestAnimationFrame(tick);
-    }
+    drawRafRef.current = requestAnimationFrame(draw);
   };
 
   // ---------------------------
@@ -497,11 +386,12 @@ export default function CircularStream({
       captureMirrorRef.current = facingMode === "user";
 
       // start draw loop
-      scheduleDrawFromVideo();
+      if (drawRafRef.current) cancelAnimationFrame(drawRafRef.current);
+      drawRafRef.current = requestAnimationFrame(draw);
 
       // capture stream from canvas
       canvasStreamRef.current =
-        captureCanvasRef.current.captureStream(CAPTURE_FPS) || null;
+        captureCanvasRef.current.captureStream(30) || null; // target 30fps
 
       // combine canvas video track with audio tracks from camera stream
       const combined = new MediaStream();
@@ -516,12 +406,7 @@ export default function CircularStream({
         audioTracks.forEach((t) => combined.addTrack(t));
       } catch (e) {}
 
-      // configure recorder bitrate conservatively for mobile
-      const options = {
-        mimeType: "video/webm;codecs=vp8,opus",
-        videoBitsPerSecond: isMobile ? 600_000 : 900_000,
-        audioBitsPerSecond: 64_000,
-      };
+      const options = { mimeType: "video/webm;codecs=vp8,opus" };
       const mr = new MediaRecorder(combined, options);
       recorderRef.current = mr;
       mr.ondataavailable = (ev) => {
@@ -640,20 +525,8 @@ export default function CircularStream({
         maxTimerRef.current = null;
       }
     } finally {
-      // stop draw loop and frame callbacks
+      // stop draw loop
       try {
-        if (
-          vfrHandleRef.current &&
-          renderVideoRef.current &&
-          renderVideoRef.current.cancelVideoFrameCallback
-        ) {
-          try {
-            renderVideoRef.current.cancelVideoFrameCallback(
-              vfrHandleRef.current
-            );
-          } catch (e) {}
-          vfrHandleRef.current = null;
-        }
         if (drawRafRef.current) {
           cancelAnimationFrame(drawRafRef.current);
           drawRafRef.current = null;
@@ -667,6 +540,10 @@ export default function CircularStream({
 
   // ---------------------------
   // Flip camera while recording or previewing
+  // - we create a fresh driver <video> attached to a new getUserMedia stream
+  // - wait for it to produce frames, only then swap driver used by draw loop
+  // - update captureMirrorRef when swap occurs
+  // - show a crossfade overlay while waiting
   // ---------------------------
   const handleFlipCamera = async () => {
     const next = facingMode === "user" ? "environment" : "user";
@@ -687,6 +564,10 @@ export default function CircularStream({
         console.warn("[flip] getUserMedia returned null");
         return;
       }
+      console.debug(
+        "[flip] got newCam",
+        newCam.getVideoTracks().map((t) => t.label || t.id)
+      );
 
       // create a new fresh hidden driver video element (avoid reusing old driver)
       const newDriver = document.createElement("video");
@@ -731,7 +612,7 @@ export default function CircularStream({
         // swap pointer used by draw loop
         renderVideoRef.current = newDriver;
 
-        // update visible preview to show new camera
+        // update visible preview to show new camera (if you want preview to reflect the new cam)
         if (videoRef.current) {
           try {
             videoRef.current.srcObject = newCam;
@@ -745,9 +626,6 @@ export default function CircularStream({
         // update UI-facing facingMode too
         setFacingMode(next);
 
-        // restart draw scheduling onto new driver
-        scheduleDrawFromVideo();
-
         // small delay then cleanup old driver and stop its tracks
         setTimeout(() => {
           try {
@@ -759,16 +637,8 @@ export default function CircularStream({
                   oldDriver.parentNode.removeChild(oldDriver);
               } catch (e) {}
             }
-            // stop any leftover tracks from previous camera (we don't stop streamRef here)
-            try {
-              if (
-                oldDriver &&
-                oldDriver.srcObject &&
-                oldDriver.srcObject.getTracks
-              ) {
-                oldDriver.srcObject.getTracks().forEach((t) => t.stop());
-              }
-            } catch (e) {}
+            // stop any leftover tracks from previous camera (if they are no longer in streamRef)
+            // Note: we don't stop streamRef.current here because it's used for audio and preview.
           } catch (e) {}
         }, 120);
       } else {
@@ -791,6 +661,8 @@ export default function CircularStream({
 
   // ---------------------------
   // Mute/unmute mic toggle
+  // - toggles enabled flag on all audio tracks in streamRef.current
+  // - if recording, this will immediately affect the recorded track
   // ---------------------------
   const toggleMute = () => {
     const nextMuted = !muted;
@@ -945,16 +817,10 @@ export default function CircularStream({
         dataArrayRef.current = new Uint8Array(bufferLength);
       }
 
-      // create source from stream (keep reference to disconnect later)
+      // create source from stream (we'll reuse: don't create multiple sources on same stream)
       try {
-        if (mediaSourceRef.current) {
-          try {
-            mediaSourceRef.current.disconnect();
-          } catch (e) {}
-          mediaSourceRef.current = null;
-        }
+        // We create a MediaStreamSource and connect to analyser
         const src = audioCtx.createMediaStreamSource(stream);
-        mediaSourceRef.current = src;
         src.connect(analyserRef.current);
       } catch (e) {
         // if the stream is already connected or cross-origin, this may fail quietly
@@ -966,11 +832,9 @@ export default function CircularStream({
 
   const detachAnalyser = () => {
     try {
-      if (mediaSourceRef.current) {
-        try {
-          mediaSourceRef.current.disconnect();
-        } catch (e) {}
-        mediaSourceRef.current = null;
+      if (analyserRef.current) {
+        // cannot reliably disconnect MediaStreamSource if we didn't keep ref to it
+        // we'll just stop animation and let GC handle audio nodes when context closed
       }
       // stop animation
       stopMicLevelLoop();
@@ -995,6 +859,7 @@ export default function CircularStream({
           micLevelRef.current = Math.min(1, rms * 1.4);
           setMicLevel(micLevelRef.current);
         } else {
+          // fallback: zero
           setMicLevel(0);
         }
       } catch (e) {}
@@ -1086,6 +951,12 @@ export default function CircularStream({
               {/* Header */}
               <div className="flex items-center justify-between mb-6">
                 <div className="flex items-center gap-3">
+                  {/* <div className="flex items-center gap-2">
+                    <div className="w-2 h-2 rounded-full bg-red-500 animate-pulse" />
+                    <h3 className="text-lg font-bold text-white">
+                      Record Video
+                    </h3>
+                  </div> */}
                   <div className="px-3 py-1 rounded-full bg-white/10 text-xs font-medium text-white/80 mr-3 ">
                     {facingMode === "user" ? "Front" : "Back"} Camera
                   </div>
@@ -1329,7 +1200,9 @@ export default function CircularStream({
                                 : "bg-white/80"
                             }`}
                           />
-                          <span>{recording ? "Stop" : "Start"}</span>
+                          <span>
+                            {recording ? "Stop" : "Start"}
+                          </span>
                         </button>
 
                         {/* Camera flip */}
@@ -1352,6 +1225,7 @@ export default function CircularStream({
                               d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"
                             />
                           </svg>
+                          {/* Flip */}
                         </button>
                       </div>
                     </>
