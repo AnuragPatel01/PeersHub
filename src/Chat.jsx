@@ -2264,12 +2264,10 @@
 
 
 
-// Round Video Streaming
-// src/components/Chat.jsx
+
 import "./App.css";
 import React, { useEffect, useState, useRef } from "react";
 import CircularStream from "./CircularStream"; // adjust path if your CircularStream is in same folder use "./CircularStream"
-import ReplyInThread from "./ReplyInThread"; // new component for threaded replies
 import {
   initPeer,
   sendChat,
@@ -2312,286 +2310,286 @@ export default function Chat() {
     window.__msgs = messages;
   }
 
-  // === MirroredVideoCanvas (improved) ===
+  // MirroredVideoCanvas — minimal, with audio enabled and autoplay fallback
   function MirroredVideoCanvas({
-    src,
-    autoPlay = true,
-    mirror = true, // keep the canvas mirrored horizontally when true
-    cover = true, // use center-crop cover mode (prevents stretching inside fixed containers)
-    className = "",
-    onClose,
-  }) {
-    const canvasRef = React.useRef(null);
-    const hiddenVideoRef = React.useRef(null);
-    const rafRef = React.useRef(null);
-    const [needPlayButton, setNeedPlayButton] = React.useState(false);
-    const [playing, setPlaying] = React.useState(Boolean(autoPlay));
-    const mutedRef = React.useRef(true); // start muted to allow autoplay, restored later
+  src,
+  autoPlay = true,
+  mirror = true,       // keep the canvas mirrored horizontally when true
+  cover = true,        // use center-crop cover mode (prevents stretching inside fixed containers)
+  className = "",
+  onClose,
+}) {
+  const canvasRef = React.useRef(null);
+  const hiddenVideoRef = React.useRef(null);
+  const rafRef = React.useRef(null);
+  const [needPlayButton, setNeedPlayButton] = React.useState(false);
+  const [playing, setPlaying] = React.useState(Boolean(autoPlay));
+  const mutedRef = React.useRef(true); // start muted to allow autoplay, restored later
 
-    // Helper: attach src (MediaStream or URL)
-    React.useEffect(() => {
-      const vid = hiddenVideoRef.current;
-      if (!vid) return;
-      try {
-        if (src && typeof src === "object" && typeof src.getTracks === "function") {
-          // MediaStream
-          if (vid.srcObject !== src) {
-            vid.srcObject = src;
-          }
-        } else {
-          // URL or empty
-          if (vid.srcObject) vid.srcObject = null;
-          if (vid.src !== (src || "")) vid.src = src || "";
+  // Helper: attach src (MediaStream or URL)
+  React.useEffect(() => {
+    const vid = hiddenVideoRef.current;
+    if (!vid) return;
+    try {
+      if (src && typeof src === "object" && typeof src.getTracks === "function") {
+        // MediaStream
+        if (vid.srcObject !== src) {
+          vid.srcObject = src;
         }
-      } catch (e) {
-        console.warn("MirroredVideoCanvas: failed to attach src", e);
+      } else {
+        // URL or empty
+        if (vid.srcObject) vid.srcObject = null;
+        if (vid.src !== (src || "")) vid.src = src || "";
       }
-    }, [src]);
+    } catch (e) {
+      console.warn("MirroredVideoCanvas: failed to attach src", e);
+    }
+  }, [src]);
 
-    // Main setup + draw loop
-    React.useEffect(() => {
-      const vid = hiddenVideoRef.current;
-      const canvas = canvasRef.current;
-      if (!vid || !canvas) return;
+  // Main setup + draw loop
+  React.useEffect(() => {
+    const vid = hiddenVideoRef.current;
+    const canvas = canvasRef.current;
+    if (!vid || !canvas) return;
 
-      let mounted = true;
-      let ctx = canvas.getContext("2d");
+    let mounted = true;
+    let ctx = canvas.getContext("2d");
 
-      const safePauseAndClear = () => {
-        try {
-          vid.pause();
-        } catch (e) {}
-        try {
-          if (vid.srcObject) vid.srcObject = null;
-          else vid.removeAttribute("src");
-        } catch (e) {}
-      };
-
-      // draw function that supports cover center-crop and mirror
-      const drawFrame = () => {
-        if (!mounted) return;
-        try {
-          const vw = vid.videoWidth || canvas.width || 640;
-          const vh = vid.videoHeight || canvas.height || 480;
-          // ensure canvas pixel size equals video natural size for best quality
-          if (canvas.width !== vw || canvas.height !== vh) {
-            canvas.width = vw;
-            canvas.height = vh;
-          }
-
-          // compute draw source rectangle (cover/crop) so final display won't look stretched
-          let sx = 0,
-            sy = 0,
-            sw = vw,
-            sh = vh;
-
-          if (cover) {
-            // Desired aspect is canvas display aspect (CSS container might differ, but we can aim to maintain video natural aspect)
-            // Compute target aspect from canvas CSS size (clientWidth/clientHeight) if available
-            const cw = canvas.clientWidth || canvas.width;
-            const ch = canvas.clientHeight || canvas.height;
-            const tgtAspect = cw / (ch || 1) || canvas.width / canvas.height;
-            const vidAspect = vw / (vh || 1);
-
-            if (vidAspect > tgtAspect) {
-              // video is wider than target -> crop sides
-              const neededW = Math.round(vh * tgtAspect);
-              sx = Math.round((vw - neededW) / 2);
-              sw = neededW;
-              sy = 0;
-              sh = vh;
-            } else {
-              // video is taller -> crop top/bottom
-              const neededH = Math.round(vw / tgtAspect);
-              sy = Math.round((vh - neededH) / 2);
-              sh = neededH;
-              sx = 0;
-              sw = vw;
-            }
-          }
-
-          ctx.save();
-          ctx.clearRect(0, 0, canvas.width, canvas.height);
-          if (mirror) {
-            ctx.translate(canvas.width, 0);
-            ctx.scale(-1, 1);
-            ctx.drawImage(vid, sx, sy, sw, sh, 0, 0, canvas.width, canvas.height);
-          } else {
-            ctx.drawImage(vid, sx, sy, sw, sh, 0, 0, canvas.width, canvas.height);
-          }
-          ctx.restore();
-        } catch (e) {
-          // ignore transient draw errors
-        }
-        rafRef.current = requestAnimationFrame(drawFrame);
-      };
-
-      const setup = async () => {
-        // try muted autoplay first — browsers allow muted autoplay more reliably
-        try {
-          mutedRef.current = true;
-          vid.muted = true;
-          // ensure playsInline to avoid fullscreen on iOS
-          vid.playsInline = true;
-          await vid.play();
-          setNeedPlayButton(false);
-          setPlaying(true);
-        } catch (e) {
-          // autoplay failed (likely due to audio policy) -> show play button
-          setNeedPlayButton(true);
-          setPlaying(false);
-        } finally {
-          // Start draw loop anyway so a poster/thumbnail appears even if not playing
-          rafRef.current = requestAnimationFrame(drawFrame);
-        }
-      };
-
-      // Wait briefly for metadata (dimensions) so canvas can size properly
-      const waitMeta = () =>
-        new Promise((resolve) => {
-          if (vid.readyState >= 1) return resolve();
-          const onLoaded = () => {
-            cleanupListeners();
-            resolve();
-          };
-          const onError = () => {
-            cleanupListeners();
-            resolve();
-          };
-          const cleanupListeners = () => {
-            vid.removeEventListener("loadedmetadata", onLoaded);
-            vid.removeEventListener("error", onError);
-          };
-          vid.addEventListener("loadedmetadata", onLoaded);
-          vid.addEventListener("error", onError);
-          // fallback resolve after 700ms
-          setTimeout(() => {
-            cleanupListeners();
-            resolve();
-          }, 700);
-        });
-
-      let mountedSetup = true;
-      (async () => {
-        await waitMeta();
-        if (!mountedSetup) return;
-        setup();
-      })();
-
-      return () => {
-        mounted = false;
-        mountedSetup = false;
-        try {
-          if (rafRef.current) cancelAnimationFrame(rafRef.current);
-        } catch (e) {}
-        try {
-          // pause and clear video references to free decoder
-          safePauseAndClear();
-        } catch (e) {}
-      };
-    }, [src, autoPlay, mirror, cover]);
-
-    // play button to recover when autoplay blocked — also un-mute so audio will play
-    const handlePlayClick = async () => {
-      const vid = hiddenVideoRef.current;
-      if (!vid) return;
+    const safePauseAndClear = () => {
       try {
-        vid.muted = false;
-        mutedRef.current = false;
+        vid.pause();
+      } catch (e) {}
+      try {
+        if (vid.srcObject) vid.srcObject = null;
+        else vid.removeAttribute("src");
+      } catch (e) {}
+    };
+
+    // draw function that supports cover center-crop and mirror
+    const drawFrame = () => {
+      if (!mounted) return;
+      try {
+        const vw = vid.videoWidth || canvas.width || 640;
+        const vh = vid.videoHeight || canvas.height || 480;
+        // ensure canvas pixel size equals video natural size for best quality
+        if (canvas.width !== vw || canvas.height !== vh) {
+          canvas.width = vw;
+          canvas.height = vh;
+        }
+
+        // compute draw source rectangle (cover/crop) so final display won't look stretched
+        let sx = 0,
+          sy = 0,
+          sw = vw,
+          sh = vh;
+
+        if (cover) {
+          // Desired aspect is canvas display aspect (CSS container might differ, but we can aim to maintain video natural aspect)
+          // Compute target aspect from canvas CSS size (clientWidth/clientHeight) if available
+          const cw = canvas.clientWidth || canvas.width;
+          const ch = canvas.clientHeight || canvas.height;
+          const tgtAspect = cw / (ch || 1) || canvas.width / canvas.height;
+          const vidAspect = vw / (vh || 1);
+
+          if (vidAspect > tgtAspect) {
+            // video is wider than target -> crop sides
+            const neededW = Math.round(vh * tgtAspect);
+            sx = Math.round((vw - neededW) / 2);
+            sw = neededW;
+            sy = 0;
+            sh = vh;
+          } else {
+            // video is taller -> crop top/bottom
+            const neededH = Math.round(vw / tgtAspect);
+            sy = Math.round((vh - neededH) / 2);
+            sh = neededH;
+            sx = 0;
+            sw = vw;
+          }
+        }
+
+        ctx.save();
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+        if (mirror) {
+          ctx.translate(canvas.width, 0);
+          ctx.scale(-1, 1);
+          ctx.drawImage(vid, sx, sy, sw, sh, 0, 0, canvas.width, canvas.height);
+        } else {
+          ctx.drawImage(vid, sx, sy, sw, sh, 0, 0, canvas.width, canvas.height);
+        }
+        ctx.restore();
+      } catch (e) {
+        // ignore transient draw errors
+      }
+      rafRef.current = requestAnimationFrame(drawFrame);
+    };
+
+    const setup = async () => {
+      // try muted autoplay first — browsers allow muted autoplay more reliably
+      try {
+        mutedRef.current = true;
+        vid.muted = true;
+        // ensure playsInline to avoid fullscreen on iOS
+        vid.playsInline = true;
         await vid.play();
         setNeedPlayButton(false);
         setPlaying(true);
       } catch (e) {
-        console.warn("MirroredVideoCanvas: user play failed", e);
+        // autoplay failed (likely due to audio policy) -> show play button
+        setNeedPlayButton(true);
+        setPlaying(false);
+      } finally {
+        // Start draw loop anyway so a poster/thumbnail appears even if not playing
+        rafRef.current = requestAnimationFrame(drawFrame);
       }
     };
 
-    // Request fullscreen of canvas
-    const goFullscreen = async () => {
-      const el = canvasRef.current;
-      if (!el) return;
+    // Wait briefly for metadata (dimensions) so canvas can size properly
+    const waitMeta = () =>
+      new Promise((resolve) => {
+        if (vid.readyState >= 1) return resolve();
+        const onLoaded = () => {
+          cleanupListeners();
+          resolve();
+        };
+        const onError = () => {
+          cleanupListeners();
+          resolve();
+        };
+        const cleanupListeners = () => {
+          vid.removeEventListener("loadedmetadata", onLoaded);
+          vid.removeEventListener("error", onError);
+        };
+        vid.addEventListener("loadedmetadata", onLoaded);
+        vid.addEventListener("error", onError);
+        // fallback resolve after 700ms
+        setTimeout(() => {
+          cleanupListeners();
+          resolve();
+        }, 700);
+      });
+
+    let mountedSetup = true;
+    (async () => {
+      await waitMeta();
+      if (!mountedSetup) return;
+      setup();
+    })();
+
+    return () => {
+      mounted = false;
+      mountedSetup = false;
       try {
-        if (el.requestFullscreen) await el.requestFullscreen();
-        else if (el.webkitRequestFullscreen) el.webkitRequestFullscreen();
-        else if (el.msRequestFullscreen) el.msRequestFullscreen();
-      } catch (e) {
-        console.warn("requestFullscreen failed", e);
-      }
+        if (rafRef.current) cancelAnimationFrame(rafRef.current);
+      } catch (e) {}
+      try {
+        // pause and clear video references to free decoder
+        safePauseAndClear();
+      } catch (e) {}
     };
+  }, [src, autoPlay, mirror, cover]);
 
-    return (
-      <div className={`w-full h-auto ${className} relative`}>
-        <video
-          ref={hiddenVideoRef}
-          playsInline
-          // start muted so autoplay attempts are allowed; we un-mute if user interacts
-          muted={true}
-          style={{ display: "none" }}
-          preload="metadata"
-          aria-hidden="true"
+  // play button to recover when autoplay blocked — also un-mute so audio will play
+  const handlePlayClick = async () => {
+    const vid = hiddenVideoRef.current;
+    if (!vid) return;
+    try {
+      vid.muted = false;
+      mutedRef.current = false;
+      await vid.play();
+      setNeedPlayButton(false);
+      setPlaying(true);
+    } catch (e) {
+      console.warn("MirroredVideoCanvas: user play failed", e);
+    }
+  };
+
+  // Request fullscreen of canvas
+  const goFullscreen = async () => {
+    const el = canvasRef.current;
+    if (!el) return;
+    try {
+      if (el.requestFullscreen) await el.requestFullscreen();
+      else if (el.webkitRequestFullscreen) el.webkitRequestFullscreen();
+      else if (el.msRequestFullscreen) el.msRequestFullscreen();
+    } catch (e) {
+      console.warn("requestFullscreen failed", e);
+    }
+  };
+
+  return (
+    <div className={`w-full h-auto ${className} relative`}>
+      <video
+        ref={hiddenVideoRef}
+        playsInline
+        // start muted so autoplay attempts are allowed; we un-mute if user interacts
+        muted={true}
+        style={{ display: "none" }}
+        preload="metadata"
+        aria-hidden="true"
+      />
+      <div className="relative w-full bg-black">
+        <canvas
+          ref={canvasRef}
+          className="w-full h-auto block object-contain"
+          aria-label="Mirrored video preview"
         />
-        <div className="relative w-full bg-black">
-          <canvas
-            ref={canvasRef}
-            className="w-full h-auto block object-contain"
-            aria-label="Mirrored video preview"
-          />
-          {/* play overlay if autoplay blocked */}
-          {needPlayButton && (
+        {/* play overlay if autoplay blocked */}
+        {needPlayButton && (
+          <button
+            onClick={handlePlayClick}
+            aria-label="Play video"
+            className="absolute inset-0 m-auto w-12 h-12 flex items-center justify-center rounded-full bg-black/50 text-white"
+            style={{ left: "50%", top: "50%", transform: "translate(-50%,-50%)" }}
+          >
+            <svg width="22" height="22" viewBox="0 0 24 24" fill="currentColor">
+              <path d="M8 5v14l11-7z" />
+            </svg>
+          </button>
+        )}
+
+        {/* controls */}
+        <div className="absolute left-3 bottom-3 flex gap-2 items-center">
+          <button
+            onClick={() => {
+              const vid = hiddenVideoRef.current;
+              if (!vid) return;
+              if (playing) {
+                vid.pause();
+                setPlaying(false);
+              } else {
+                vid.muted = false;
+                vid.play().catch(() => {});
+                setPlaying(true);
+              }
+            }}
+            className="px-3 py-1 rounded bg-black/40 text-white text-sm"
+            aria-label={playing ? "Pause" : "Play"}
+          >
+            {playing ? "Pause" : "Play"}
+          </button>
+
+          <button
+            onClick={goFullscreen}
+            className="px-3 py-1 rounded bg-black/40 text-white text-sm"
+            aria-label="Fullscreen"
+          >
+            Fullscreen
+          </button>
+
+          {onClose && (
             <button
-              onClick={handlePlayClick}
-              aria-label="Play video"
-              className="absolute inset-0 m-auto w-12 h-12 flex items-center justify-center rounded-full bg-black/50 text-white"
-              style={{ left: "50%", top: "50%", transform: "translate(-50%,-50%)" }}
+              onClick={onClose}
+              className="px-3 py-1 rounded bg-black/40 text-white text-sm"
             >
-              <svg width="22" height="22" viewBox="0 0 24 24" fill="currentColor">
-                <path d="M8 5v14l11-7z" />
-              </svg>
+              Close
             </button>
           )}
-
-          {/* controls */}
-          <div className="absolute left-3 bottom-3 flex gap-2 items-center">
-            <button
-              onClick={() => {
-                const vid = hiddenVideoRef.current;
-                if (!vid) return;
-                if (playing) {
-                  vid.pause();
-                  setPlaying(false);
-                } else {
-                  vid.muted = false;
-                  vid.play().catch(() => {});
-                  setPlaying(true);
-                }
-              }}
-              className="px-3 py-1 rounded bg-black/40 text-white text-sm"
-              aria-label={playing ? "Pause" : "Play"}
-            >
-              {playing ? "Pause" : "Play"}
-            </button>
-
-            <button
-              onClick={goFullscreen}
-              className="px-3 py-1 rounded bg-black/40 text-white text-sm"
-              aria-label="Fullscreen"
-            >
-              Fullscreen
-            </button>
-
-            {onClose && (
-              <button
-                onClick={onClose}
-                className="px-3 py-1 rounded bg-black/40 text-white text-sm"
-              >
-                Close
-              </button>
-            )}
-          </div>
         </div>
       </div>
-    );
-  }
+    </div>
+  );
+}
 
   // file transfer
   const [incomingFileOffers, setIncomingFileOffers] = useState({});
@@ -2620,15 +2618,6 @@ export default function Chat() {
   const [typingUsers, setTypingUsers] = useState({});
   const [replyTo, setReplyTo] = useState(null);
   const typingTimeoutRef = useRef(null);
-
-  // THREADING state & refs
-  const [threadModalOpen, setThreadModalOpen] = useState(false);
-  const [threadRootId, setThreadRootId] = useState(null);
-  const [threadRootMessage, setThreadRootMessage] = useState(null);
-  const [unreadReplies, setUnreadReplies] = useState({}); // { rootId: count }
-  const threadSubscribersRef = useRef({}); // runtime map rootId -> Set(subscriberIds)
-  const longPressTimerRef = useRef(null);
-  const LONG_PRESS_MS = 3000;
 
   // refs
   const messagesEndRef = useRef(null);
@@ -2764,6 +2753,8 @@ export default function Chat() {
       );
     }
 
+    // Place this above your Chat component or inside it (but before usage)
+    
     // final fallback: show the video element clipped to circle (may show black frame)
     return (
       <video
@@ -2842,62 +2833,6 @@ export default function Chat() {
       persistMessages(next);
       return next;
     });
-  };
-
-  // Thread helpers
-  const ensureThreadSubscribers = (rootId) => {
-    if (!threadSubscribersRef.current[rootId]) {
-      threadSubscribersRef.current[rootId] = new Set();
-    }
-    return threadSubscribersRef.current[rootId];
-  };
-
-  const openThreadModal = (rootMsg) => {
-    if (!rootMsg || !rootMsg.id) return;
-    setThreadRootId(rootMsg.id);
-    setThreadRootMessage(rootMsg);
-    setThreadModalOpen(true);
-    // clear local unread for that root
-    setUnreadReplies((prev) => {
-      const next = { ...prev };
-      delete next[rootMsg.id];
-      return next;
-    });
-  };
-
-  const closeThreadModal = () => {
-    setThreadModalOpen(false);
-    setThreadRootId(null);
-    setThreadRootMessage(null);
-  };
-
-  const sendThreadReply = async (replyMsgObj) => {
-    // replyMsgObj: { id, text, from, ts, threadRootId, replyTo }
-    if (!replyMsgObj || !replyMsgObj.threadRootId) return;
-
-    const rootId = replyMsgObj.threadRootId;
-    const subsSet = ensureThreadSubscribers(rootId);
-    subsSet.add(getLocalPeerId() || myId || username);
-
-    const payload = {
-      ...replyMsgObj,
-      type: "thread",
-      threadRootId: rootId,
-      subscribers: Array.from(subsSet),
-    };
-
-    // Add to local timeline (optional — keeps thread replies searchable)
-    setMessages((m) => {
-      const next = [...m, payload];
-      persistMessages(next);
-      return next;
-    });
-
-    try {
-      sendChat(payload); // broadcast thread message
-    } catch (e) {
-      console.warn("sendChat (thread) failed", e);
-    }
   };
 
   // transfer helpers (same as before)
@@ -2999,6 +2934,7 @@ export default function Chat() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []); // run once on mount
 
+  // handle incoming file chunk and write to disk using saved handle
   // handle incoming file chunk and write to disk using saved handle
   const handleIncomingFileChunk = async (data) => {
     // defensive: some runtimes wrap chunk under .data (PeerJS / structured clone variants)
@@ -3384,59 +3320,6 @@ export default function Chat() {
     if (from === "__system_ack_read__" && payloadOrText && payloadOrText.id) {
       const { fromPeer, id } = payloadOrText;
       addUniqueToMsgArray(id, "reads", fromPeer);
-      return;
-    }
-
-    // THREAD message handling
-    if (
-      payloadOrText &&
-      typeof payloadOrText === "object" &&
-      payloadOrText.type === "thread" &&
-      payloadOrText.threadRootId
-    ) {
-      const threadMsg = payloadOrText;
-      // store thread message in timeline so UI can render it if desired
-      setMessages((m) => {
-        const next = [...m, threadMsg];
-        persistMessages(next);
-        return next;
-      });
-
-      try {
-        // maintain subscribers set locally
-        const subs = Array.isArray(threadMsg.subscribers) ? threadMsg.subscribers : [];
-        const subsSet = ensureThreadSubscribers(threadMsg.threadRootId);
-        subs.forEach((s) => subsSet.add(s));
-
-        const localId = getLocalPeerId() || myId || username;
-
-        // If this client is one of subscribers, notify (but only if thread modal for that root is NOT open)
-        if (!threadModalOpen || threadRootId !== threadMsg.threadRootId) {
-          // increment unread count for root
-          setUnreadReplies((prev) => {
-            const next = { ...(prev || {}) };
-            next[threadMsg.threadRootId] = (next[threadMsg.threadRootId] || 0) + 1;
-            return next;
-          });
-
-          const shouldNotify =
-            subs.includes(localId) ||
-            subs.includes(username) ||
-            subs.includes(myId) ||
-            subs.includes(threadMsg.from) ||
-            subs.includes(threadMsg.fromName);
-
-          if (shouldNotify) {
-            maybeNotify(
-              threadMsg.fromName || threadMsg.from || "Someone",
-              `Reply in thread: ${threadMsg.text?.slice(0, 120) || "<media>"}`
-            );
-          }
-        }
-      } catch (e) {
-        console.warn("Thread incoming handling error", e);
-      }
-
       return;
     }
 
@@ -3930,13 +3813,6 @@ export default function Chat() {
       deliveries: [],
       reads: [getLocalPeerId() || myId],
     };
-
-    // If replying to a message, subscribe to that message's thread
-    if (replyTo && replyTo.id) {
-      const subs = ensureThreadSubscribers(replyTo.id);
-      subs.add(getLocalPeerId() || myId || username);
-    }
-
     setMessages((m) => {
       const next = [...m, msgObj];
       persistMessages(next);
@@ -4055,9 +3931,9 @@ export default function Chat() {
       // Use explicit isMirrored flag if present; fallback to false
       const isMirrored = Boolean(m.isMirrored);
 
-      // wrapper with long-press for thread + click to preview
       return (
         <div
+          onClick={() => openCenterPreview(m)}
           key={`${m.id ?? m.ts}-${idx}`}
           className={`group p-2 rounded-2xl max-w-[50%] mb-5 cursor-pointer ${
             isMe ? "ml-auto text-blue-500" : " text-black"
@@ -4070,61 +3946,12 @@ export default function Chat() {
               openCenterPreview(m);
             }
           }}
-          onClick={() => openCenterPreview(m)}
-          onMouseDown={(e) => {
-            longPressTimerRef.current = setTimeout(() => {
-              openThreadModal(m);
-              longPressTimerRef.current = null;
-            }, LONG_PRESS_MS);
-          }}
-          onMouseUp={() => {
-            if (longPressTimerRef.current) {
-              clearTimeout(longPressTimerRef.current);
-              longPressTimerRef.current = null;
-            }
-          }}
-          onMouseLeave={() => {
-            if (longPressTimerRef.current) {
-              clearTimeout(longPressTimerRef.current);
-              longPressTimerRef.current = null;
-            }
-          }}
-          onTouchStart={() => {
-            longPressTimerRef.current = setTimeout(() => {
-              openThreadModal(m);
-              longPressTimerRef.current = null;
-            }, LONG_PRESS_MS);
-          }}
-          onTouchEnd={() => {
-            if (longPressTimerRef.current) {
-              clearTimeout(longPressTimerRef.current);
-              longPressTimerRef.current = null;
-            }
-          }}
+          aria-label={isVideo ? "Open video message" : "Open file"}
         >
           <div className="text-xs font-bold flex items-center">
             <div className="flex-1">{isMe ? "You" : m.from}</div>
             <div className="text-[10px] text-gray-700/70 ml-2">{time}</div>
             {isMe && renderStatusDot(m)}
-
-            {/* Thread button + unread badge */}
-            <div className="ml-2 flex items-center gap-2">
-              <button
-                onClick={(e) => {
-                  e.stopPropagation();
-                  openThreadModal(m);
-                }}
-                className="text-xs px-2 py-1 bg-white/10 rounded-full text-blue-400 hover:bg-white/20"
-                aria-label="Open thread"
-              >
-                Thread
-              </button>
-              {unreadReplies[m.id] ? (
-                <div className="text-xs bg-red-500 text-white rounded-full px-2 py-0.5">
-                  {unreadReplies[m.id]}
-                </div>
-              ) : null}
-            </div>
           </div>
 
           {m.replyTo && (
@@ -4203,78 +4030,18 @@ export default function Chat() {
       );
     }
 
-    // Regular chat message container (with long-press -> open thread)
     return (
       <div
+        onClick={() => handleTapMessage(m)}
         key={`${m.id ?? m.ts}-${idx}`}
         className={`p-2 rounded-2xl max-w-[50%] mb-2 cursor-pointer ${
           isMe ? "ml-auto bg-blue-500 text-white" : "bg-white/100  text-black"
         }`}
-        onClick={() => handleTapMessage(m)}
-        onMouseDown={(e) => {
-          // start long-press timer (desktop)
-          longPressTimerRef.current = setTimeout(() => {
-            openThreadModal(m);
-            longPressTimerRef.current = null;
-          }, LONG_PRESS_MS);
-        }}
-        onMouseUp={() => {
-          if (longPressTimerRef.current) {
-            clearTimeout(longPressTimerRef.current);
-            longPressTimerRef.current = null;
-          }
-        }}
-        onMouseLeave={() => {
-          if (longPressTimerRef.current) {
-            clearTimeout(longPressTimerRef.current);
-            longPressTimerRef.current = null;
-          }
-        }}
-        onTouchStart={() => {
-          // mobile long-press
-          longPressTimerRef.current = setTimeout(() => {
-            openThreadModal(m);
-            longPressTimerRef.current = null;
-          }, LONG_PRESS_MS);
-        }}
-        onTouchEnd={() => {
-          if (longPressTimerRef.current) {
-            clearTimeout(longPressTimerRef.current);
-            longPressTimerRef.current = null;
-          }
-        }}
-        role="button"
-        tabIndex={0}
-        onKeyDown={(e) => {
-          if (e.key === "Enter" || e.key === " ") {
-            e.preventDefault();
-            handleTapMessage(m);
-          }
-        }}
       >
         <div className="text-xs font-bold flex items-center">
           <div className="flex-1">{isMe ? "You" : from}</div>
           <div className="text-[10px] text-gray-700 /70 ml-2">{time}</div>
           {isMe && renderStatusDot(m)}
-
-          {/* Thread button + unread badge */}
-          <div className="ml-2 flex items-center gap-2">
-            <button
-              onClick={(e) => {
-                e.stopPropagation();
-                openThreadModal(m);
-              }}
-              className="text-xs px-2 py-1 bg-white/10 rounded-full text-blue-400 hover:bg-white/20"
-              aria-label="Open thread"
-            >
-              Thread
-            </button>
-            {unreadReplies[m.id] ? (
-              <div className="text-xs bg-red-500 text-white rounded-full px-2 py-0.5">
-                {unreadReplies[m.id]}
-              </div>
-            ) : null}
-          </div>
         </div>
         {m.replyTo && (
           <div className="mt-2 mb-2 p-2 rounded border border-white/5 text-xs text-gray-600 bg-gray-300">
@@ -4707,6 +4474,8 @@ export default function Chat() {
     setCenterPreviewIsMirrored(false);
   };
 
+  // wire up progress/completion callbacks (already done above)
+
   // UI rendering
   // This should be inside your Chat component function
   return (
@@ -4962,47 +4731,6 @@ export default function Chat() {
             onClick={closeCenterPreview}
             aria-label="Click to close preview"
           />
-        </div>
-      )}
-
-      {/* Thread composer modal */}
-      {threadModalOpen && threadRootMessage && (
-        <div className="fixed inset-0 z-60 flex items-end md:items-center justify-center p-4">
-          <div className="absolute inset-0 bg-black/50" onClick={closeThreadModal} />
-          <div className="relative w-full max-w-2xl mx-auto z-70">
-            <div className="bg-white/5 rounded-2xl p-4 shadow-lg">
-              <h3 className="text-sm font-semibold text-white mb-2">Thread — Replying to {threadRootMessage.from}</h3>
-
-              <ReplyInThread
-                rootMessage={threadRootMessage}
-                currentUser={username || getLocalPeerId() || myId}
-                onSend={async (replyMsg) => {
-                  // ensure threadRootId present
-                  replyMsg.threadRootId = threadRootMessage.threadRootId || threadRootMessage.id;
-                  // subscribe local user
-                  const subsSet = ensureThreadSubscribers(replyMsg.threadRootId);
-                  subsSet.add(username || getLocalPeerId() || myId);
-                  // send thread reply
-                  await sendThreadReply({
-                    id: replyMsg.id || nanoid(),
-                    text: replyMsg.text,
-                    from: getLocalPeerId() || myId,
-                    fromName: username,
-                    ts: Date.now(),
-                    threadRootId: replyMsg.threadRootId,
-                    replyTo: replyMsg.replyTo || null,
-                  });
-                  // after sending, clear local unread for this thread
-                  setUnreadReplies((prev) => {
-                    const next = { ...(prev || {}) };
-                    delete next[replyMsg.threadRootId];
-                    return next;
-                  });
-                }}
-                onCancel={closeThreadModal}
-              />
-            </div>
-          </div>
         </div>
       )}
 
