@@ -919,7 +919,7 @@ export default function CircularStream({
       <button
         onClick={handleOpen}
         title="Record video message"
-        className={`group relative p-3 rounded-full hover:scale-110 active:scale-95 transition-all duration-200 shadow-lg bg-gradient-to-r from-gray-50 to-gray-50  text-white hover:shadow-xl ${buttonClassName}`}
+        className={`group relative p-3 rounded-full hover:scale-110 active:scale-95 transition-all duration-200 shadow-lg bg-gradient-to-r from-black to-black  text-white hover:shadow-xl ${buttonClassName}`}
         aria-label="Record video message"
       >
         <div className="absolute inset-0 rounded-full bg-gradient-to-r from-blue-400 to-blue-400  transition-opacity duration-200" />

@@ -4519,10 +4519,11 @@ export default function Chat() {
         </div>
       )}
 
-      <div className="h-[92vh] md:h-[92vh] max-w-[430px] w-full mx-auto bg-gray-50 text-purple-600 p-6 flex flex-col rounded-4xl">
-        <header className="flex items-center justify-between mb-4">
+      <div className="h-[92vh] md:h-[92vh] max-w-[430px] w-full mx-auto bg-black text-green-600 p-6 flex flex-col font-bold text-base rounded-4xl">
+        
+        <header className="flex items-center justify-between mb-4 ">
           <div className="flex gap-2.5">
-            <div className="text-sm text-blue-600">YourID</div>
+            <div className="text-sm text-purple-500">YourID</div>
             <div className="font-mono">{myId || "..."}</div>
             <div className="text-sm text-blue-600">Name: {username}</div>
             <div className="text-xs text-purple-500 mt-1">
@@ -4533,7 +4534,7 @@ export default function Chat() {
           <div className="relative" ref={menuRef}>
             <button
               onClick={() => setMenuOpen((s) => !s)}
-              className="p-2 rounded-full  bg-gradient-to-r from-gray-50 to-gray-50 text-white"
+              className="p-2 rounded-full  bg-gradient-to-r from-black to-black text-white"
               aria-label="Menu"
             >
               <svg
@@ -4557,7 +4558,7 @@ export default function Chat() {
             >
               <button
                 onClick={handleCreateHub}
-                className="w-full text-left px-4 py-3 hover:bg-white/20 border-b border-white/5 text-green-500"
+                className="w-full text-left px-4 py-3 bg-gradient-to-r from-black to-black  hover:bg-white/20 border-b border-white/5 text-green-500"
               >
                 <span className="font-semibold">Create Hub</span>
                 <div className="text-xs text-gray-400">
@@ -4567,7 +4568,7 @@ export default function Chat() {
 
               <button
                 onClick={handleJoinHub}
-                className="w-full text-left px-4 py-3 hover:bg-white/20 border-b border-white/5 text-blue-500"
+                className="w-full text-left px-4 py-3 bg-gradient-to-r from-black to-black  hover:bg-white/20 border-b border-white/5 text-blue-500"
               >
                 <span className="font-semibold">Join Hub</span>
                 <div className="text-xs text-gray-400">
@@ -4577,7 +4578,7 @@ export default function Chat() {
 
               <button
                 onClick={handleLeaveClick}
-                className="w-full text-left px-4 py-3 hover:bg-white/20 text-red-500 rounded-b-lg"
+                className="w-full text-left px-4 py-3 bg-gradient-to-r from-black to-black  hover:bg-white/20 text-red-500 rounded-b-lg"
               >
                 <span className="font-semibold">Leave</span>
                 <div className="text-xs text-gray-400">
@@ -4661,7 +4662,7 @@ export default function Chat() {
               {/* Send button inside input */}
               <button
                 onClick={send}
-                className="absolute right-2 top-1/2 -translate-y-1/2 w-14 h-10 flex items-center  bg-gradient-to-r from-gray-50 to-gray-50 justify-center rounded-full text-blue-500 "
+                className="absolute right-2 top-1/2 -translate-y-1/2 w-14 h-10 flex items-center  bg-gradient-to-r from-black to-black justify-center rounded-full text-blue-500 "
                 title="Send"
                 aria-label="Send message"
               >
