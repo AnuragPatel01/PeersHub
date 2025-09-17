@@ -817,57 +817,6 @@
 //   return createPeerWithId(storedId);
 // };
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 // ---------- src/webrtc.js (updated: disk-to-disk streaming) ----------
 
 /*
@@ -912,9 +861,12 @@ let onBootstrapChangedGlobal = null;
 let onFileProgressGlobal = null;
 let onFileCompleteGlobal = null;
 
-export const setOnFileProgress = (fn) => { onFileProgressGlobal = fn; };
-export const setOnFileComplete = (fn) => { onFileCompleteGlobal = fn; };
-
+export const setOnFileProgress = (fn) => {
+  onFileProgressGlobal = fn;
+};
+export const setOnFileComplete = (fn) => {
+  onFileCompleteGlobal = fn;
+};
 
 window.__PH_debug = () => ({
   peerId: peer ? peer.id : null,
@@ -1012,9 +964,22 @@ export const sendChat = (msgObj) => {
   broadcastRaw(payload);
 };
 
-export const sendTyping = (fromName, isTyping) => {
-  const payload = { type: "typing", fromName, isTyping };
-  broadcastRaw(payload);
+// sendTyping: now accepts optional threadRootId
+export const sendTyping = (fromName, isTyping, threadRootId = null) => {
+  try {
+    const payload = {
+      type: "typing",
+      fromName,
+      isTyping: !!isTyping,
+      // include threadRootId (null for main chat)
+      threadRootId: threadRootId || null,
+    };
+    // DEBUG: outgoing typing envelope
+    console.debug("OUTGOING typing:", payload);
+    broadcastRaw(payload);
+  } catch (e) {
+    console.warn("sendTyping failed:", e);
+  }
 };
 
 const sendAckDeliver = (toPeerId, msgId) => {
@@ -1032,23 +997,39 @@ const sendAckDeliver = (toPeerId, msgId) => {
   }
 };
 
-export const sendAckRead = (msgId, originPeerId) => {
+// sendAckRead: now supports thread read acks
+export const sendAckRead = (
+  msgId,
+  originPeerId = null,
+  isThread = false,
+  threadRootId = null
+) => {
   if (!msgId) return;
   try {
-    if (originPeerId && connections[originPeerId]) {
-      sendToConn(connections[originPeerId], {
-        type: "ack_read",
-        id: msgId,
-        from: peer.id,
-      });
-      return;
-    }
-    broadcastRaw({
+    const payload = {
       type: "ack_read",
       id: msgId,
-      from: peer.id,
-      to: originPeerId || null,
-    });
+      from: peer ? peer.id : null,
+      // include thread marker and thread root id (null for main chat)
+      isThread: !!isThread,
+      threadRootId: threadRootId || null,
+      to: originPeerId || null, // optional "to" for targeted delivery
+    };
+
+    // DEBUG: outgoing ack read
+    console.debug("OUTGOING ack_read:", payload);
+
+    if (originPeerId && connections[originPeerId]) {
+      // prefer direct send to the origin peer
+      const direct = { ...payload };
+      // remove 'to' when sending directly (not needed)
+      delete direct.to;
+      sendToConn(connections[originPeerId], direct);
+      return;
+    }
+
+    // broadcast to everyone (some peers will ignore if not relevant)
+    broadcastRaw(payload);
   } catch (e) {
     console.warn("sendAckRead failed", e);
   }
@@ -1184,7 +1165,6 @@ const streamFileToConn = async (conn, file, offerId) => {
       } catch (err) {}
     }
     // -----------------------------------------------------------------
-
   } catch (e) {
     console.warn("streamFileToConn error", e);
     try {
@@ -1357,8 +1337,9 @@ const setupConnection = (
     if (data.type === "typing") {
       if (onMessage)
         onMessage("__system_typing__", {
-          fromName: data.fromName,
-          isTyping: data.isTyping,
+          fromName: data.fromName || data.from || data.name,
+          isTyping: data.isTyping ?? data.typing ?? false,
+          threadRootId: data.threadRootId || data.rootId || null,
         });
       return;
     }

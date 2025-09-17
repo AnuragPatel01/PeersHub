@@ -2645,8 +2645,8 @@ export default function Chat() {
   // incoming messages callback from webrtc
   const handleIncoming = async (from, payloadOrText) => {
     // DEBUG: inspect raw incoming envelope occasionally while testing
-    // console.debug("handleIncoming:", { from, payloadOrText });
-
+    console.debug("handleIncoming:", { from, payloadOrText });
+    console.debug("SYS_TYPING recv:", { from, payloadOrText });
     try {
       // ---------- 1) typing (main chat or thread) ----------
       if (from === "__system_typing__" && payloadOrText) {
