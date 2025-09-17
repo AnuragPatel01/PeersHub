@@ -2260,6 +2260,7 @@
 // }
 
 // Reply in Thread
+
 // src/components/Chat.jsx
 import "./App.css";
 import React, { useEffect, useState, useRef } from "react";
@@ -2289,83 +2290,29 @@ const LS_MSGS = "ph_msgs_v1";
 const LS_THREADS = "ph_threads_v1";
 const MAX_MSGS = 100;
 
-/* -------------------- Simple IndexedDB helpers -------------------- */
-/* Usage:
-     await idbSet(key, value)
-     const v = await idbGet(key)
-*/
-const DB_NAME = "peershub_v1";
-const DB_VERSION = 1;
-const STORE_NAME = "kv";
-
-const openDb = () =>
-  new Promise((resolve, reject) => {
-    if (!window.indexedDB) {
-      resolve(null);
-      return;
-    }
-    const req = window.indexedDB.open(DB_NAME, DB_VERSION);
-    req.onerror = (e) => {
-      console.warn("IDB open error", e);
-      resolve(null);
-    };
-    req.onupgradeneeded = (e) => {
-      const db = e.target.result;
-      if (!db.objectStoreNames.contains(STORE_NAME)) {
-        db.createObjectStore(STORE_NAME);
-      }
-    };
-    req.onsuccess = (e) => resolve(e.target.result);
-  });
-
-const idbGet = async (key) => {
-  try {
-    const db = await openDb();
-    if (!db) return null;
-    return await new Promise((resolve, reject) => {
-      const tx = db.transaction(STORE_NAME, "readonly");
-      const store = tx.objectStore(STORE_NAME);
-      const r = store.get(key);
-      r.onsuccess = () => resolve(r.result ?? null);
-      r.onerror = () => resolve(null);
-    });
-  } catch (e) {
-    console.warn("idbGet failed", e);
-    return null;
-  }
-};
-
-const idbSet = async (key, value) => {
-  try {
-    const db = await openDb();
-    if (!db) return false;
-    return await new Promise((resolve, reject) => {
-      const tx = db.transaction(STORE_NAME, "readwrite");
-      const store = tx.objectStore(STORE_NAME);
-      const r = store.put(value, key);
-      r.onsuccess = () => resolve(true);
-      r.onerror = () => {
-        console.warn("idbSet error", r.error);
-        resolve(false);
-      };
-    });
-  } catch (e) {
-    console.warn("idbSet failed", e);
-    return false;
-  }
-};
-
-/* -------------------- Chat component -------------------- */
 export default function Chat() {
   // core state
   const [myId, setMyId] = useState(() => getLocalPeerId() || "...");
   const [peers, setPeers] = useState([]);
   const [peerNamesMap, setPeerNamesMap] = useState({});
-  const [messages, setMessages] = useState([]); // loaded from IDB in effect
-  const [threadMessages, setThreadMessages] = useState({}); // loaded from IDB in effect
+  const [messages, setMessages] = useState(() => {
+    try {
+      const raw = localStorage.getItem(LS_MSGS);
+      if (raw) return JSON.parse(raw);
+    } catch (e) {}
+    return [];
+  });
 
-  // Thread state
+  // Threading state
+  const [threadMessages, setThreadMessages] = useState(() => {
+    try {
+      const raw = localStorage.getItem(LS_THREADS);
+      if (raw) return JSON.parse(raw);
+    } catch (e) {}
+    return {};
+  });
   const [activeThread, setActiveThread] = useState(null);
+
   const [threadTypingUsers, setThreadTypingUsers] = useState({});
 
   // file transfer
@@ -2378,8 +2325,6 @@ export default function Chat() {
 
   // UI / other state
   const [text, setText] = useState("");
-  const [caption, setCaption] = useState("");
-  const [pendingPhotos, setPendingPhotos] = useState([]); // { file, dataUrl, name, offerId }
   const [username, setUsername] = useState(
     () => localStorage.getItem("ph_name") || ""
   );
@@ -2423,66 +2368,24 @@ export default function Chat() {
     return () => clearInterval(id);
   }, [incomingFileOffers]);
 
-  /* -------------------- Persistence helpers (IDB + fallback) -------------------- */
-  const persistMessages = async (arr) => {
+  // persist messages helper
+  const persistMessages = (arr) => {
     try {
       const tail = arr.slice(-MAX_MSGS);
-      // attempt IDB write first
-      const ok = await idbSet(LS_MSGS, tail);
-      if (!ok) localStorage.setItem(LS_MSGS, JSON.stringify(tail));
-    } catch (e) {
-      try {
-        localStorage.setItem(LS_MSGS, JSON.stringify(arr.slice(-MAX_MSGS)));
-      } catch (er) {}
-    }
+      localStorage.setItem(LS_MSGS, JSON.stringify(tail));
+    } catch (e) {}
   };
 
-  const persistThreadMessages = async (threads) => {
+  // persist thread messages helper
+  const persistThreadMessages = (threads) => {
     try {
-      const ok = await idbSet(LS_THREADS, threads);
-      if (!ok) localStorage.setItem(LS_THREADS, JSON.stringify(threads));
-    } catch (e) {
-      try {
-        localStorage.setItem(LS_THREADS, JSON.stringify(threads));
-      } catch (er) {}
-    }
+      localStorage.setItem(LS_THREADS, JSON.stringify(threads));
+    } catch (e) {}
   };
 
-  // On mount, load persisted messages & threads (IDB -> fallback localStorage)
-  useEffect(() => {
-    let cancelled = false;
-    (async () => {
-      try {
-        const idbMsgs = await idbGet(LS_MSGS);
-        const idbThreads = await idbGet(LS_THREADS);
-        if (!cancelled) {
-          if (Array.isArray(idbMsgs)) setMessages(idbMsgs);
-          else {
-            try {
-              const raw = localStorage.getItem(LS_MSGS);
-              if (raw) setMessages(JSON.parse(raw));
-            } catch (e) {}
-          }
-          if (idbThreads && typeof idbThreads === "object")
-            setThreadMessages(idbThreads);
-          else {
-            try {
-              const rawT = localStorage.getItem(LS_THREADS);
-              if (rawT) setThreadMessages(JSON.parse(rawT));
-            } catch (e) {}
-          }
-        }
-      } catch (e) {
-        console.warn("load persisted messages failed", e);
-      }
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, []);
-
-  /* -------------------- Messages helpers -------------------- */
-  const upsertIncomingChat = (incoming) => {
+  // messages helpers
+    const upsertIncomingChat = (incoming) => {
+    // If this is a thread reply
     if (incoming.type === "thread" && incoming.threadRootId) {
       setThreadMessages((threads) => {
         const rootId = incoming.threadRootId;
@@ -2491,6 +2394,7 @@ export default function Chat() {
 
         let updated;
         if (existingMsg) {
+          // update existing message in thread
           updated = {
             ...threads,
             [rootId]: existing.map((x) =>
@@ -2498,18 +2402,22 @@ export default function Chat() {
             ),
           };
         } else {
+          // create normalized thread message object, **including images**
           const msgObj = {
             id: incoming.id,
             from: incoming.fromName || incoming.from || "peer",
             fromId: incoming.from,
-            text: incoming.text,
+            text: incoming.text || "",
             ts: incoming.ts || Date.now(),
             type: "thread",
             threadRootId: incoming.threadRootId,
             deliveries: incoming.deliveries || [],
             reads: incoming.reads || [],
             replyTo: incoming.replyTo || null,
-            imageGroup: incoming.imageGroup || undefined,
+            // new: preserve inline preview data if present
+            imageGroup: Array.isArray(incoming.imageGroup)
+              ? incoming.imageGroup
+              : undefined,
             imagePreview: incoming.imagePreview || undefined,
             imageMeta: incoming.imageMeta || undefined,
           };
@@ -2525,6 +2433,7 @@ export default function Chat() {
       return;
     }
 
+    // Normal chat (non-thread) message
     setMessages((m) => {
       const exists = m.find((x) => x.id === incoming.id);
       if (exists) {
@@ -2534,25 +2443,31 @@ export default function Chat() {
         persistMessages(next);
         return next;
       }
+
       const msgObj = {
         id: incoming.id,
         from: incoming.fromName || incoming.from || "peer",
         fromId: incoming.from,
-        text: incoming.text,
+        text: incoming.text || "",
         ts: incoming.ts || Date.now(),
-        type: incoming.type || "chat",
+        type: "chat",
         replyTo: incoming.replyTo || null,
         deliveries: incoming.deliveries || [],
         reads: incoming.reads || [],
-        imageGroup: incoming.imageGroup || undefined,
+        // new: preserve inline preview data for chat messages too
+        imageGroup: Array.isArray(incoming.imageGroup)
+          ? incoming.imageGroup
+          : undefined,
         imagePreview: incoming.imagePreview || undefined,
         imageMeta: incoming.imageMeta || undefined,
       };
+
       const next = [...m, msgObj];
       persistMessages(next);
       return next;
     });
   };
+
 
   const addUniqueToMsgArray = (
     msgId,
@@ -2600,7 +2515,8 @@ export default function Chat() {
         const alreadyRead = Array.isArray(m.reads) && m.reads.includes(localId);
         if (!alreadyRead) {
           try {
-            // sendAckRead signature in your code is sendAckRead(id, origin, isThread?, threadRootId?)
+            // sendAckRead signature in your code is used as sendAckRead(id, origin)
+            // we also pass isThread and threadRootId so peers know this is a thread read
             sendAckRead(m.id, origin, true, rootId);
           } catch (e) {}
           addUniqueToMsgArray(m.id, "reads", localId, true, rootId);
@@ -2611,7 +2527,7 @@ export default function Chat() {
     }
   };
 
-  /* -------------------- Transfer helpers (unchanged) -------------------- */
+  // transfer UI helpers
   const setTransfer = (offerId, updaterOrObj) => {
     setTransfers((t) => {
       const prev = t[offerId] || {};
@@ -2631,6 +2547,7 @@ export default function Chat() {
     });
   };
 
+  // handle incoming file chunk and write to disk using saved handle
   const handleIncomingFileChunk = async (data) => {
     let { id: offerId, seq, chunk, final } = data || {};
     try {
@@ -2745,12 +2662,13 @@ export default function Chat() {
       } catch (er) {}
     }
   };
-
-  /* -------------------- Incoming message handler (wire-in) -------------------- */
+  // incoming messages callback from webrtc
   const handleIncoming = async (from, payloadOrText) => {
+    // DEBUG: inspect raw incoming envelope occasionally while testing
     console.debug("handleIncoming:", { from, payloadOrText });
+    console.debug("SYS_TYPING recv:", { from, payloadOrText });
     try {
-      // typing
+      // ---------- 1) typing (main chat or thread) ----------
       if (from === "__system_typing__" && payloadOrText) {
         try {
           const fromName =
@@ -2766,8 +2684,12 @@ export default function Chat() {
             payloadOrText.threadId ||
             null;
 
-          if (!fromName) return;
+          if (!fromName) {
+            // nothing we can do
+            return;
+          }
 
+          // main-chat typing
           if (!threadRootId) {
             setTypingUsers((t) => {
               const copy = { ...t };
@@ -2778,6 +2700,7 @@ export default function Chat() {
             return;
           }
 
+          // thread typing: mapping { rootId: { name: timestamp } }
           setThreadTypingUsers((t) => {
             const copy = { ...t };
             const root = threadRootId;
@@ -2790,12 +2713,16 @@ export default function Chat() {
           });
           return;
         } catch (e) {
-          console.warn("handleIncoming: typing handling failed", e, payloadOrText);
+          console.warn(
+            "handleIncoming: typing handling failed",
+            e,
+            payloadOrText
+          );
           return;
         }
       }
 
-      // ack deliver
+      // ---------- 2) ack deliver ----------
       if (
         from === "__system_ack_deliver__" &&
         payloadOrText &&
@@ -2813,6 +2740,15 @@ export default function Chat() {
             payloadOrText.threadId ||
             null;
 
+          // Debug log to see what's really coming in
+          console.debug("RCV ack_deliver:", {
+            fromPeer,
+            id,
+            isThread,
+            threadRootId,
+            raw: payloadOrText,
+          });
+
           addUniqueToMsgArray(
             id,
             "deliveries",
@@ -2826,7 +2762,7 @@ export default function Chat() {
         return;
       }
 
-      // ack read
+      // ---------- 3) ack read ----------
       if (from === "__system_ack_read__" && payloadOrText && payloadOrText.id) {
         try {
           const fromPeer =
@@ -2840,6 +2776,14 @@ export default function Chat() {
             payloadOrText.threadId ||
             null;
 
+          console.debug("RCV ack_read:", {
+            fromPeer,
+            id,
+            isThread,
+            threadRootId,
+            raw: payloadOrText,
+          });
+
           addUniqueToMsgArray(id, "reads", fromPeer, !!isThread, threadRootId);
         } catch (e) {
           console.warn("handleIncoming: ack_read failed", e, payloadOrText);
@@ -2847,7 +2791,7 @@ export default function Chat() {
         return;
       }
 
-      // system messages
+      // ---------- 4) system messages ----------
       if (
         payloadOrText &&
         typeof payloadOrText === "object" &&
@@ -2880,7 +2824,7 @@ export default function Chat() {
         return;
       }
 
-      // file offer
+      // ---------- 5) file offer received ----------
       if (from === "__system_file_offer__" && payloadOrText) {
         try {
           const offer = payloadOrText;
@@ -2897,6 +2841,7 @@ export default function Chat() {
             return copy;
           });
 
+          // auto-expire after 20s if not handled locally
           setTimeout(() => {
             setIncomingFileOffers((s) => {
               const copy = { ...s };
@@ -2919,7 +2864,7 @@ export default function Chat() {
         return;
       }
 
-      // file offer response
+      // ---------- 6) file offer response (peer accepted/declined our offer) ----------
       if (from === "__system_file_offer_response__" && payloadOrText) {
         try {
           const { id: offerId, from: responder, accept } = payloadOrText;
@@ -2954,7 +2899,7 @@ export default function Chat() {
         return;
       }
 
-      // file chunk
+      // ---------- 7) file chunk ----------
       if (from === "__system_file_chunk__" && payloadOrText) {
         try {
           await handleIncomingFileChunk(payloadOrText);
@@ -2968,7 +2913,7 @@ export default function Chat() {
         return;
       }
 
-      // file transfer done
+      // ---------- 8) file transfer done ----------
       if (from === "__system_file_transfer_done__" && payloadOrText) {
         try {
           const { id: offerId } = payloadOrText;
@@ -3001,7 +2946,7 @@ export default function Chat() {
         return;
       }
 
-      // chat or thread object
+      // ---------- 9) chat object (regular chat or thread) ----------
       if (
         payloadOrText &&
         typeof payloadOrText === "object" &&
@@ -3012,10 +2957,10 @@ export default function Chat() {
           upsertIncomingChat(payloadOrText);
           maybeNotify(
             payloadOrText.fromName || payloadOrText.from,
-            payloadOrText.text || (payloadOrText.imageGroup ? "Photo(s)" : "")
+            payloadOrText.text
           );
 
-          // auto ack read if visible
+          // if message came from another peer and tab is visible, send ack_read
           try {
             const origin = payloadOrText.from || payloadOrText.origin || null;
             const localId = getLocalPeerId() || myId;
@@ -3025,6 +2970,7 @@ export default function Chat() {
               document.visibilityState === "visible"
             ) {
               try {
+                // send basic ack read for chat; we pass thread info when it's a thread message
                 if (payloadOrText.type === "thread") {
                   sendAckRead(
                     payloadOrText.id,
@@ -3058,7 +3004,7 @@ export default function Chat() {
         return;
       }
 
-      // string fallback
+      // ---------- 10) string fallback ----------
       if (typeof payloadOrText === "string") {
         try {
           const safeText = payloadOrText;
@@ -3095,7 +3041,7 @@ export default function Chat() {
     }
   };
 
-  /* -------------------- Peer list + bootstrap handlers -------------------- */
+  // peer list update
   const handlePeerListUpdate = (list) => {
     setPeers(list || []);
     try {
@@ -3108,7 +3054,7 @@ export default function Chat() {
     setJoinedBootstrap(newBootstrapId || "");
   };
 
-  /* -------------------- Initialize peer -------------------- */
+  // init peer
   useEffect(() => {
     if (!username) return;
     const p = initPeer(
@@ -3129,7 +3075,7 @@ export default function Chat() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [username]);
 
-  /* -------------------- Auto-scroll -------------------- */
+  // autoscroll
   useEffect(() => {
     if (!messagesEndRef.current) return;
     try {
@@ -3140,7 +3086,7 @@ export default function Chat() {
     } catch (e) {}
   }, [messages]);
 
-  /* -------------------- Visibility ack_read -------------------- */
+  // visibility ack_read
   useEffect(() => {
     const onVisibility = () => {
       if (document.visibilityState === "visible") {
@@ -3168,7 +3114,7 @@ export default function Chat() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [messages, myId]);
 
-  /* -------------------- Outside click for menu -------------------- */
+  // outside click for menu
   useEffect(() => {
     const onDocClick = (e) => {
       if (!menuRef.current) return;
@@ -3179,7 +3125,7 @@ export default function Chat() {
     return () => document.removeEventListener("mousedown", onDocClick);
   }, [menuOpen]);
 
-  /* -------------------- Typing broadcast -------------------- */
+  // typing broadcast
   useEffect(() => {
     if (!username) return;
     if (typingTimeoutRef.current) clearTimeout(typingTimeoutRef.current);
@@ -3197,30 +3143,35 @@ export default function Chat() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [text]);
 
-  /* -------------------- Long press handlers -------------------- */
+  // Long press handlers
   const handleMouseDown = (e, message) => {
     e.preventDefault();
     longPressTimeoutRef.current = setTimeout(() => {
       setLongPressMessage(message);
     }, 500);
   };
+
   const handleMouseUp = () => {
     if (longPressTimeoutRef.current) {
       clearTimeout(longPressTimeoutRef.current);
       longPressTimeoutRef.current = null;
     }
   };
+
   const handleTouchStart = (e, message) => {
     longPressTimeoutRef.current = setTimeout(() => {
       setLongPressMessage(message);
     }, 500);
   };
+
   const handleTouchEnd = () => {
     if (longPressTimeoutRef.current) {
       clearTimeout(longPressTimeoutRef.current);
       longPressTimeoutRef.current = null;
     }
   };
+
+  // Cleanup long press timeout
   useEffect(() => {
     return () => {
       if (longPressTimeoutRef.current) {
@@ -3229,19 +3180,23 @@ export default function Chat() {
     };
   }, []);
 
-  /* -------------------- Thread helpers -------------------- */
+  // Show thread for a message and mark its replies read
   const showThread = (message) => {
     setActiveThread(message);
+    // mark existing replies as read locally and notify origin peers
     if (message && message.id) markThreadAsRead(message.id);
   };
+
+  // Close thread view
   const closeThread = () => {
     setActiveThread(null);
     setLongPressMessage(null);
   };
 
-  // Send thread reply (update state & broadcast)
+  // Send thread reply (update local state *and* broadcast)
   const handleSendThreadReply = (threadMessage) => {
     try {
+      // 1) locally add the thread message so sender sees it immediately
       setThreadMessages((threads) => {
         const rootId = threadMessage.threadRootId;
         const existing = Array.isArray(threads[rootId]) ? threads[rootId] : [];
@@ -3256,10 +3211,8 @@ export default function Chat() {
           threadRootId: rootId,
           deliveries: threadMessage.deliveries || [],
           reads: threadMessage.reads || [],
+          // <<-- include replyTo so UI can render the quoted preview
           replyTo: threadMessage.replyTo || null,
-          imageGroup: threadMessage.imageGroup || undefined,
-          imagePreview: threadMessage.imagePreview || undefined,
-          imageMeta: threadMessage.imageMeta || undefined,
         };
 
         const updated = {
@@ -3270,19 +3223,20 @@ export default function Chat() {
         return updated;
       });
 
-      // broadcast
+      // 2) broadcast to peers
       sendChat(threadMessage);
     } catch (e) {
       console.warn("sendChat (thread) failed", e);
     }
   };
 
+  // Get thread replies count for a message
   const getThreadCount = (messageId) => {
     const threads = threadMessages[messageId] || [];
     return threads.length;
   };
 
-  /* -------------------- LongPressDialog component -------------------- */
+  // Long press confirmation dialog
   const LongPressDialog = ({ message, onClose, onOpenThread }) => (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50">
       <div className="bg-white rounded-lg p-6 m-4 max-w-sm w-full">
@@ -3296,7 +3250,9 @@ export default function Chat() {
             className="w-full p-3 text-left rounded-lg bg-gray-100 hover:bg-gray-200"
           >
             <div className="font-medium">Reply in Chat</div>
-            <div className="text-sm text-gray-600">Quick reply in main conversation</div>
+            <div className="text-sm text-gray-600">
+              Quick reply in main conversation
+            </div>
           </button>
           <button
             onClick={() => {
@@ -3306,17 +3262,22 @@ export default function Chat() {
             className="w-full p-3 text-left rounded-lg bg-blue-100 hover:bg-blue-200"
           >
             <div className="font-medium">Reply in Nest</div>
-            <div className="text-sm text-gray-600">Start or continue a focused discussion</div>
+            <div className="text-sm text-gray-600">
+              Start or continue a focused discussion
+            </div>
           </button>
         </div>
-        <button onClick={onClose} className="w-full mt-4 p-2 text-gray-600 hover:text-gray-800">
+        <button
+          onClick={onClose}
+          className="w-full mt-4 p-2 text-gray-600 hover:text-gray-800"
+        >
           Cancel
         </button>
       </div>
     </div>
   );
 
-  /* -------------------- Hub handlers -------------------- */
+  // create hub
   const handleCreateHub = () => {
     const id = getLocalPeerId() || myId;
     if (!id) return alert("Peer not ready yet. Wait a moment and try again.");
@@ -3349,6 +3310,7 @@ export default function Chat() {
     setMenuOpen(false);
   };
 
+  // join hub
   const handleJoinHub = async () => {
     const id = prompt("Enter Hub bootstrap peer ID (the host's ID):");
     if (!id) {
@@ -3381,6 +3343,7 @@ export default function Chat() {
     setMenuOpen(false);
   };
 
+  // leave hub
   const handleLeaveClick = () => {
     setMenuOpen(false);
     setConfirmLeaveOpen(true);
@@ -3421,82 +3384,60 @@ export default function Chat() {
 
   const handleCancelLeave = () => setConfirmLeaveOpen(false);
 
-  /* -------------------- Send (text or grouped images) -------------------- */
-  const send = async () => {
-    // image group send
-    if (pendingPhotos.length > 0) {
-      // we already have dataUrl previews in pendingPhotos
-      const offerId = `img-group-${Date.now()}-${Math.random()
-        .toString(36)
-        .slice(2, 7)}`;
+  // send chat
+  
+   const send = async () => {
+  if (pendingPhotos.length > 0) {
+    // convert previews to base64 data URLs
+    const previews = await Promise.all(
+      pendingPhotos.map(
+        (p) =>
+          new Promise((resolve) => {
+            const reader = new FileReader();
+            reader.onload = (e) =>
+              resolve({ dataUrl: e.target.result, name: p.file.name });
+            reader.readAsDataURL(p.file);
+          })
+      )
+    );
 
-      const msgObj = {
-        id: offerId,
-        from: username || "You",
-        fromId: getLocalPeerId() || myId,
-        ts: Date.now(),
-        type: "chat",
-        imageGroup: pendingPhotos.map((p) => p.dataUrl),
-        imageMeta: pendingPhotos.map((p) => ({ name: p.name })),
-        text: caption || "",
-        deliveries: [],
-        reads: [getLocalPeerId() || myId],
-      };
+    const offerId = `img-group-${Date.now()}-${Math.random()
+      .toString(36)
+      .slice(2, 7)}`;
 
-      setMessages((m) => {
-        const next = [...m, msgObj];
-        persistMessages(next);
-        return next;
-      });
-
-      try {
-        sendChat(msgObj);
-      } catch (e) {
-        console.warn("sendChat failed for image group", e);
-      }
-
-      setPendingPhotos([]);
-      setCaption("");
-      setText("");
-      return;
-    }
-
-    // normal text send
-    const trimmed = (text || "").trim();
-    if (!trimmed) return;
-    const id = `msg-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
-    const msg = {
-      id,
+    const msgObj = {
+      id: offerId,
       from: username || "You",
       fromId: getLocalPeerId() || myId,
-      text: trimmed,
       ts: Date.now(),
       type: "chat",
+      imageGroup: previews.map((p) => p.dataUrl), // persistable base64
+      imageMeta: previews.map((p) => ({ name: p.name })),
+      text: caption,
       deliveries: [],
       reads: [getLocalPeerId() || myId],
-      replyTo: replyTo || null,
     };
+
     setMessages((m) => {
-      const next = [...m, msg];
-      persistMessages(next);
+      const next = [...m, msgObj];
+      persistMessages(next); // <- will survive refresh
       return next;
     });
 
-    try {
-      sendChat(msg);
-    } catch (e) {
-      console.warn("sendChat failed", e);
-    }
+    sendChat(msgObj);
 
-    setText("");
-    setReplyTo(null);
-  };
+    setPendingPhotos([]);
+    setCaption("");
+    return;
+  }}
 
-  // reply + send ack_read on tap
+  // reply + send ack_read
   const handleTapMessage = (m) => {
     if (m.type && m.type.startsWith("system")) return;
     setReplyTo({ id: m.id, from: m.from, text: m.text });
-    const input = document.querySelector('input[placeholder="Type a message..."]');
+    const input = document.querySelector(
+      'input[placeholder="Type a message..."]'
+    );
     if (input) input.focus();
 
     const originPeerId = m.fromId || m.from;
@@ -3510,7 +3451,7 @@ export default function Chat() {
     }
   };
 
-  /* -------------------- Status dot renderer -------------------- */
+  // render status dot
   const renderStatusDot = (m) => {
     const totalPeers = peers?.length || 0;
     if (totalPeers === 0) {
@@ -3556,10 +3497,12 @@ export default function Chat() {
       );
     }
 
-    return <span className="inline-block w-2 h-2 rounded-full bg-gray-400 ml-2" />;
+    return (
+      <span className="inline-block w-2 h-2 rounded-full bg-gray-400 ml-2" />
+    );
   };
 
-  /* -------------------- Message renderer (with image groups) -------------------- */
+  // message renderer
   const renderMessage = (m, idx) => {
     const from = m.from ?? "peer";
     const txt = typeof m.text === "string" ? m.text : JSON.stringify(m.text);
@@ -3573,7 +3516,7 @@ export default function Chat() {
 
     const threadCount = getThreadCount(m.id);
 
-    // image flags
+    // image flags: single preview (imagePreview) or group (imageGroup: array of src)
     const isImagePreview = !!m.imagePreview;
     const isImageGroup = Array.isArray(m.imageGroup) && m.imageGroup.length > 0;
     const isImageMessage = isImagePreview || isImageGroup;
@@ -3588,9 +3531,13 @@ export default function Chat() {
       );
     }
 
+    // choose max width: image bubbles get larger width allowance
     const bubbleWidthClass = isImageMessage ? "max-w-[80%]" : "max-w-[50%]";
-    const bubbleBgClass = isMe ? "ml-auto bg-blue-500 text-white" : "bg-white/100 text-black";
+    const bubbleBgClass = isMe
+      ? "ml-auto bg-blue-500 text-white"
+      : "bg-white/100 text-black";
 
+    // helper to open large preview
     const openPreview = (src) => {
       const win = window.open("", "_blank");
       if (!win) return;
@@ -3613,23 +3560,31 @@ export default function Chat() {
         className={`p-2 rounded-2xl mb-2 cursor-pointer select-none relative ${bubbleWidthClass} ${bubbleBgClass}`}
         style={{ wordBreak: "break-word" }}
       >
+        {/* header */}
         <div className="text-xs font-bold flex items-center">
           <div className="flex-1">{isMe ? "You" : from}</div>
           <div className="text-[10px] text-gray-700/70 ml-2">{time}</div>
           {isMe && renderStatusDot(m)}
         </div>
 
+        {/* reply-to context */}
         {m.replyTo && (
           <div className="mt-2 mb-2 p-2 rounded border border-white/5 text-xs text-gray-600 bg-gray-300">
-            <strong className="text-xs text-blue-400">Reply to {m.replyTo.from}:</strong>{" "}
-            <span className="inline-block ml-1 truncate" style={{ maxWidth: "100%" }}>
+            <strong className="text-xs text-blue-400">
+              Reply to {m.replyTo.from}:
+            </strong>{" "}
+            <span
+              className="inline-block ml-1 truncate"
+              style={{ maxWidth: "100%" }}
+            >
               {m.replyTo.text}
             </span>
           </div>
         )}
 
-        {/* IMAGE GROUP */}
+        {/* IMAGE MESSAGES */}
         {isImageGroup ? (
+          // grid for group of images (2x2 max). images are squares (w-36 h-36)
           <div className="mt-2 grid grid-cols-2 gap-2">
             {m.imageGroup.slice(0, 4).map((src, i) => (
               <div
@@ -3640,15 +3595,26 @@ export default function Chat() {
                   openPreview(src);
                 }}
               >
-                <img src={src} alt={`photo-${i}`} className="w-full h-full object-cover" />
+                <img
+                  src={src}
+                  alt={`photo-${i}`}
+                  className="w-full h-full object-cover"
+                />
               </div>
             ))}
             {m.imageGroup.length > 4 && (
-              <div className="col-span-2 text-xs text-gray-500 mt-1">+{m.imageGroup.length - 4} more</div>
+              <div className="col-span-2 text-xs text-gray-500 mt-1">
+                +{m.imageGroup.length - 4} more
+              </div>
             )}
-            {m.text && <div className="col-span-2 mt-2 text-sm whitespace-pre-wrap">{m.text}</div>}
+            {m.text && (
+              <div className="col-span-2 mt-2 text-sm whitespace-pre-wrap">
+                {m.text}
+              </div>
+            )}
           </div>
         ) : isImagePreview ? (
+          // single image fixed square (160x160) centered inside the bubble
           <div className="mt-2 flex items-center">
             <div
               className="w-40 h-40 rounded-lg overflow-hidden bg-black/5"
@@ -3657,14 +3623,19 @@ export default function Chat() {
                 openPreview(m.imagePreview);
               }}
             >
-              <img src={m.imagePreview} alt={m.imageMeta?.name || "photo"} className="w-full h-full object-cover" />
+              <img
+                src={m.imagePreview}
+                alt={m.imageMeta?.name || "photo"}
+                className="w-full h-full object-cover"
+              />
             </div>
-            {m.text && <div className="ml-3 break-words whitespace-pre-wrap">{txt}</div>}
           </div>
         ) : (
+          // normal text
           <div className="break-words whitespace-pre-wrap mt-1">{txt}</div>
         )}
 
+        {/* thread indicator */}
         {threadCount > 0 && (
           <div
             className="mt-2 flex items-center justify-between text-xs bg-blue-50 text-blue-600 rounded px-2 py-1 cursor-pointer hover:bg-blue-100"
@@ -3674,7 +3645,14 @@ export default function Chat() {
             }}
           >
             <div className="flex items-center space-x-1">
-              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+              <svg
+                width="12"
+                height="12"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="2"
+              >
                 <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
               </svg>
               <span>
@@ -3688,113 +3666,120 @@ export default function Chat() {
     );
   };
 
-  /* -------------------- File selection + previews (multi select) -------------------- */
+  // file input (sender) - file picker
+  const onFileSelected = async (file) => {
+    if (!file) return;
+    const offerId = `offer-${Date.now()}-${Math.random()
+      .toString(36)
+      .slice(2, 7)}`;
+    outgoingPendingOffers.current[offerId] = {
+      file,
+      acceptingPeers: new Set(),
+    };
+
+    setTransfer(offerId, {
+      direction: "sending",
+      label: file.name,
+      total: file.size || 0,
+      transferred: 0,
+      peers: [],
+    });
+
+    const meta = {
+      id: offerId,
+      name: file.name,
+      size: file.size,
+      mime: file.type,
+      from: getLocalPeerId() || myId,
+    };
+
+    try {
+      offerFileToPeers(meta);
+    } catch (e) {
+      console.warn("offerFileToPeers failed", e);
+    }
+
+    // --- NEW: if file is an image, show inline photo bubble ---
+    if (file.type.startsWith("image/")) {
+      const reader = new FileReader();
+      reader.onload = (e) => {
+        const msgObj = {
+          id: `img-${Date.now()}`,
+          from: username || "You",
+          fromId: getLocalPeerId() || myId,
+          ts: Date.now(),
+          type: "chat",
+          imagePreview: e.target.result, // base64 string
+          imageMeta: { name: file.name },
+          text: caption,
+          deliveries: [],
+          reads: [getLocalPeerId() || myId],
+        };
+
+        setMessages((m) => {
+          const next = [...m, msgObj];
+          persistMessages(next);
+          return next;
+        });
+
+        sendChat(msgObj);
+      };
+      reader.readAsDataURL(file);
+    } else {
+      // --- Fallback: non-image files keep old behavior ---
+      setMessages((m) => {
+        const sys = {
+          id: `sys-offer-${offerId}`,
+          from: "System",
+          text: `Offered file: ${file.name} (${Math.round(
+            file.size / 1024
+          )} KB)`,
+          ts: Date.now(),
+          type: "system",
+        };
+        const next = [...m, sys];
+        persistMessages(next);
+        return next;
+      });
+    }
+
+    // --- Expire file offer if nobody accepts ---
+    setTimeout(() => {
+      try {
+        const pending = outgoingPendingOffers.current[offerId];
+        if (!pending) return;
+        if (pending.acceptingPeers.size === 0) {
+          setMessages((m) => {
+            const sys = {
+              id: `sys-offer-expire-${offerId}`,
+              from: "System",
+              text: `No one accepted the file offer: ${file.name}`,
+              ts: Date.now(),
+              type: "system",
+            };
+            const next = [...m, sys];
+            persistMessages(next);
+            return next;
+          });
+          setTimeout(() => removeTransfer(offerId), 800);
+        }
+      } catch (e) {
+        console.warn("post-offer cleanup failed", e);
+      }
+    }, 20000);
+  };
+
   const handleFileInputClick = () => {
     const input = document.createElement("input");
     input.type = "file";
-    input.multiple = true;
-    input.accept = "image/*,application/*";
     input.onchange = (e) => {
-      const files = Array.from(e.target.files || []);
-      if (!files.length) return;
-      onFileSelected(files);
+      const f = e.target.files && e.target.files[0];
+      if (f) onFileSelected(f);
     };
     input.click();
   };
 
-  // Accept array of files
-  const onFileSelected = async (fileOrFiles) => {
-    const files = Array.isArray(fileOrFiles) ? fileOrFiles : [fileOrFiles];
-    if (!files.length) return;
-
-    const previews = await Promise.all(
-      files.map(
-        (file) =>
-          new Promise((resolve) => {
-            const offerId = `offer-${Date.now()}-${Math.random()
-              .toString(36)
-              .slice(2, 7)}`;
-
-            outgoingPendingOffers.current[offerId] = {
-              file,
-              acceptingPeers: new Set(),
-            };
-
-            setTransfer(offerId, {
-              direction: "sending",
-              label: file.name,
-              total: file.size || 0,
-              transferred: 0,
-              peers: [],
-            });
-
-            const meta = {
-              id: offerId,
-              name: file.name,
-              size: file.size,
-              mime: file.type,
-              from: getLocalPeerId() || myId,
-            };
-            try {
-              offerFileToPeers(meta);
-            } catch (e) {
-              console.warn("offerFileToPeers failed", e);
-            }
-
-            if (file.type && file.type.startsWith("image/")) {
-              const reader = new FileReader();
-              reader.onload = (ev) =>
-                resolve({
-                  file,
-                  dataUrl: ev.target.result,
-                  name: file.name,
-                  offerId,
-                });
-              reader.readAsDataURL(file);
-            } else {
-              resolve({
-                file,
-                dataUrl: null,
-                name: file.name,
-                offerId,
-              });
-            }
-
-            setTimeout(() => {
-              try {
-                const pending = outgoingPendingOffers.current[offerId];
-                if (!pending) return;
-                if (pending.acceptingPeers.size === 0) {
-                  setMessages((m) => {
-                    const sys = {
-                      id: `sys-offer-expire-${offerId}`,
-                      from: "System",
-                      text: `No one accepted the file offer: ${file.name}`,
-                      ts: Date.now(),
-                      type: "system",
-                    };
-                    const next = [...m, sys];
-                    persistMessages(next);
-                    return next;
-                  });
-                  setTimeout(() => removeTransfer(offerId), 800);
-                }
-              } catch (e) {
-                console.warn("post-offer cleanup failed", e);
-              }
-            }, 20000);
-          })
-      )
-    );
-
-    const imagePreviews = previews
-      .filter((p) => p && p.dataUrl)
-      .map((p) => ({ file: p.file, dataUrl: p.dataUrl, name: p.name, offerId: p.offerId }));
-
-    // Append to pendingPhotos
-    setPendingPhotos((prev) => [...prev, ...imagePreviews]);
-  };
-
+  // accept incoming offer
   const acceptFileOffer = async (offerId) => {
     const entry = incomingFileOffers[offerId];
     if (!entry) return;
@@ -3916,7 +3901,7 @@ export default function Chat() {
     });
   };
 
-  /* -------------------- File progress wiring -------------------- */
+  // wire up progress/completion callbacks
   useEffect(() => {
     const progressCb = (offerId, peerId, bytes, totalBytes) => {
       setTransfer(offerId, (prev) => ({
@@ -3950,8 +3935,10 @@ export default function Chat() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  /* -------------------- Connected peer names + typing summary -------------------- */
-  const connectedNames = peers.length ? peers.map((id) => peerNamesMap[id] || id) : [];
+  // connected peer names
+  const connectedNames = peers.length
+    ? peers.map((id) => peerNamesMap[id] || id)
+    : [];
 
   const typingSummary = () => {
     const names = Object.keys(typingUsers);
@@ -3960,7 +3947,6 @@ export default function Chat() {
     return <div className="text-sm text-blue-500 mb-2">{shown} typing...</div>;
   };
 
-  /* -------------------- Incoming file offers UI -------------------- */
   const renderIncomingFileOffers = () => {
     const keys = Object.keys(incomingFileOffers);
     if (!keys.length) return null;
@@ -3969,22 +3955,35 @@ export default function Chat() {
       const offer = entry.offer;
       const remaining = Math.max(0, Math.ceil((entry.expiresAt - now) / 1000));
       return (
-        <div key={k} className="mb-2 p-2 rounded bg-white/10 text-sm text-black">
+        <div
+          key={k}
+          className="mb-2 p-2 rounded bg-white/10 text-sm text-black"
+        >
           <div className="font-semibold">
             <span className="inline-block max-w-[260px] whitespace-normal break-words">
               File offer:&nbsp;
               <strong className="break-words">{offer.name}</strong>
             </span>
-            <span className="ml-2 text-xs text-gray-500">({Math.round((offer.size || 0) / 1024)} KB)</span>
+            <span className="ml-2 text-xs text-gray-500">
+              ({Math.round((offer.size || 0) / 1024)} KB)
+            </span>
           </div>
+
           <div className="text-xs text-gray-600">
-            From: {peerNamesMap[offer.from] || offer.from} — Expires in {remaining}s
+            From: {peerNamesMap[offer.from] || offer.from} — Expires in{" "}
+            {remaining}s
           </div>
           <div className="mt-2 flex justify-center gap-2">
-            <button onClick={() => acceptFileOffer(k)} className="px-3 py-1 rounded bg-gradient-to-br from-green-500 to-green-600 text-white">
+            <button
+              onClick={() => acceptFileOffer(k)}
+              className="px-3 py-1 rounded bg-gradient-to-br from-green-500 to-green-600 text-white"
+            >
               Accept
             </button>
-            <button onClick={() => ignoreFileOffer(k)} className="px-3 py-1 rounded bg-gradient-to-br from-red-500 to-red-600 text-white">
+            <button
+              onClick={() => ignoreFileOffer(k)}
+              className="px-3 py-1 rounded bg-gradient-to-br from-red-500 to-red-600 text-white"
+            >
               Ignore
             </button>
           </div>
@@ -3993,18 +3992,18 @@ export default function Chat() {
     });
   };
 
-  const maybeNotify = (fromDisplay, textVal) => {
+  const maybeNotify = (fromDisplay, text) => {
     try {
       if (!fromDisplay || fromDisplay === username) return;
       if (!document.hidden && document.hasFocus()) return;
 
       const title = `${fromDisplay}`;
       const body =
-        typeof textVal === "string"
-          ? textVal.length > 120
-            ? textVal.slice(0, 117) + "..."
-            : textVal
-          : JSON.stringify(textVal);
+        typeof text === "string"
+          ? text.length > 120
+            ? text.slice(0, 117) + "..."
+            : text
+          : JSON.stringify(text);
       showNotification(title, {
         body,
         tag: `peershub-${fromDisplay}`,
@@ -4015,7 +4014,6 @@ export default function Chat() {
     }
   };
 
-  /* -------------------- Render component -------------------- */
   return (
     <>
       {/* Thread View (overlay) */}
@@ -4049,21 +4047,33 @@ export default function Chat() {
         <div className="fixed left-1/2 -translate-x-1/2 top-4 z-50">
           <div className="bg-black/80 text-white rounded-lg p-3 shadow-lg w-[min(720px,calc(100%-40px))]">
             {Object.entries(transfers).map(([id, t]) => {
-              const pct = t.total ? Math.min(100, Math.round((t.transferred / t.total) * 100)) : 0;
+              const pct = t.total
+                ? Math.min(100, Math.round((t.transferred / t.total) * 100))
+                : 0;
               const label = t.label || id;
-              const directionText = t.direction === "sending" ? "Sending" : "Receiving";
-              const humanTransferred = `${Math.round((t.transferred || 0) / 1024)} KB`;
+              const directionText =
+                t.direction === "sending" ? "Sending" : "Receiving";
+              const humanTransferred = `${Math.round(
+                (t.transferred || 0) / 1024
+              )} KB`;
               const humanTotal = `${Math.round((t.total || 0) / 1024)} KB`;
               return (
                 <div key={id} className="mb-3 last:mb-0">
                   <div className="flex justify-between items-center text-sm mb-1">
-                    <div className="font-semibold max-w-[70%] break-words whitespace-normal">{directionText}: {label}</div>
+                    <div className="font-semibold max-w-[70%] break-words whitespace-normal">
+                      {directionText}: {label}
+                    </div>
                     <div className="text-xs">{pct}%</div>
                   </div>
                   <div className="w-full bg-white/10 rounded h-2 overflow-hidden mb-1">
-                    <div style={{ width: `${pct}%` }} className="h-2 bg-blue-500 transition-all" />
+                    <div
+                      style={{ width: `${pct}%` }}
+                      className="h-2 bg-blue-500 transition-all"
+                    />
                   </div>
-                  <div className="text-xs text-white/60">{humanTransferred} / {humanTotal}</div>
+                  <div className="text-xs text-white/60">
+                    {humanTransferred} / {humanTotal}
+                  </div>
                 </div>
               );
             })}
@@ -4071,39 +4081,71 @@ export default function Chat() {
         </div>
       )}
 
-      {/* Main Chat Container */}
+      {/* Main Chat Container (background layer, lower z-index) */}
       <div className="fixed inset-0 z-10 bg-gray-50 text-purple-600 p-6 flex flex-col">
         <header className="flex items-center justify-between mb-4">
           <div className="flex gap-2.5">
             <div className="text-sm text-blue-600">YourID</div>
             <div className="font-mono">{myId || "..."}</div>
             <div className="text-sm text-blue-600">Name: {username}</div>
-            <div className="text-xs text-purple-500 mt-1">Auto-join: {joinedBootstrap || "none"}</div>
+            <div className="text-xs text-purple-500 mt-1">
+              Auto-join: {joinedBootstrap || "none"}
+            </div>
           </div>
 
           <div className="relative" ref={menuRef}>
-            <button onClick={() => setMenuOpen((s) => !s)} className="p-2 rounded-full bg-gradient-to-br from-gray-50 to-gray-50 text-white" aria-label="Menu">
-              <svg width="18" height="18" viewBox="0 0 24 24" className="inline-block">
+            <button
+              onClick={() => setMenuOpen((s) => !s)}
+              className="p-2 rounded-full bg-gradient-to-br from-gray-50 to-gray-50 text-white"
+              aria-label="Menu"
+            >
+              <svg
+                width="18"
+                height="18"
+                viewBox="0 0 24 24"
+                className="inline-block"
+              >
                 <circle cx="12" cy="5" r="2" fill="blue" />
                 <circle cx="12" cy="12" r="2" fill="blue" />
                 <circle cx="12" cy="19" r="2" fill="blue" />
               </svg>
             </button>
 
-            <div className={`absolute right-0 mt-2 w-44 bg-white/10 backdrop-blur rounded-lg shadow-lg z-50 transform origin-top-right transition-all duration-200 ${menuOpen ? "opacity-100 scale-100 pointer-events-auto" : "opacity-0 scale-95 pointer-events-none"}`}>
-              <button onClick={handleCreateHub} className="w-full text-left px-4 py-3 hover:bg-white/20 border-b border-white/5 text-green-500">
+            <div
+              className={`absolute right-0 mt-2 w-44 bg-white/10 backdrop-blur rounded-lg shadow-lg z-50 transform origin-top-right transition-all duration-200 ${
+                menuOpen
+                  ? "opacity-100 scale-100 pointer-events-auto"
+                  : "opacity-0 scale-95 pointer-events-none"
+              }`}
+            >
+              <button
+                onClick={handleCreateHub}
+                className="w-full text-left px-4 py-3 hover:bg-white/20 border-b border-white/5 text-green-500"
+              >
                 <span className="font-semibold">Create Hub</span>
-                <div className="text-xs text-gray-400">Make this device the host</div>
+                <div className="text-xs text-gray-400">
+                  Make this device the host
+                </div>
               </button>
 
-              <button onClick={handleJoinHub} className="w-full text-left px-4 py-3 hover:bg-white/20 border-b border-white/5 text-blue-500">
+              <button
+                onClick={handleJoinHub}
+                className="w-full text-left px-4 py-3 hover:bg-white/20 border-b border-white/5 text-blue-500"
+              >
                 <span className="font-semibold">Join Hub</span>
-                <div className="text-xs text-gray-400">Enter a host ID to join</div>
+                <div className="text-xs text-gray-400">
+                  Enter a host ID to join
+                </div>
               </button>
 
-              <button onClick={handleLeaveClick} className="w-full text-left px-4 py-3 hover:bg-white/20 text-red-500 rounded-b-lg">
+              <button
+                onClick={handleLeaveClick}
+                className="w-full text-left px-4 py-3 hover:bg-white/20 text-red-500 rounded-b-lg"
+              >
                 <span className="font-semibold">Leave</span>
-                <div className="text-xs text-gray-400">Leave and clear local history</div>
+                <div className="text-xs text-gray-400">
+                  Leave and clear local history
+                </div>
               </button>
             </div>
           </div>
@@ -4114,7 +4156,9 @@ export default function Chat() {
 
         <main className="flex-1 overflow-auto mb-4 min-h-0">
           <div style={{ paddingBottom: 8 }}>
-            {messages.length === 0 && <div className="text-sm text-white/60">No messages yet</div>}
+            {messages.length === 0 && (
+              <div className="text-sm text-white/60">No messages yet</div>
+            )}
             {messages.map((m, i) => renderMessage(m, i))}
             <div ref={messagesEndRef} />
           </div>
@@ -4126,62 +4170,93 @@ export default function Chat() {
         <footer className="mt-auto">
           {typingSummary()}
           <div className="mb-3 text-sm text-blue-600">
-            Connected peers: {connectedNames.length === 0 ? <span className="text-red-500">none</span> : connectedNames.join(", ")}
+            Connected peers:{" "}
+            {connectedNames.length === 0 ? (
+              <span className="text-red-500">none</span>
+            ) : (
+              connectedNames.join(", ")
+            )}
           </div>
 
           {renderIncomingFileOffers()}
 
           {replyTo && (
             <div className="mb-2 p-3 bg-white/10 text-gray-500 rounded-lg">
-              Replying to <strong>{replyTo.from}</strong>: <span className="text-sm text-blue-400">{replyTo.text}</span>
-              <button onClick={() => setReplyTo(null)} className="ml-4 text-xs text-red-500">x</button>
+              Replying to <strong>{replyTo.from}</strong>:{" "}
+              <span className="text-sm text-blue-400">{replyTo.text}</span>
+              <button
+                onClick={() => setReplyTo(null)}
+                className="ml-4 text-xs text-red-500"
+              >
+                x
+              </button>
             </div>
           )}
+          <div className="relative w-full flex items-center">
+            <svg
+              onClick={handleFileInputClick}
+              xmlns="http://www.w3.org/2000/svg"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="2"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              className="absolute left-3 top-1/2 -translate-y-1/2 w-5 h-5 text-blue-500 cursor-pointer hover:text-blue-700"
+              title="Attach File"
+            >
+              <path d="M21.44 11.05l-9.19 9.19a5.5 5.5 0 01-7.78-7.78l9.19-9.19a3.5 3.5 0 015 5l-9.2 9.19a1.5 1.5 0 01-2.12-2.12l8.49-8.49" />
+            </svg>
 
-          {/* When photos selected show preview grid + caption */}
-          {pendingPhotos.length > 0 ? (
-            <div className="mb-3 p-3 bg-white/5 rounded-lg">
-              <div className="grid grid-cols-4 gap-2 mb-2">
-                {pendingPhotos.map((p, i) => (
-                  <div key={i} className="w-16 h-16 rounded-md overflow-hidden bg-black/5">
-                    <img src={p.dataUrl} alt={p.name} className="w-full h-full object-cover" />
-                  </div>
-                ))}
-              </div>
+            <input
+              value={text}
+              onChange={(e) => setText(e.target.value)}
+              placeholder="Type a message..."
+              className="flex-1 p-3 pl-10 pr-10 bg-white/10 placeholder-blue-300 text-blue-500 font-mono rounded-3xl border-2"
+              onKeyDown={(e) => {
+                if (e.key === "Enter") send();
+              }}
+            />
 
-              <input value={caption} onChange={(e) => setCaption(e.target.value)} placeholder="Add a caption (optional)..." className="w-full p-2 rounded border border-gray-200 mb-2 text-black" />
-
-              <div className="flex gap-2">
-                <button onClick={() => { setPendingPhotos([]); setCaption(""); }} className="px-3 py-1 rounded bg-white/10 text-sm text-red-500">Cancel</button>
-                <button onClick={() => send()} className="ml-auto px-4 py-1 rounded bg-blue-500 text-blue-500">Send {pendingPhotos.length > 1 ? `(${pendingPhotos.length})` : ""}</button>
-              </div>
-            </div>
-          ) : (
-            <div className="relative w-full flex items-center">
-              <svg onClick={handleFileInputClick} xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="absolute left-3 top-1/2 -translate-y-1/2 w-5 h-5 text-blue-500 cursor-pointer hover:text-blue-700" title="Attach File">
-                <path d="M21.44 11.05l-9.19 9.19a5.5 5.5 0 01-7.78-7.78l9.19-9.19a3.5 3.5 0 015 5l-9.2 9.19a1.5 1.5 0 01-2.12-2.12l8.49-8.49" />
-              </svg>
-
-              <input value={text} onChange={(e) => setText(e.target.value)} placeholder="Type a message..." className="flex-1 p-3 pl-10 pr-10 bg-white/10 placeholder-blue-300 text-blue-500 font-mono rounded-3xl border-2" onKeyDown={(e) => { if (e.key === "Enter") send(); }} />
-
-              <svg onClick={send} xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" className="absolute right-3 top-1/2 -translate-y-1/2 w-8 h-8 text-blue-500 cursor-pointer hover:text-blue-700" title="Send">
-                <path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z" />
-              </svg>
-            </div>
-          )}
+            <svg
+              onClick={send}
+              xmlns="http://www.w3.org/2000/svg"
+              viewBox="0 0 24 24"
+              fill="currentColor"
+              className="absolute right-3 top-1/2 -translate-y-1/2 w-8 h-8 text-blue-500 cursor-pointer hover:text-blue-700"
+              title="Send"
+            >
+              <path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z" />
+            </svg>
+          </div>
         </footer>
       </div>
 
       {/* Leave confirmation modal */}
       {confirmLeaveOpen && (
         <div className="fixed inset-0 z-70 flex items-center justify-center">
-          <div className="absolute inset-0 bg-black/50" onClick={handleCancelLeave} />
+          <div
+            className="absolute inset-0 bg-black/50"
+            onClick={handleCancelLeave}
+          />
           <div className="relative bg-white/10 p-6 rounded-lg backdrop-blur text-white w-80">
             <h3 className="text-lg font-bold mb-2">Leave Hub?</h3>
-            <p className="text-sm text-white/80 mb-4">Leaving will clear your local chat history. Are you sure?</p>
+            <p className="text-sm text-white/80 mb-4">
+              Leaving will clear your local chat history. Are you sure?
+            </p>
             <div className="flex justify-center gap-2">
-              <button onClick={handleCancelLeave} className="px-3 py-2 rounded bg-gradient-to-br from-green-500 to-green-600 text-white">Cancel</button>
-              <button onClick={handleConfirmLeave} className="px-3 py-2 rounded bg-gradient-to-br from-red-500 to-red-600 text-white">Leave & Clear</button>
+              <button
+                onClick={handleCancelLeave}
+                className="px-3 py-2 rounded bg-gradient-to-br from-green-500 to-green-600 text-white"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={handleConfirmLeave}
+                className="px-3 py-2 rounded bg-gradient-to-br from-red-500 to-red-600 text-white"
+              >
+                Leave & Clear
+              </button>
             </div>
           </div>
         </div>
@@ -4189,7 +4264,6 @@ export default function Chat() {
     </>
   );
 }
-
 
 // Round Video Streaming
 // src/components/Chat.jsx// Chat.jsx
