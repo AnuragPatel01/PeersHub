@@ -195,9 +195,16 @@ const ReplyInThread = ({
               try {
                 // notify peers that we're typing in this thread
                 if (typeof sendTyping === "function") {
+                  // DEBUG: show that we're about to call sendTyping
+                  console.debug("sending typing:", {
+                    username,
+                    rootId: rootMessage.id,
+                  });
                   sendTyping(username, true, rootMessage.id);
                 }
-              } catch (err) {}
+              } catch (err) {
+                console.warn("sendTyping failed:", err);
+              }
 
               // debounce turning off typing after 1200ms of inactivity
               if (typingTimeoutRef.current)
@@ -205,9 +212,15 @@ const ReplyInThread = ({
               typingTimeoutRef.current = setTimeout(() => {
                 try {
                   if (typeof sendTyping === "function") {
+                    console.debug("sending typing false:", {
+                      username,
+                      rootId: rootMessage.id,
+                    });
                     sendTyping(username, false, rootMessage.id);
                   }
-                } catch (err) {}
+                } catch (err) {
+                  console.warn("sendTyping(false) failed:", err);
+                }
               }, 1200);
             }}
             placeholder="Reply in thread..."

@@ -2642,242 +2642,365 @@ export default function Chat() {
       } catch (er) {}
     }
   };
-
   // incoming messages callback from webrtc
   const handleIncoming = async (from, payloadOrText) => {
-    // typing
-    // typing (main chat or thread)
-    if (
-      from === "__system_typing__" &&
-      payloadOrText &&
-      payloadOrText.fromName
-    ) {
-      const { fromName, isTyping, threadRootId } = payloadOrText;
+    // DEBUG: inspect raw incoming envelope occasionally while testing
+    // console.debug("handleIncoming:", { from, payloadOrText });
 
-      // main chat typing (backwards compatible)
-      if (!threadRootId) {
-        setTypingUsers((t) => {
-          const copy = { ...t };
-          if (isTyping) copy[fromName] = Date.now();
-          else delete copy[fromName];
-          return copy;
-        });
+    try {
+      // ---------- 1) typing (main chat or thread) ----------
+      if (from === "__system_typing__" && payloadOrText) {
+        try {
+          const fromName =
+            payloadOrText.fromName || payloadOrText.from || payloadOrText.name;
+          const isTyping =
+            payloadOrText.isTyping ??
+            payloadOrText.typing ??
+            payloadOrText.is_typing ??
+            false;
+          const threadRootId =
+            payloadOrText.threadRootId ||
+            payloadOrText.rootId ||
+            payloadOrText.threadId ||
+            null;
+
+          if (!fromName) {
+            // nothing we can do
+            return;
+          }
+
+          // main-chat typing
+          if (!threadRootId) {
+            setTypingUsers((t) => {
+              const copy = { ...t };
+              if (isTyping) copy[fromName] = Date.now();
+              else delete copy[fromName];
+              return copy;
+            });
+            return;
+          }
+
+          // thread typing: mapping { rootId: { name: timestamp } }
+          setThreadTypingUsers((t) => {
+            const copy = { ...t };
+            const root = threadRootId;
+            const bucket = { ...(copy[root] || {}) };
+            if (isTyping) bucket[fromName] = Date.now();
+            else delete bucket[fromName];
+            if (Object.keys(bucket).length) copy[root] = bucket;
+            else delete copy[root];
+            return copy;
+          });
+          return;
+        } catch (e) {
+          console.warn(
+            "handleIncoming: typing handling failed",
+            e,
+            payloadOrText
+          );
+          return;
+        }
+      }
+
+      // ---------- 2) ack deliver ----------
+      if (
+        from === "__system_ack_deliver__" &&
+        payloadOrText &&
+        payloadOrText.id
+      ) {
+        try {
+          const fromPeer =
+            payloadOrText.fromPeer || payloadOrText.from || payloadOrText.peer;
+          const id = payloadOrText.id;
+          const isThread =
+            payloadOrText.isThread || payloadOrText.thread || false;
+          const threadRootId =
+            payloadOrText.threadRootId ||
+            payloadOrText.rootId ||
+            payloadOrText.threadId ||
+            null;
+
+          addUniqueToMsgArray(
+            id,
+            "deliveries",
+            fromPeer,
+            !!isThread,
+            threadRootId
+          );
+        } catch (e) {
+          console.warn("handleIncoming: ack_deliver failed", e, payloadOrText);
+        }
         return;
       }
 
-      // thread typing: keep mapping { rootId: { name: timestamp } }
-      setThreadTypingUsers((t) => {
-        const copy = { ...t };
-        const root = threadRootId;
-        const bucket = { ...(copy[root] || {}) };
-        if (isTyping) bucket[fromName] = Date.now();
-        else delete bucket[fromName];
-        // remove empty buckets
-        if (Object.keys(bucket).length) copy[root] = bucket;
-        else delete copy[root];
-        return copy;
-      });
-      return;
-    }
+      // ---------- 3) ack read ----------
+      if (from === "__system_ack_read__" && payloadOrText && payloadOrText.id) {
+        try {
+          const fromPeer =
+            payloadOrText.fromPeer || payloadOrText.from || payloadOrText.peer;
+          const id = payloadOrText.id;
+          const isThread =
+            payloadOrText.isThread || payloadOrText.thread || false;
+          const threadRootId =
+            payloadOrText.threadRootId ||
+            payloadOrText.rootId ||
+            payloadOrText.threadId ||
+            null;
 
-    // ack deliver
-    if (
-      from === "__system_ack_deliver__" &&
-      payloadOrText &&
-      payloadOrText.id
-    ) {
-      const { fromPeer, id, isThread, threadRootId } = payloadOrText;
-      addUniqueToMsgArray(id, "deliveries", fromPeer, isThread, threadRootId);
-      return;
-    }
+          addUniqueToMsgArray(id, "reads", fromPeer, !!isThread, threadRootId);
+        } catch (e) {
+          console.warn("handleIncoming: ack_read failed", e, payloadOrText);
+        }
+        return;
+      }
 
-    // ack read
-    if (from === "__system_ack_read__" && payloadOrText && payloadOrText.id) {
-      const { fromPeer, id, isThread, threadRootId } = payloadOrText;
-      addUniqueToMsgArray(id, "reads", fromPeer, isThread, threadRootId);
-      return;
-    }
+      // ---------- 4) system messages ----------
+      if (
+        payloadOrText &&
+        typeof payloadOrText === "object" &&
+        payloadOrText.type &&
+        payloadOrText.id &&
+        payloadOrText.type.toString().startsWith("system")
+      ) {
+        try {
+          const { type, text: txt, id } = payloadOrText;
+          if (seenSystemIdsRef.current.has(id)) return;
+          seenSystemIdsRef.current.add(id);
+          const msg = {
+            id,
+            from: "System",
+            text: txt,
+            ts: Date.now(),
+            type,
+            deliveries: [],
+            reads: [],
+          };
+          setMessages((m) => {
+            const next = [...m, msg];
+            persistMessages(next);
+            return next;
+          });
+          if (type === "system_public") maybeNotify("System", txt);
+        } catch (e) {
+          console.warn("handleIncoming: system msg failed", e, payloadOrText);
+        }
+        return;
+      }
 
-    // system messages
-    if (
-      payloadOrText &&
-      typeof payloadOrText === "object" &&
-      payloadOrText.type &&
-      payloadOrText.id &&
-      payloadOrText.type.toString().startsWith("system")
-    ) {
-      const { type, text: txt, id } = payloadOrText;
-      if (seenSystemIdsRef.current.has(id)) return;
-      seenSystemIdsRef.current.add(id);
-      const msg = {
-        id,
-        from: "System",
-        text: txt,
-        ts: Date.now(),
-        type,
-        deliveries: [],
-        reads: [],
-      };
-      setMessages((m) => {
-        const next = [...m, msg];
-        persistMessages(next);
-        return next;
-      });
-      if (type === "system_public") maybeNotify("System", txt);
-      return;
-    }
+      // ---------- 5) file offer received ----------
+      if (from === "__system_file_offer__" && payloadOrText) {
+        try {
+          const offer = payloadOrText;
+          const offerId =
+            offer.id ||
+            `offer-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+          setIncomingFileOffers((s) => {
+            const copy = { ...s };
+            copy[offerId] = {
+              offer,
+              expiresAt: Date.now() + 20000,
+              origin: offer.from,
+            };
+            return copy;
+          });
 
-    // file offer received
-    if (from === "__system_file_offer__" && payloadOrText) {
-      const offer = payloadOrText;
-      const offerId =
-        offer.id ||
-        `offer-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
-      setIncomingFileOffers((s) => {
-        const copy = { ...s };
-        copy[offerId] = {
-          offer,
-          expiresAt: Date.now() + 20000,
-          origin: offer.from,
-        };
-        return copy;
-      });
+          // auto-expire after 20s if not handled locally
+          setTimeout(() => {
+            setIncomingFileOffers((s) => {
+              const copy = { ...s };
+              if (!copy[offerId]) return s;
+              try {
+                respondToFileOffer(offerId, offer.from, false);
+              } catch (e) {}
+              delete copy[offerId];
+              return copy;
+            });
+          }, 20000);
 
-      setTimeout(() => {
-        setIncomingFileOffers((s) => {
-          const copy = { ...s };
-          if (!copy[offerId]) return s;
-          try {
-            respondToFileOffer(offerId, offer.from, false);
-          } catch (e) {}
-          delete copy[offerId];
-          return copy;
-        });
-      }, 20000);
+          maybeNotify(
+            peerNamesMap[offer.from] || offer.from,
+            `File offer: ${offer.name}`
+          );
+        } catch (e) {
+          console.warn("handleIncoming: file offer failed", e, payloadOrText);
+        }
+        return;
+      }
 
-      maybeNotify(
-        peerNamesMap[offer.from] || offer.from,
-        `File offer: ${offer.name}`
-      );
-      return;
-    }
-
-    // file offer response
-    if (from === "__system_file_offer_response__" && payloadOrText) {
-      const { id: offerId, from: responder, accept } = payloadOrText;
-      try {
-        if (!outgoingPendingOffers.current[offerId]) return;
-        if (accept) {
-          outgoingPendingOffers.current[offerId].acceptingPeers.add(responder);
-          const file = outgoingPendingOffers.current[offerId].file;
-          if (file) {
-            setTransfer(offerId, (prev) => ({
-              direction: "sending",
-              label: file.name,
-              total: file.size || prev?.total || 0,
-              transferred: prev?.transferred || 0,
-              peers: Array.from(new Set([...(prev?.peers || []), responder])),
-            }));
-            try {
-              startSendingFile(file, offerId, [responder]);
-            } catch (e) {
-              console.warn("startSendingFile failed", e);
+      // ---------- 6) file offer response (peer accepted/declined our offer) ----------
+      if (from === "__system_file_offer_response__" && payloadOrText) {
+        try {
+          const { id: offerId, from: responder, accept } = payloadOrText;
+          if (!outgoingPendingOffers.current[offerId]) return;
+          if (accept) {
+            outgoingPendingOffers.current[offerId].acceptingPeers.add(
+              responder
+            );
+            const file = outgoingPendingOffers.current[offerId].file;
+            if (file) {
+              setTransfer(offerId, (prev) => ({
+                direction: "sending",
+                label: file.name,
+                total: file.size || prev?.total || 0,
+                transferred: prev?.transferred || 0,
+                peers: Array.from(new Set([...(prev?.peers || []), responder])),
+              }));
+              try {
+                startSendingFile(file, offerId, [responder]);
+              } catch (e) {
+                console.warn("startSendingFile failed", e);
+              }
             }
           }
-        }
-      } catch (e) {
-        console.warn("file_offer_response handling failed", e);
-      }
-      return;
-    }
-
-    // file chunk
-    if (from === "__system_file_chunk__" && payloadOrText) {
-      await handleIncomingFileChunk(payloadOrText);
-      return;
-    }
-
-    // file transfer done
-    if (from === "__system_file_transfer_done__" && payloadOrText) {
-      const { id: offerId } = payloadOrText;
-      try {
-        setTransfer(offerId, (prev) => ({
-          ...prev,
-          transferred: prev?.total ?? prev?.transferred ?? 0,
-        }));
-        setTimeout(() => removeTransfer(offerId), 1200);
-      } catch (e) {}
-      setMessages((m) => {
-        const sys = {
-          id: `sys-file-complete-${offerId}`,
-          from: "System",
-          text: "File transfer completed",
-          ts: Date.now(),
-          type: "system",
-        };
-        const next = [...m, sys];
-        persistMessages(next);
-        return next;
-      });
-      return;
-    }
-
-    // chat object (regular or thread)
-    if (
-      payloadOrText &&
-      typeof payloadOrText === "object" &&
-      (payloadOrText.type === "chat" || payloadOrText.type === "thread") &&
-      payloadOrText.id
-    ) {
-      upsertIncomingChat(payloadOrText);
-      maybeNotify(
-        payloadOrText.fromName || payloadOrText.from,
-        payloadOrText.text
-      );
-
-      try {
-        const origin = payloadOrText.from || payloadOrText.origin || null;
-        const localId = getLocalPeerId() || myId;
-        if (
-          origin &&
-          origin !== localId &&
-          document.visibilityState === "visible"
-        ) {
-          try {
-            sendAckRead(payloadOrText.id, origin);
-          } catch (e) {}
-          addUniqueToMsgArray(
-            payloadOrText.id,
-            "reads",
-            localId,
-            payloadOrText.type === "thread",
-            payloadOrText.threadRootId
+        } catch (e) {
+          console.warn(
+            "handleIncoming: file offer response failed",
+            e,
+            payloadOrText
           );
         }
-      } catch (e) {}
-      return;
-    }
+        return;
+      }
 
-    // string fallback
-    if (typeof payloadOrText === "string") {
-      const safeText = payloadOrText;
-      const newMsg = {
-        id: nanoid(),
-        from: from || "peer",
-        fromId: null,
-        text: safeText,
-        ts: Date.now(),
-        type: "chat",
-        deliveries: [],
-        reads: [],
-      };
-      setMessages((m) => {
-        const next = [...m, newMsg];
-        persistMessages(next);
-        return next;
+      // ---------- 7) file chunk ----------
+      if (from === "__system_file_chunk__" && payloadOrText) {
+        try {
+          await handleIncomingFileChunk(payloadOrText);
+        } catch (e) {
+          console.warn(
+            "handleIncoming: file chunk handler error",
+            e,
+            payloadOrText
+          );
+        }
+        return;
+      }
+
+      // ---------- 8) file transfer done ----------
+      if (from === "__system_file_transfer_done__" && payloadOrText) {
+        try {
+          const { id: offerId } = payloadOrText;
+          try {
+            setTransfer(offerId, (prev) => ({
+              ...prev,
+              transferred: prev?.total ?? prev?.transferred ?? 0,
+            }));
+            setTimeout(() => removeTransfer(offerId), 1200);
+          } catch (e) {}
+          setMessages((m) => {
+            const sys = {
+              id: `sys-file-complete-${offerId}`,
+              from: "System",
+              text: "File transfer completed",
+              ts: Date.now(),
+              type: "system",
+            };
+            const next = [...m, sys];
+            persistMessages(next);
+            return next;
+          });
+        } catch (e) {
+          console.warn(
+            "handleIncoming: file transfer done failed",
+            e,
+            payloadOrText
+          );
+        }
+        return;
+      }
+
+      // ---------- 9) chat object (regular chat or thread) ----------
+      if (
+        payloadOrText &&
+        typeof payloadOrText === "object" &&
+        (payloadOrText.type === "chat" || payloadOrText.type === "thread") &&
+        payloadOrText.id
+      ) {
+        try {
+          upsertIncomingChat(payloadOrText);
+          maybeNotify(
+            payloadOrText.fromName || payloadOrText.from,
+            payloadOrText.text
+          );
+
+          // if message came from another peer and tab is visible, send ack_read
+          try {
+            const origin = payloadOrText.from || payloadOrText.origin || null;
+            const localId = getLocalPeerId() || myId;
+            if (
+              origin &&
+              origin !== localId &&
+              document.visibilityState === "visible"
+            ) {
+              try {
+                // send basic ack read for chat; we pass thread info when it's a thread message
+                if (payloadOrText.type === "thread") {
+                  sendAckRead(
+                    payloadOrText.id,
+                    origin,
+                    true,
+                    payloadOrText.threadRootId
+                  );
+                  addUniqueToMsgArray(
+                    payloadOrText.id,
+                    "reads",
+                    localId,
+                    true,
+                    payloadOrText.threadRootId
+                  );
+                } else {
+                  sendAckRead(payloadOrText.id, origin);
+                  addUniqueToMsgArray(payloadOrText.id, "reads", localId);
+                }
+              } catch (e) {
+                console.warn("sendAckRead failed (auto visibility):", e);
+              }
+            }
+          } catch (e) {}
+        } catch (e) {
+          console.warn(
+            "handleIncoming: upsertIncomingChat failed",
+            e,
+            payloadOrText
+          );
+        }
+        return;
+      }
+
+      // ---------- 10) string fallback ----------
+      if (typeof payloadOrText === "string") {
+        try {
+          const safeText = payloadOrText;
+          const newMsg = {
+            id: nanoid(),
+            from: from || "peer",
+            fromId: null,
+            text: safeText,
+            ts: Date.now(),
+            type: "chat",
+            deliveries: [],
+            reads: [],
+          };
+          setMessages((m) => {
+            const next = [...m, newMsg];
+            persistMessages(next);
+            return next;
+          });
+          maybeNotify(from, safeText);
+        } catch (e) {
+          console.warn(
+            "handleIncoming: string fallback failed",
+            e,
+            payloadOrText
+          );
+        }
+        return;
+      }
+    } catch (outerErr) {
+      console.warn("handleIncoming: unexpected error", outerErr, {
+        from,
+        payloadOrText,
       });
-      maybeNotify(from, safeText);
-      return;
     }
   };
 
