@@ -9,6 +9,7 @@ const ReplyInThread = ({
   onClose,
   username,
   myId,
+  peers = [],
   threadMessages,
   onSendThreadReply,
   peerNamesMap = {},
@@ -86,6 +87,57 @@ const ReplyInThread = ({
     setText("");
   };
 
+  // Render the same red/yellow/green/gray delivery/read dot used in Chat.jsx
+  const renderStatusDot = (m) => {
+    const totalPeers = (peers && peers.length) || 0;
+    if (totalPeers === 0) {
+      return (
+        <span
+          className="inline-block w-2 h-2 rounded-full bg-gray-400 ml-2"
+          title="No recipients (offline)"
+        />
+      );
+    }
+
+    // deliveries and reads arrays may contain peer IDs; remove local id from counts
+    const localId = getLocalPeerId() || myId;
+    const deliveries = (m.deliveries || []).filter(
+      (id) => id !== localId
+    ).length;
+    const reads = (m.reads || []).filter((id) => id !== localId).length;
+
+    if (deliveries < totalPeers) {
+      return (
+        <span
+          className="inline-block w-2 h-2 rounded-full bg-red-500 ml-2"
+          title={`Single tick — delivered to ${deliveries}/${totalPeers}`}
+        />
+      );
+    }
+
+    if (deliveries === totalPeers && reads < totalPeers) {
+      return (
+        <span
+          className="inline-block w-2 h-2 rounded-full bg-yellow-400 ml-2"
+          title={`Double tick — delivered to all (${totalPeers}), reads ${reads}/${totalPeers}`}
+        />
+      );
+    }
+
+    if (reads === totalPeers) {
+      return (
+        <span
+          className="inline-block w-2 h-2 rounded-full bg-green-500 ml-2"
+          title="Double-blue — read by everyone"
+        />
+      );
+    }
+
+    return (
+      <span className="inline-block w-2 h-2 rounded-full bg-gray-400 ml-2" />
+    );
+  };
+
   const renderMessage = (m, isRoot = false) => {
     const from = m.from ?? "peer";
     const txt = typeof m.text === "string" ? m.text : JSON.stringify(m.text);
@@ -113,6 +165,7 @@ const ReplyInThread = ({
           {isRoot && (
             <div className="text-[10px] text-blue-600 ml-2 font-bold">ROOT</div>
           )}
+           {isMe && renderStatusDot(m)}
         </div>
         <div className="break-words mt-1">{txt}</div>
       </div>

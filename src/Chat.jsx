@@ -3856,6 +3856,7 @@ export default function Chat() {
           onClose={closeThread}
           username={username}
           myId={myId}
+          peers={peers} // ← added
           threadMessages={threadMessages[activeThread.id] || []}
           onSendThreadReply={handleSendThreadReply}
           peerNamesMap={peerNamesMap}
