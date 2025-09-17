@@ -1,7 +1,6 @@
 // src/components/ReplyInThread.jsx
 import React, { useState, useRef, useEffect } from "react";
 import { sendChat, getLocalPeerId, sendTyping, sendAckRead } from "./webrtc";
-
 import { nanoid } from "nanoid";
 
 const ReplyInThread = ({
@@ -16,8 +15,10 @@ const ReplyInThread = ({
   threadTypingUsers = {},
 }) => {
   const [text, setText] = useState("");
+  const [replyTo, setReplyTo] = useState(null); // <-- reply target in thread
   const messagesEndRef = useRef(null);
   const typingTimeoutRef = useRef(null);
+  const inputRef = useRef(null);
 
   useEffect(() => {
     return () => {
@@ -59,6 +60,7 @@ const ReplyInThread = ({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [rootMessage?.id, threadMessages]);
 
+  // derive names typing for this thread
   const typingBucket =
     (threadTypingUsers && threadTypingUsers[rootMessage.id]) || {};
   const typingNames = Object.keys(typingBucket || {}).filter((n) => {
@@ -67,41 +69,17 @@ const ReplyInThread = ({
     return t && Date.now() - t < 3000;
   });
 
-  const handleSend = () => {
-    if (!text.trim()) return;
-
-    const id = nanoid();
-    const msgObj = {
-      id,
-      from: getLocalPeerId() || myId,
-      fromName: username,
-      text: text.trim(),
-      ts: Date.now(),
-      type: "thread",
-      threadRootId: rootMessage.id,
-      deliveries: [],
-      reads: [getLocalPeerId() || myId],
-    };
-
-    onSendThreadReply(msgObj);
-    setText("");
-  };
-
-  // Render delivery/read dot for thread messages (safer)
+  // Render delivery/read dot (same logic used in Chat)
   const renderStatusDot = (m) => {
-    // peers prop is an array of connected peer IDs (may include local depending on upstream).
     const localId = getLocalPeerId() || myId;
 
-    // build list of other peers we consider recipients (exclude local)
     const recipientIds = (Array.isArray(peers) ? peers.slice() : []).filter(
       (p) => p && p !== localId
     );
 
-    // fallback: if peers is empty, attempt to infer recipients from deliveries/reads arrays
     const totalPeers =
       recipientIds.length ||
       (() => {
-        // infer distinct peers from deliveries/reads (excluding local)
         const fromDeliveries = (m.deliveries || []).filter(
           (id) => id && id !== localId
         );
@@ -110,13 +88,11 @@ const ReplyInThread = ({
         return set.size;
       })();
 
-    // counts (exclude local)
     const deliveries = (m.deliveries || []).filter(
       (id) => id && id !== localId
     ).length;
     const reads = (m.reads || []).filter((id) => id && id !== localId).length;
 
-    // Titles for debugging hover
     const title = `deliveries: ${deliveries}/${totalPeers} • reads: ${reads}/${totalPeers}`;
 
     if (totalPeers === 0) {
@@ -163,6 +139,61 @@ const ReplyInThread = ({
     );
   };
 
+  const handleSend = () => {
+    if (!text.trim()) return;
+
+    const id = nanoid();
+    const msgObj = {
+      id,
+      from: getLocalPeerId() || myId,
+      fromName: username,
+      text: text.trim(),
+      ts: Date.now(),
+      type: "thread",
+      threadRootId: rootMessage.id,
+      deliveries: [],
+      reads: [getLocalPeerId() || myId],
+      replyTo: replyTo
+        ? { id: replyTo.id, from: replyTo.from, text: replyTo.text }
+        : null,
+    };
+
+    // send/upsert
+    onSendThreadReply(msgObj);
+
+    // clear input + replyTo
+    setText("");
+    setReplyTo(null);
+  };
+
+  // When user taps a message in the thread: set reply target, focus input, and send ack_read
+  const handleTapThreadMessage = (m) => {
+    if (!m || (m.type && m.type.toString().startsWith("system"))) return;
+    setReplyTo({ id: m.id, from: m.from, text: m.text });
+    // focus input
+    try {
+      if (inputRef.current) inputRef.current.focus();
+      else {
+        const input = document.querySelector(
+          'input[placeholder="Reply in thread..."]'
+        );
+        if (input) input.focus();
+      }
+    } catch (e) {}
+
+    // send ack_read to origin so sender sees read quickly
+    try {
+      const originPeerId = m.fromId || m.from;
+      if (m.id && originPeerId) {
+        try {
+          sendAckRead(m.id, originPeerId, true, rootMessage.id);
+        } catch (e) {
+          console.warn("sendAckRead (thread) failed", e);
+        }
+      }
+    } catch (e) {}
+  };
+
   const renderMessage = (m, isRoot = false) => {
     const from = m.from ?? "peer";
     const txt = typeof m.text === "string" ? m.text : JSON.stringify(m.text);
@@ -176,7 +207,8 @@ const ReplyInThread = ({
     return (
       <div
         key={`${m.id ?? m.ts}`}
-        className={`p-2 rounded-2xl max-w-[40%] md:max-w-[10%] mb-2 ${
+        onClick={() => handleTapThreadMessage(m)}
+        className={`p-2 rounded-2xl max-w-[40%] md:max-w-[40%] mb-2 ${
           isRoot
             ? "bg-blue-100 border-2 border-blue-300"
             : isMe
@@ -192,6 +224,19 @@ const ReplyInThread = ({
           )}
           {isMe && renderStatusDot(m)}
         </div>
+
+        {/* Reply-to preview (show when this message is itself a reply) */}
+        {m.replyTo && (
+          <div className="mt-2 mb-2 p-2 rounded border border-white/10 text-xs text-gray-700 bg-gray-100">
+            <strong className="text-xs text-blue-500">
+              Reply to {m.replyTo.from}:
+            </strong>{" "}
+            <span className="text-xs text-gray-800 break-words">
+              {m.replyTo.text}
+            </span>
+          </div>
+        )}
+
         <div className="break-words mt-1">{txt}</div>
       </div>
     );
@@ -219,7 +264,7 @@ const ReplyInThread = ({
             <path d="M19 12H5M12 19l-7-7 7-7" />
           </svg>
         </button>
-        <h1 className="text-lg font-semibold text-blue-500">Thread</h1>
+        <h1 className="text-lg font-semibold text-blue-500">Nest</h1>
         <div className="w-10 h-10" /> {/* Spacer for centering */}
       </header>
 
@@ -263,8 +308,27 @@ const ReplyInThread = ({
             {typingNames.length === 1 ? "is" : "are"} typing...
           </div>
         )}
+
+        {/* Reply preview */}
+        {replyTo && (
+          <div className="mb-2 p-3 bg-white/10 text-gray-600 rounded-lg flex items-start justify-between">
+            <div>
+              Replying to <strong>{replyTo.from}</strong>:{" "}
+              <div className="text-sm text-blue-400">{replyTo.text}</div>
+            </div>
+            <button
+              onClick={() => setReplyTo(null)}
+              className="ml-4 text-xs text-red-500"
+              aria-label="Cancel reply"
+            >
+              x
+            </button>
+          </div>
+        )}
+
         <div className="relative flex items-center">
           <input
+            ref={inputRef}
             value={text}
             onChange={(e) => {
               const val = e.target.value;
@@ -273,16 +337,9 @@ const ReplyInThread = ({
               try {
                 // notify peers that we're typing in this thread
                 if (typeof sendTyping === "function") {
-                  // DEBUG: show that we're about to call sendTyping
-                  console.debug("sending typing:", {
-                    username,
-                    rootId: rootMessage.id,
-                  });
                   sendTyping(username, true, rootMessage.id);
                 }
-              } catch (err) {
-                console.warn("sendTyping failed:", err);
-              }
+              } catch (err) {}
 
               // debounce turning off typing after 1200ms of inactivity
               if (typingTimeoutRef.current)
@@ -290,18 +347,12 @@ const ReplyInThread = ({
               typingTimeoutRef.current = setTimeout(() => {
                 try {
                   if (typeof sendTyping === "function") {
-                    console.debug("sending typing false:", {
-                      username,
-                      rootId: rootMessage.id,
-                    });
                     sendTyping(username, false, rootMessage.id);
                   }
-                } catch (err) {
-                  console.warn("sendTyping(false) failed:", err);
-                }
+                } catch (err) {}
               }, 1200);
             }}
-            placeholder="Reply in thread..."
+            placeholder="Reply in nest..."
             className="flex-1 p-3 pr-12 bg-gray-100 placeholder-gray-500 text-gray-800 rounded-full border border-gray-300 focus:outline-none focus:ring-2 focus:ring-blue-500"
             onKeyDown={(e) => {
               if (e.key === "Enter") handleSend();
