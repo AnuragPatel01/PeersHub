@@ -4450,42 +4450,46 @@ export default function Chat() {
             await idbPut(key, p.dataUrl);
             imageRefs.push(key);
           } catch (err) {
-            console.warn("idbPut failed for", key, err);
-            // if idbPut fails, we could fallback to storing small previews inline,
-            // but keep it simple and ignore failed images.
+            console.warn("idbPut (onFileSelected inline) failed", key, err);
+            // still keep the data URL for immediate render (we will include it in send)
           }
         })
       );
 
-      // Build lightweight message object (no base64 inside)
+      // Build lightweight local message object (no base64 inside)
       const msgObj = {
         id: offerId,
         from: username || "You",
         fromId: getLocalPeerId() || myId,
         ts: Date.now(),
         type: "chat",
-        imageRefs, // store refs only
+        imageRefs, // refs for persistence
         imageMeta: previews.map((p) => ({ name: p.name })),
         text: caption || text || "",
         deliveries: [],
         reads: [getLocalPeerId() || myId],
       };
 
-      // persist + show locally (persistMessages strips heavy fields)
+      // persist + show locally (persistMessages will strip big fields)
       setMessages((m) => {
         const next = [...m, msgObj];
         persistMessages(next);
         return next;
       });
 
-      // broadcast to peers
+      // CREATE the sending object: include inline data URLs so peers can render immediately
+      const sendMsgObj = {
+        ...msgObj,
+        imageGroup: previews.map((p) => p.dataUrl),
+      };
+
       try {
-        sendChat(msgObj);
+        sendChat(sendMsgObj);
       } catch (e) {
-        console.warn("sendChat (inline images) failed", e);
+        console.warn("sendChat (inline images from onFileSelected) failed", e);
       }
 
-      // clear UI state
+      // clear composer state
       setPendingPhotos([]);
       setCaption("");
       setText("");
