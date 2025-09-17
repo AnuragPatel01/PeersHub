@@ -3017,15 +3017,13 @@ export default function Chat() {
     }
   };
   const handleIncoming = async (from, payloadOrText) => {
-    console.debug("=== handleIncoming START ===", { from, payloadOrText });
+    // DEBUG: inspect raw incoming envelope occasionally while testing
+    console.debug("handleIncoming:", { from, payloadOrText });
 
     try {
-      // typing / ack / system / file-offer / chunk / transfer cases
-      // (copy all your existing checks here unchanged)...
-      // I'll preserve your existing logic — keep those blocks as-is.
-      // -- For brevity in this snippet we still check the main chat case next --
-
-      // ---------- chat object (regular chat or thread) ----------
+      // --- Preprocess incoming chat/thread objects for inline images ---
+      // If a peer included inline data-URLs in imageGroup / imagePreview,
+      // store them to IndexedDB and add imageRefs for persistent storage.
       if (
         payloadOrText &&
         typeof payloadOrText === "object" &&
@@ -3033,159 +3031,386 @@ export default function Chat() {
         payloadOrText.id
       ) {
         try {
-          const incoming = { ...payloadOrText }; // shallow copy for mutation
-          console.debug("Incoming chat payload (raw):", incoming);
+          const incomingCopy = { ...payloadOrText };
 
+          // Helper
           const isDataUrl = (s) =>
             typeof s === "string" && s.startsWith("data:");
-          const saveKeys = [];
 
-          // If sender provided imageGroup (inline data urls), save to idb
+          // Process imageGroup (array of images)
           if (
-            Array.isArray(incoming.imageGroup) &&
-            incoming.imageGroup.length
+            Array.isArray(incomingCopy.imageGroup) &&
+            incomingCopy.imageGroup.length
           ) {
-            console.debug(
-              "Incoming.imageGroup present, length:",
-              incoming.imageGroup.length
-            );
+            const refs = [];
+            const keep = [];
+
             await Promise.all(
-              incoming.imageGroup.map(async (it, i) => {
+              incomingCopy.imageGroup.map(async (item, i) => {
                 try {
-                  if (isDataUrl(it)) {
-                    const key = `img-${incoming.id}-${i}`;
-                    await idbPut(key, it);
-                    saveKeys.push(key);
+                  if (isDataUrl(item)) {
+                    const key = `img-${incomingCopy.id}-${i}`;
+                    try {
+                      await idbPut(key, item);
+                      refs.push(key);
+                    } catch (e) {
+                      console.warn(
+                        "idbPut (incoming.imageGroup) failed",
+                        key,
+                        e
+                      );
+                      // still keep the data URL for immediate render
+                    }
+                    keep.push(item);
+                  } else if (typeof item === "string") {
+                    // Could already be a URL or ref; keep as-is
+                    keep.push(item);
                   }
-                } catch (err) {
-                  console.warn("idbPut failed (incoming.imageGroup)", err);
+                } catch (e) {
+                  console.warn("Failed processing imageGroup item", e, item);
                 }
               })
             );
 
-            if (saveKeys.length) {
-              incoming.imageRefs = Array.isArray(incoming.imageRefs)
-                ? Array.from(new Set([...incoming.imageRefs, ...saveKeys]))
-                : saveKeys;
-              console.debug("Saved incoming.imageGroup to idb keys:", saveKeys);
+            // If we saved any refs, attach/merge into imageRefs
+            if (refs.length) {
+              incomingCopy.imageRefs = Array.isArray(incomingCopy.imageRefs)
+                ? Array.from(new Set([...incomingCopy.imageRefs, ...refs]))
+                : refs;
             }
 
-            // If only one image, also set imagePreview for single-image rendering
-            if (
-              !incoming.imagePreview &&
-              incoming.imageGroup.length === 1 &&
-              isDataUrl(incoming.imageGroup[0])
-            ) {
-              incoming.imagePreview = incoming.imageGroup[0];
-            }
+            // keep the imageGroup contents for immediate rendering
+            incomingCopy.imageGroup = keep.length
+              ? keep
+              : incomingCopy.imageGroup;
           }
 
-          // If incoming has a single imagePreview as data URL, persist it
-          if (incoming.imagePreview && isDataUrl(incoming.imagePreview)) {
-            try {
-              const key = `img-${incoming.id}-preview`;
-              await idbPut(key, incoming.imagePreview);
-              incoming.imageRef = incoming.imageRef || key;
-              console.debug("Saved incoming.imagePreview to idb as:", key);
-            } catch (err) {
-              console.warn("idbPut failed (incoming.imagePreview)", err);
-            }
-          }
+          // Process single imagePreview (single image)
+          const previewRaw =
+            typeof incomingCopy.imagePreview === "string"
+              ? incomingCopy.imagePreview
+              : incomingCopy.imagePreview?.dataUrl ||
+                incomingCopy.imagePreview?.src ||
+                null;
 
-          // If only imageRefs provided, attempt to hydrate from idb
-          if (
-            Array.isArray(incoming.imageRefs) &&
-            incoming.imageRefs.length &&
-            (!Array.isArray(incoming.imageGroup) ||
-              incoming.imageGroup.length === 0)
-          ) {
-            const hydrated = [];
-            await Promise.all(
-              incoming.imageRefs.map(async (key) => {
-                try {
-                  const val = await idbGet(key);
-                  if (val) hydrated.push(val);
-                } catch (err) {
-                  // ignore per-key
-                }
-              })
-            );
-            if (hydrated.length) {
-              incoming.imageGroup = hydrated;
-              console.debug(
-                "Hydrated imageRefs -> imageGroup length:",
-                hydrated.length
-              );
+          if (previewRaw && typeof previewRaw === "string") {
+            if (isDataUrl(previewRaw)) {
+              const key = `img-${incomingCopy.id}-preview`;
+              try {
+                await idbPut(key, previewRaw);
+                incomingCopy.imageRef = key;
+              } catch (e) {
+                console.warn("idbPut (incoming.imagePreview) failed", key, e);
+                // keep previewRaw for immediate render
+              }
+              incomingCopy.imagePreview = previewRaw;
             } else {
-              console.debug(
-                "No idb data for incoming.imageRefs:",
-                incoming.imageRefs
-              );
-              incoming._imageMissing = true;
+              // not a data url — keep as-is
+              incomingCopy.imagePreview = previewRaw;
             }
           }
 
-          // If single imageRef present, try hydrate
-          if (incoming.imageRef && !incoming.imagePreview) {
-            try {
-              const maybe = await idbGet(incoming.imageRef);
-              if (maybe) incoming.imagePreview = maybe;
-              else incoming._imageMissing = true;
-            } catch (err) {
-              incoming._imageMissing = true;
-            }
+          // Replace payload with our processed copy so the downstream branches see imageRefs/imageGroup/imagePreview
+          payloadOrText = incomingCopy;
+        } catch (preErr) {
+          console.warn(
+            "handleIncoming: preprocessing images failed",
+            preErr,
+            payloadOrText
+          );
+          // fall through to normal handling with original payload
+        }
+      }
+
+      // ---------- 1) typing (main chat or thread) ----------
+      if (from === "__system_typing__" && payloadOrText) {
+        try {
+          const fromName =
+            payloadOrText.fromName || payloadOrText.from || payloadOrText.name;
+          const isTyping =
+            payloadOrText.isTyping ??
+            payloadOrText.typing ??
+            payloadOrText.is_typing ??
+            false;
+          const threadRootId =
+            payloadOrText.threadRootId ||
+            payloadOrText.rootId ||
+            payloadOrText.threadId ||
+            null;
+
+          if (!fromName) return;
+
+          if (!threadRootId) {
+            setTypingUsers((t) => {
+              const copy = { ...t };
+              if (isTyping) copy[fromName] = Date.now();
+              else delete copy[fromName];
+              return copy;
+            });
+            return;
           }
 
-          console.debug("Incoming chat final shape:", {
-            id: incoming.id,
-            hasImageGroup:
-              Array.isArray(incoming.imageGroup) && incoming.imageGroup.length,
-            imageGroupLen: (incoming.imageGroup || []).length,
-            hasImagePreview: !!incoming.imagePreview,
-            imageRefs: incoming.imageRefs,
-            _imageMissing: incoming._imageMissing,
+          setThreadTypingUsers((t) => {
+            const copy = { ...t };
+            const root = threadRootId;
+            const bucket = { ...(copy[root] || {}) };
+            if (isTyping) bucket[fromName] = Date.now();
+            else delete bucket[fromName];
+            if (Object.keys(bucket).length) copy[root] = bucket;
+            else delete copy[root];
+            return copy;
+          });
+          return;
+        } catch (e) {
+          console.warn(
+            "handleIncoming: typing handling failed",
+            e,
+            payloadOrText
+          );
+          return;
+        }
+      }
+
+      // ---------- 2) ack deliver ----------
+      if (
+        from === "__system_ack_deliver__" &&
+        payloadOrText &&
+        payloadOrText.id
+      ) {
+        try {
+          const fromPeer =
+            payloadOrText.fromPeer || payloadOrText.from || payloadOrText.peer;
+          const id = payloadOrText.id;
+          const isThread =
+            payloadOrText.isThread || payloadOrText.thread || false;
+          const threadRootId =
+            payloadOrText.threadRootId ||
+            payloadOrText.rootId ||
+            payloadOrText.threadId ||
+            null;
+
+          console.debug("RCV ack_deliver:", {
+            fromPeer,
+            id,
+            isThread,
+            threadRootId,
+            raw: payloadOrText,
           });
 
-          // Build normalized msg object
-          const msgObj = {
-            id: incoming.id,
-            from: incoming.fromName || incoming.from || "peer",
-            fromId: incoming.from,
-            text: incoming.text || "",
-            ts: incoming.ts || Date.now(),
-            type: incoming.type || "chat",
-            replyTo: incoming.replyTo || null,
-            deliveries: incoming.deliveries || [],
-            reads: incoming.reads || [],
-            imageGroup: Array.isArray(incoming.imageGroup)
-              ? incoming.imageGroup
-              : undefined,
-            imagePreview: incoming.imagePreview || undefined,
-            imageMeta: incoming.imageMeta || undefined,
-            imageRefs: incoming.imageRefs || undefined,
-          };
+          addUniqueToMsgArray(
+            id,
+            "deliveries",
+            fromPeer,
+            !!isThread,
+            threadRootId
+          );
+        } catch (e) {
+          console.warn("handleIncoming: ack_deliver failed", e, payloadOrText);
+        }
+        return;
+      }
 
-          // Insert into messages state (update if exists)
+      // ---------- 3) ack read ----------
+      if (from === "__system_ack_read__" && payloadOrText && payloadOrText.id) {
+        try {
+          const fromPeer =
+            payloadOrText.fromPeer || payloadOrText.from || payloadOrText.peer;
+          const id = payloadOrText.id;
+          const isThread =
+            payloadOrText.isThread || payloadOrText.thread || false;
+          const threadRootId =
+            payloadOrText.threadRootId ||
+            payloadOrText.rootId ||
+            payloadOrText.threadId ||
+            null;
+
+          console.debug("RCV ack_read:", {
+            fromPeer,
+            id,
+            isThread,
+            threadRootId,
+            raw: payloadOrText,
+          });
+
+          addUniqueToMsgArray(id, "reads", fromPeer, !!isThread, threadRootId);
+        } catch (e) {
+          console.warn("handleIncoming: ack_read failed", e, payloadOrText);
+        }
+        return;
+      }
+
+      // ---------- 4) system messages ----------
+      if (
+        payloadOrText &&
+        typeof payloadOrText === "object" &&
+        payloadOrText.type &&
+        payloadOrText.id &&
+        payloadOrText.type.toString().startsWith("system")
+      ) {
+        try {
+          const { type, text: txt, id } = payloadOrText;
+          if (seenSystemIdsRef.current.has(id)) return;
+          seenSystemIdsRef.current.add(id);
+          const msg = {
+            id,
+            from: "System",
+            text: txt,
+            ts: Date.now(),
+            type,
+            deliveries: [],
+            reads: [],
+          };
           setMessages((m) => {
-            const exists = m.find((x) => x.id === msgObj.id);
-            const next = exists
-              ? m.map((x) => (x.id === msgObj.id ? { ...x, ...msgObj } : x))
-              : [...m, msgObj];
+            const next = [...m, msg];
             persistMessages(next);
             return next;
           });
+          if (type === "system_public") maybeNotify("System", txt);
+        } catch (e) {
+          console.warn("handleIncoming: system msg failed", e, payloadOrText);
+        }
+        return;
+      }
 
-          // Force tiny debug rerender flag (optional) so React DevTools shows change
-          // (you can remove this after debugging)
+      // ---------- 5) file offer received ----------
+      if (from === "__system_file_offer__" && payloadOrText) {
+        try {
+          const offer = payloadOrText;
+          const offerId =
+            offer.id ||
+            `offer-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+          setIncomingFileOffers((s) => {
+            const copy = { ...s };
+            copy[offerId] = {
+              offer,
+              expiresAt: Date.now() + 20000,
+              origin: offer.from,
+            };
+            return copy;
+          });
+
+          setTimeout(() => {
+            setIncomingFileOffers((s) => {
+              const copy = { ...s };
+              if (!copy[offerId]) return s;
+              try {
+                respondToFileOffer(offerId, offer.from, false);
+              } catch (e) {}
+              delete copy[offerId];
+              return copy;
+            });
+          }, 20000);
+
+          maybeNotify(
+            peerNamesMap[offer.from] || offer.from,
+            `File offer: ${offer.name}`
+          );
+        } catch (e) {
+          console.warn("handleIncoming: file offer failed", e, payloadOrText);
+        }
+        return;
+      }
+
+      // ---------- 6) file offer response (peer accepted/declined our offer) ----------
+      if (from === "__system_file_offer_response__" && payloadOrText) {
+        try {
+          const { id: offerId, from: responder, accept } = payloadOrText;
+          if (!outgoingPendingOffers.current[offerId]) return;
+          if (accept) {
+            outgoingPendingOffers.current[offerId].acceptingPeers.add(
+              responder
+            );
+            const file = outgoingPendingOffers.current[offerId].file;
+            if (file) {
+              setTransfer(offerId, (prev) => ({
+                direction: "sending",
+                label: file.name,
+                total: file.size || prev?.total || 0,
+                transferred: prev?.transferred || 0,
+                peers: Array.from(new Set([...(prev?.peers || []), responder])),
+              }));
+              try {
+                startSendingFile(file, offerId, [responder]);
+              } catch (e) {
+                console.warn("startSendingFile failed", e);
+              }
+            }
+          }
+        } catch (e) {
+          console.warn(
+            "handleIncoming: file offer response failed",
+            e,
+            payloadOrText
+          );
+        }
+        return;
+      }
+
+      // ---------- 7) file chunk ----------
+      if (from === "__system_file_chunk__" && payloadOrText) {
+        try {
+          await handleIncomingFileChunk(payloadOrText);
+        } catch (e) {
+          console.warn(
+            "handleIncoming: file chunk handler error",
+            e,
+            payloadOrText
+          );
+        }
+        return;
+      }
+
+      // ---------- 8) file transfer done ----------
+      if (from === "__system_file_transfer_done__" && payloadOrText) {
+        try {
+          const { id: offerId } = payloadOrText;
           try {
-            setNow(Date.now());
+            setTransfer(offerId, (prev) => ({
+              ...prev,
+              transferred: prev?.total ?? prev?.transferred ?? 0,
+            }));
+            setTimeout(() => removeTransfer(offerId), 1200);
           } catch (e) {}
+          setMessages((m) => {
+            const sys = {
+              id: `sys-file-complete-${offerId}`,
+              from: "System",
+              text: "File transfer completed",
+              ts: Date.now(),
+              type: "system",
+            };
+            const next = [...m, sys];
+            persistMessages(next);
+            return next;
+          });
+        } catch (e) {
+          console.warn(
+            "handleIncoming: file transfer done failed",
+            e,
+            payloadOrText
+          );
+        }
+        return;
+      }
 
-          maybeNotify(incoming.fromName || incoming.from, incoming.text);
+      // ---------- 9) chat object (regular chat or thread) ----------
+      if (
+        payloadOrText &&
+        typeof payloadOrText === "object" &&
+        (payloadOrText.type === "chat" || payloadOrText.type === "thread") &&
+        payloadOrText.id
+      ) {
+        try {
+          // upsert will handle both threads and normal chat (it preserves inline preview data)
+          upsertIncomingChat(payloadOrText);
+          maybeNotify(
+            payloadOrText.fromName || payloadOrText.from,
+            payloadOrText.text
+          );
 
-          // Auto ack read if visible
+          // if message came from another peer and tab is visible, send ack_read
           try {
-            const origin = incoming.from || incoming.origin || null;
+            const origin = payloadOrText.from || payloadOrText.origin || null;
             const localId = getLocalPeerId() || myId;
             if (
               origin &&
@@ -3193,24 +3418,29 @@ export default function Chat() {
               document.visibilityState === "visible"
             ) {
               try {
-                if (incoming.type === "thread") {
-                  sendAckRead(incoming.id, origin, true, incoming.threadRootId);
+                if (payloadOrText.type === "thread") {
+                  sendAckRead(
+                    payloadOrText.id,
+                    origin,
+                    true,
+                    payloadOrText.threadRootId
+                  );
                   addUniqueToMsgArray(
-                    incoming.id,
+                    payloadOrText.id,
                     "reads",
                     localId,
                     true,
-                    incoming.threadRootId
+                    payloadOrText.threadRootId
                   );
                 } else {
-                  sendAckRead(incoming.id, origin);
-                  addUniqueToMsgArray(incoming.id, "reads", localId);
+                  sendAckRead(payloadOrText.id, origin);
+                  addUniqueToMsgArray(payloadOrText.id, "reads", localId);
                 }
-              } catch (err) {
-                console.warn("sendAckRead failed (auto visibility):", err);
+              } catch (e) {
+                console.warn("sendAckRead failed (auto visibility):", e);
               }
             }
-          } catch (err) {}
+          } catch (e) {}
         } catch (e) {
           console.warn(
             "handleIncoming: upsertIncomingChat failed",
@@ -3218,11 +3448,10 @@ export default function Chat() {
             payloadOrText
           );
         }
-        console.debug("=== handleIncoming END (chat) ===");
         return;
       }
 
-      // ---------- string fallback ----------
+      // ---------- 10) string fallback ----------
       if (typeof payloadOrText === "string") {
         try {
           const safeText = payloadOrText;
@@ -3251,8 +3480,6 @@ export default function Chat() {
         }
         return;
       }
-
-      console.debug("=== handleIncoming END (no case matched) ===");
     } catch (outerErr) {
       console.warn("handleIncoming: unexpected error", outerErr, {
         from,
@@ -3500,7 +3727,6 @@ export default function Chat() {
         persistThreadMessages(updated);
         return updated;
       });
-
 
       // 2) broadcast to peers using the same object (so they get images if we left inline)
       try {
@@ -3762,93 +3988,95 @@ export default function Chat() {
 
   // Replace the existing send() with this function
   const send = async () => {
-   // INLINE IMAGE BRANCH (replace existing inline-image block)
-if (pendingPhotos.length > 0) {
-  // convert previews to base64 data URLs
-  const previews = await Promise.all(
-    pendingPhotos.map(
-      (p) =>
-        new Promise((resolve) => {
-          const reader = new FileReader();
-          reader.onload = (e) =>
-            resolve({ dataUrl: e.target.result, name: p.file.name });
-          reader.readAsDataURL(p.file);
+    // INLINE IMAGE BRANCH (replace existing inline-image block)
+    if (pendingPhotos.length > 0) {
+      // convert previews to base64 data URLs
+      const previews = await Promise.all(
+        pendingPhotos.map(
+          (p) =>
+            new Promise((resolve) => {
+              const reader = new FileReader();
+              reader.onload = (e) =>
+                resolve({ dataUrl: e.target.result, name: p.file.name });
+              reader.readAsDataURL(p.file);
+            })
+        )
+      );
+
+      const offerId = `img-group-${Date.now()}-${Math.random()
+        .toString(36)
+        .slice(2, 7)}`;
+
+      // convert previews array -> store images in idb and use refs
+      const imageRefs = [];
+      await Promise.all(
+        previews.map(async (p, i) => {
+          const key = `img-${offerId}-${i}`; // deterministic per message
+          try {
+            await idbPut(key, p.dataUrl);
+            imageRefs.push(key);
+          } catch (e) {
+            console.warn("idbPut failed", e);
+          }
         })
-    )
-  );
+      );
 
-  const offerId = `img-group-${Date.now()}-${Math.random()
-    .toString(36)
-    .slice(2, 7)}`;
+      // local object we persist (lightweight: refs)
+      const msgObj = {
+        id: offerId,
+        from: username || "You",
+        fromId: getLocalPeerId() || myId,
+        ts: Date.now(),
+        type: "chat",
+        imageRefs, // refs for local storage
+        imageMeta: previews.map((p) => ({ name: p.name })),
+        text: caption,
+        deliveries: [],
+        reads: [getLocalPeerId() || myId],
+        replyTo: replyTo ? { ...replyTo } : undefined,
+      };
 
-  // convert previews array -> store images in idb and use refs
-  const imageRefs = [];
-  await Promise.all(
-    previews.map(async (p, i) => {
-      const key = `img-${offerId}-${i}`; // deterministic per message
+      // show locally + persist (persistMessages will strip heavy data)
+      setMessages((m) => {
+        const next = [...m, msgObj];
+        persistMessages(next);
+        return next;
+      });
+
+      // Build the outgoing object that includes inline data URLs
+      const sendObj = {
+        ...msgObj,
+        // include inline data URLs for recipients so they can render immediately
+        imageGroup: previews.map((p) => p.dataUrl),
+        // include any other sender-side fields you want recipients to see
+      };
+
+      // DEBUG: verify we are actually sending data URLs
+      console.debug("SENDING chat object", {
+        id: sendObj.id,
+        imageGroupLen: Array.isArray(sendObj.imageGroup)
+          ? sendObj.imageGroup.length
+          : 0,
+        imageGroup0IsDataUrl:
+          Array.isArray(sendObj.imageGroup) && sendObj.imageGroup[0]
+            ? typeof sendObj.imageGroup[0] === "string" &&
+              sendObj.imageGroup[0].startsWith("data:")
+            : false,
+        imageRefs: sendObj.imageRefs,
+      });
+
       try {
-        await idbPut(key, p.dataUrl);
-        imageRefs.push(key);
+        sendChat(sendObj);
       } catch (e) {
-        console.warn("idbPut failed", e);
+        console.warn("sendChat (inline images) failed", e);
       }
-    })
-  );
 
-  // local object we persist (lightweight: refs)
-  const msgObj = {
-    id: offerId,
-    from: username || "You",
-    fromId: getLocalPeerId() || myId,
-    ts: Date.now(),
-    type: "chat",
-    imageRefs, // refs for local storage
-    imageMeta: previews.map((p) => ({ name: p.name })),
-    text: caption,
-    deliveries: [],
-    reads: [getLocalPeerId() || myId],
-    replyTo: replyTo ? { ...replyTo } : undefined,
-  };
-
-  // show locally + persist (persistMessages will strip heavy data)
-  setMessages((m) => {
-    const next = [...m, msgObj];
-    persistMessages(next);
-    return next;
-  });
-
-  // Build the outgoing object that includes inline data URLs
-  const sendObj = {
-    ...msgObj,
-    // include inline data URLs for recipients so they can render immediately
-    imageGroup: previews.map((p) => p.dataUrl),
-    // include any other sender-side fields you want recipients to see
-  };
-
-  // DEBUG: verify we are actually sending data URLs
-  console.debug("SENDING chat object", {
-    id: sendObj.id,
-    imageGroupLen: Array.isArray(sendObj.imageGroup) ? sendObj.imageGroup.length : 0,
-    imageGroup0IsDataUrl:
-      Array.isArray(sendObj.imageGroup) && sendObj.imageGroup[0]
-        ? typeof sendObj.imageGroup[0] === "string" && sendObj.imageGroup[0].startsWith("data:")
-        : false,
-    imageRefs: sendObj.imageRefs,
-  });
-
-  try {
-    sendChat(sendObj);
-  } catch (e) {
-    console.warn("sendChat (inline images) failed", e);
-  }
-
-  setPendingPhotos([]);
-  setCaption("");
-  setReplyTo(null);
-  setText("");
-  return;
-}
-
+      setPendingPhotos([]);
+      setCaption("");
+      setReplyTo(null);
+      setText("");
+      return;
+    }
 
     // 2) Plain text message path (new)
     const trimmed = (text || "").trim();
@@ -3977,10 +4205,10 @@ if (pendingPhotos.length > 0) {
     // console.debug("renderMessage", m.id, "raw imageGroup:", m.imageGroup, "raw preview:", m.imagePreview);
 
     console.debug("renderMessage called for", m.id, {
-  imageGroupLen: Array.isArray(m.imageGroup) ? m.imageGroup.length : 0,
-  imagePreview: !!m.imagePreview,
-  imageRefs: m.imageRefs,
-});
+      imageGroupLen: Array.isArray(m.imageGroup) ? m.imageGroup.length : 0,
+      imagePreview: !!m.imagePreview,
+      imageRefs: m.imageRefs,
+    });
 
     console.debug("renderMessage called for", m.id, {
       imageGroupLen: Array.isArray(m.imageGroup) ? m.imageGroup.length : 0,
