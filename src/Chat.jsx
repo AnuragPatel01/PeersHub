@@ -4217,6 +4217,10 @@ export default function Chat() {
   const renderMessage = (m, idx) => {
     // debug line (optional) - uncomment if you need to inspect shapes
     // console.debug("renderMessage", m.id, "raw imageGroup:", m.imageGroup, "raw preview:", m.imagePreview);
+    console.debug("renderMessage called for", m.id, {
+      imageGroupLen: Array.isArray(m.imageGroup) ? m.imageGroup.length : 0,
+      imagePreview: !!m.imagePreview,
+    });
 
     const from = m.from ?? "peer";
     const txt =
