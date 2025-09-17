@@ -87,30 +87,52 @@ const ReplyInThread = ({
     setText("");
   };
 
-  // Render the same red/yellow/green/gray delivery/read dot used in Chat.jsx
+  // Render delivery/read dot for thread messages (safer)
   const renderStatusDot = (m) => {
-    const totalPeers = (peers && peers.length) || 0;
+    // peers prop is an array of connected peer IDs (may include local depending on upstream).
+    const localId = getLocalPeerId() || myId;
+
+    // build list of other peers we consider recipients (exclude local)
+    const recipientIds = (Array.isArray(peers) ? peers.slice() : []).filter(
+      (p) => p && p !== localId
+    );
+
+    // fallback: if peers is empty, attempt to infer recipients from deliveries/reads arrays
+    const totalPeers =
+      recipientIds.length ||
+      (() => {
+        // infer distinct peers from deliveries/reads (excluding local)
+        const fromDeliveries = (m.deliveries || []).filter(
+          (id) => id && id !== localId
+        );
+        const fromReads = (m.reads || []).filter((id) => id && id !== localId);
+        const set = new Set([...fromDeliveries, ...fromReads]);
+        return set.size;
+      })();
+
+    // counts (exclude local)
+    const deliveries = (m.deliveries || []).filter(
+      (id) => id && id !== localId
+    ).length;
+    const reads = (m.reads || []).filter((id) => id && id !== localId).length;
+
+    // Titles for debugging hover
+    const title = `deliveries: ${deliveries}/${totalPeers} • reads: ${reads}/${totalPeers}`;
+
     if (totalPeers === 0) {
       return (
         <span
           className="inline-block w-2 h-2 rounded-full bg-gray-400 ml-2"
-          title="No recipients (offline)"
+          title={`No recipients (offline) — ${title}`}
         />
       );
     }
-
-    // deliveries and reads arrays may contain peer IDs; remove local id from counts
-    const localId = getLocalPeerId() || myId;
-    const deliveries = (m.deliveries || []).filter(
-      (id) => id !== localId
-    ).length;
-    const reads = (m.reads || []).filter((id) => id !== localId).length;
 
     if (deliveries < totalPeers) {
       return (
         <span
           className="inline-block w-2 h-2 rounded-full bg-red-500 ml-2"
-          title={`Single tick — delivered to ${deliveries}/${totalPeers}`}
+          title={`Single tick — delivered to ${deliveries}/${totalPeers}. ${title}`}
         />
       );
     }
@@ -119,22 +141,25 @@ const ReplyInThread = ({
       return (
         <span
           className="inline-block w-2 h-2 rounded-full bg-yellow-400 ml-2"
-          title={`Double tick — delivered to all (${totalPeers}), reads ${reads}/${totalPeers}`}
+          title={`Double tick — delivered to all (${totalPeers}), reads ${reads}/${totalPeers}. ${title}`}
         />
       );
     }
 
-    if (reads === totalPeers) {
+    if (reads === totalPeers && totalPeers > 0) {
       return (
         <span
           className="inline-block w-2 h-2 rounded-full bg-green-500 ml-2"
-          title="Double-blue — read by everyone"
+          title={`Read by everyone (${reads}/${totalPeers}). ${title}`}
         />
       );
     }
 
     return (
-      <span className="inline-block w-2 h-2 rounded-full bg-gray-400 ml-2" />
+      <span
+        className="inline-block w-2 h-2 rounded-full bg-gray-400 ml-2"
+        title={title}
+      />
     );
   };
 
@@ -165,7 +190,7 @@ const ReplyInThread = ({
           {isRoot && (
             <div className="text-[10px] text-blue-600 ml-2 font-bold">ROOT</div>
           )}
-           {isMe && renderStatusDot(m)}
+          {isMe && renderStatusDot(m)}
         </div>
         <div className="break-words mt-1">{txt}</div>
       </div>
