@@ -2303,6 +2303,14 @@ export default function Chat() {
     return [];
   });
 
+  // UI: attach menu + file input refs
+  const [attachMenuOpen, setAttachMenuOpen] = useState(false);
+  const fileInputImageRef = useRef(null);
+  const fileInputOfferRef = useRef(null);
+
+  const [pendingPhotos, setPendingPhotos] = useState([]);
+  const [caption, setCaption] = useState("");
+
   // Threading state
   const [threadMessages, setThreadMessages] = useState(() => {
     try {
@@ -2322,6 +2330,8 @@ export default function Chat() {
   const saveHandlesRef = useRef({});
   const fileWriteStatusRef = useRef({});
   const outgoingPendingOffers = useRef({});
+
+  const fileInputRef = useRef(null);
 
   // UI / other state
   const [text, setText] = useState("");
@@ -2355,6 +2365,24 @@ export default function Chat() {
   const peerRef = useRef(null);
   const menuRef = useRef(null);
 
+  const attachMenuRef = useRef(null);
+
+  useEffect(() => {
+    const handleClickOutside = (e) => {
+      if (attachMenuRef.current && !attachMenuRef.current.contains(e.target)) {
+        setAttachMenuOpen(false);
+      }
+    };
+
+    if (attachMenuOpen) {
+      document.addEventListener("mousedown", handleClickOutside);
+    } else {
+      document.removeEventListener("mousedown", handleClickOutside);
+    }
+
+    return () => document.removeEventListener("mousedown", handleClickOutside);
+  }, [attachMenuOpen]);
+
   // notifications permission on username set
   useEffect(() => {
     if (!username) return;
@@ -2384,7 +2412,7 @@ export default function Chat() {
   };
 
   // messages helpers
-    const upsertIncomingChat = (incoming) => {
+  const upsertIncomingChat = (incoming) => {
     // If this is a thread reply
     if (incoming.type === "thread" && incoming.threadRootId) {
       setThreadMessages((threads) => {
@@ -2467,7 +2495,6 @@ export default function Chat() {
       return next;
     });
   };
-
 
   const addUniqueToMsgArray = (
     msgId,
@@ -3196,25 +3223,41 @@ export default function Chat() {
   // Send thread reply (update local state *and* broadcast)
   const handleSendThreadReply = (threadMessage) => {
     try {
-      // 1) locally add the thread message so sender sees it immediately
+      // Normalize the thread message object we will persist / broadcast.
+      // If ReplyInThread already created a full object, use it; otherwise
+      // build fallback fields.
+      const msgObj = {
+        id:
+          threadMessage.id ||
+          `thread-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+        from:
+          threadMessage.fromName || threadMessage.from || username || "peer",
+        fromId:
+          threadMessage.from ||
+          threadMessage.fromId ||
+          getLocalPeerId() ||
+          myId,
+        fromName: threadMessage.fromName || threadMessage.fromName || username,
+        text: threadMessage.text || "",
+        ts: threadMessage.ts || Date.now(),
+        type: "thread",
+        threadRootId:
+          threadMessage.threadRootId || threadMessage.threadRootId || null,
+        deliveries: threadMessage.deliveries || [],
+        reads: threadMessage.reads || [getLocalPeerId() || myId],
+        replyTo: threadMessage.replyTo || null,
+        // IMPORTANT: include any inline preview data (imageGroup/imagePreview/imageMeta)
+        imageGroup: Array.isArray(threadMessage.imageGroup)
+          ? threadMessage.imageGroup
+          : undefined,
+        imagePreview: threadMessage.imagePreview || undefined,
+        imageMeta: threadMessage.imageMeta || undefined,
+      };
+
+      // 1) locally add to threadMessages and persist
       setThreadMessages((threads) => {
-        const rootId = threadMessage.threadRootId;
+        const rootId = msgObj.threadRootId;
         const existing = Array.isArray(threads[rootId]) ? threads[rootId] : [];
-
-        const msgObj = {
-          id: threadMessage.id,
-          from: threadMessage.fromName || threadMessage.from || "peer",
-          fromId: threadMessage.from || null,
-          text: threadMessage.text,
-          ts: threadMessage.ts || Date.now(),
-          type: "thread",
-          threadRootId: rootId,
-          deliveries: threadMessage.deliveries || [],
-          reads: threadMessage.reads || [],
-          // <<-- include replyTo so UI can render the quoted preview
-          replyTo: threadMessage.replyTo || null,
-        };
-
         const updated = {
           ...threads,
           [rootId]: [...existing, msgObj],
@@ -3223,10 +3266,16 @@ export default function Chat() {
         return updated;
       });
 
-      // 2) broadcast to peers
-      sendChat(threadMessage);
+      // 2) broadcast to peers using the same object (so they get images)
+      try {
+        // sendChat expects the message payload shape your peers expect.
+        // Using the same msgObj ensures receivers get imageGroup/imagePreview.
+        sendChat(msgObj);
+      } catch (e) {
+        console.warn("sendChat (thread) failed", e);
+      }
     } catch (e) {
-      console.warn("sendChat (thread) failed", e);
+      console.warn("handleSendThreadReply failed", e);
     }
   };
 
@@ -3238,9 +3287,11 @@ export default function Chat() {
 
   // Long press confirmation dialog
   const LongPressDialog = ({ message, onClose, onOpenThread }) => (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50">
-      <div className="bg-white rounded-lg p-6 m-4 max-w-sm w-full">
-        <h3 className="text-lg font-semibold mb-4">Reply Options</h3>
+    <div className="fixed inset-0 z-50 flex items-center justify-center">
+      <div className="bg-white/10  rounded-lg backdrop-blur  p-6 m-4 max-w-sm w-full ">
+        <h3 className="text-lg font-semibold mb-4 text-blue-600">
+          Reply Options
+        </h3>
         <div className="space-y-3">
           <button
             onClick={() => {
@@ -3385,51 +3436,52 @@ export default function Chat() {
   const handleCancelLeave = () => setConfirmLeaveOpen(false);
 
   // send chat
-  
-   const send = async () => {
-  if (pendingPhotos.length > 0) {
-    // convert previews to base64 data URLs
-    const previews = await Promise.all(
-      pendingPhotos.map(
-        (p) =>
-          new Promise((resolve) => {
-            const reader = new FileReader();
-            reader.onload = (e) =>
-              resolve({ dataUrl: e.target.result, name: p.file.name });
-            reader.readAsDataURL(p.file);
-          })
-      )
-    );
 
-    const offerId = `img-group-${Date.now()}-${Math.random()
-      .toString(36)
-      .slice(2, 7)}`;
+  const send = async () => {
+    if (pendingPhotos.length > 0) {
+      // convert previews to base64 data URLs
+      const previews = await Promise.all(
+        pendingPhotos.map(
+          (p) =>
+            new Promise((resolve) => {
+              const reader = new FileReader();
+              reader.onload = (e) =>
+                resolve({ dataUrl: e.target.result, name: p.file.name });
+              reader.readAsDataURL(p.file);
+            })
+        )
+      );
 
-    const msgObj = {
-      id: offerId,
-      from: username || "You",
-      fromId: getLocalPeerId() || myId,
-      ts: Date.now(),
-      type: "chat",
-      imageGroup: previews.map((p) => p.dataUrl), // persistable base64
-      imageMeta: previews.map((p) => ({ name: p.name })),
-      text: caption,
-      deliveries: [],
-      reads: [getLocalPeerId() || myId],
-    };
+      const offerId = `img-group-${Date.now()}-${Math.random()
+        .toString(36)
+        .slice(2, 7)}`;
 
-    setMessages((m) => {
-      const next = [...m, msgObj];
-      persistMessages(next); // <- will survive refresh
-      return next;
-    });
+      const msgObj = {
+        id: offerId,
+        from: username || "You",
+        fromId: getLocalPeerId() || myId,
+        ts: Date.now(),
+        type: "chat",
+        imageGroup: previews.map((p) => p.dataUrl), // persistable base64
+        imageMeta: previews.map((p) => ({ name: p.name })),
+        text: caption,
+        deliveries: [],
+        reads: [getLocalPeerId() || myId],
+      };
 
-    sendChat(msgObj);
+      setMessages((m) => {
+        const next = [...m, msgObj];
+        persistMessages(next); // <- will survive refresh
+        return next;
+      });
 
-    setPendingPhotos([]);
-    setCaption("");
-    return;
-  }}
+      sendChat(msgObj);
+
+      setPendingPhotos([]);
+      setCaption("");
+      return;
+    }
+  };
 
   // reply + send ack_read
   const handleTapMessage = (m) => {
@@ -3666,73 +3718,118 @@ export default function Chat() {
     );
   };
 
-  // file input (sender) - file picker
-  const onFileSelected = async (file) => {
-    if (!file) return;
-    const offerId = `offer-${Date.now()}-${Math.random()
-      .toString(36)
-      .slice(2, 7)}`;
-    outgoingPendingOffers.current[offerId] = {
-      file,
-      acceptingPeers: new Set(),
-    };
+  // Unified file selection handler — supports multi-file and two modes
+  // mode: 'inline' => embed images directly in chat (no offer)
+  // mode: 'offer'  => create file offers (existing behavior)
+  const onFileSelected = async (fileOrFiles, mode = "offer") => {
+    if (!fileOrFiles) return;
+    const files = Array.isArray(fileOrFiles)
+      ? fileOrFiles
+      : fileOrFiles instanceof FileList
+      ? Array.from(fileOrFiles)
+      : [fileOrFiles];
 
-    setTransfer(offerId, {
-      direction: "sending",
-      label: file.name,
-      total: file.size || 0,
-      transferred: 0,
-      peers: [],
-    });
+    if (mode === "inline") {
+      // Filter only image files
+      const imageFiles = files.filter(
+        (f) => f.type && f.type.startsWith("image/")
+      );
+      if (!imageFiles.length) return;
 
-    const meta = {
-      id: offerId,
-      name: file.name,
-      size: file.size,
-      mime: file.type,
-      from: getLocalPeerId() || myId,
-    };
+      // read previews in parallel
+      const previews = await Promise.all(
+        imageFiles.map(
+          (file) =>
+            new Promise((resolve) => {
+              const reader = new FileReader();
+              reader.onload = (e) =>
+                resolve({ file, dataUrl: e.target.result, name: file.name });
+              reader.readAsDataURL(file);
+            })
+        )
+      );
 
-    try {
-      offerFileToPeers(meta);
-    } catch (e) {
-      console.warn("offerFileToPeers failed", e);
+      // Build message object grouping images (multi-photo bubble)
+      const offerId = `img-group-${Date.now()}-${Math.random()
+        .toString(36)
+        .slice(2, 7)}`;
+
+      const msgObj = {
+        id: offerId,
+        from: username || "You",
+        fromId: getLocalPeerId() || myId,
+        ts: Date.now(),
+        type: "chat",
+        imageGroup: previews.map((p) => p.dataUrl),
+        imageMeta: previews.map((p) => ({ name: p.name })),
+        text: caption || text || "",
+        deliveries: [],
+        reads: [getLocalPeerId() || myId],
+      };
+
+      // persist + show locally
+      setMessages((m) => {
+        const next = [...m, msgObj];
+        persistMessages(next);
+        return next;
+      });
+
+      // broadcast to peers
+      try {
+        sendChat(msgObj);
+      } catch (e) {
+        console.warn("sendChat (inline images) failed", e);
+      }
+
+      // clear composer state
+      setPendingPhotos([]);
+      setCaption("");
+      setText("");
+      setAttachMenuOpen(false);
+      return;
     }
 
-    // --- NEW: if file is an image, show inline photo bubble ---
-    if (file.type.startsWith("image/")) {
-      const reader = new FileReader();
-      reader.onload = (e) => {
-        const msgObj = {
-          id: `img-${Date.now()}`,
-          from: username || "You",
-          fromId: getLocalPeerId() || myId,
-          ts: Date.now(),
-          type: "chat",
-          imagePreview: e.target.result, // base64 string
-          imageMeta: { name: file.name },
-          text: caption,
-          deliveries: [],
-          reads: [getLocalPeerId() || myId],
-        };
+    // ---------- mode === 'offer' ----------
+    // For each file create an offer (old behavior). We'll call offerFileToPeers for each file.
+    files.forEach((file) => {
+      const offerId = `offer-${Date.now()}-${Math.random()
+        .toString(36)
+        .slice(2, 7)}`;
 
-        setMessages((m) => {
-          const next = [...m, msgObj];
-          persistMessages(next);
-          return next;
-        });
-
-        sendChat(msgObj);
+      // Track pending outgoing offers (keeps backward compatibility)
+      outgoingPendingOffers.current[offerId] = {
+        file,
+        acceptingPeers: new Set(),
       };
-      reader.readAsDataURL(file);
-    } else {
-      // --- Fallback: non-image files keep old behavior ---
+
+      setTransfer(offerId, {
+        direction: "sending",
+        label: file.name,
+        total: file.size || 0,
+        transferred: 0,
+        peers: [],
+      });
+
+      const meta = {
+        id: offerId,
+        name: file.name,
+        size: file.size,
+        mime: file.type,
+        from: getLocalPeerId() || myId,
+      };
+      try {
+        offerFileToPeers(meta);
+      } catch (e) {
+        console.warn("offerFileToPeers failed", e);
+      }
+
+      // show a system line locally to reflect the offer (same as before)
       setMessages((m) => {
         const sys = {
           id: `sys-offer-${offerId}`,
           from: "System",
           text: `Offered file: ${file.name} (${Math.round(
-            file.size / 1024
+            (file.size || 0) / 1024
           )} KB)`,
           ts: Date.now(),
           type: "system",
@@ -3741,42 +3838,39 @@ export default function Chat() {
         persistMessages(next);
         return next;
       });
-    }
 
-    // --- Expire file offer if nobody accepts ---
-    setTimeout(() => {
-      try {
-        const pending = outgoingPendingOffers.current[offerId];
-        if (!pending) return;
-        if (pending.acceptingPeers.size === 0) {
-          setMessages((m) => {
-            const sys = {
-              id: `sys-offer-expire-${offerId}`,
-              from: "System",
-              text: `No one accepted the file offer: ${file.name}`,
-              ts: Date.now(),
-              type: "system",
-            };
-            const next = [...m, sys];
-            persistMessages(next);
-            return next;
-          });
-          setTimeout(() => removeTransfer(offerId), 800);
+      // cleanup if nobody accepts
+      setTimeout(() => {
+        try {
+          const pending = outgoingPendingOffers.current[offerId];
+          if (!pending) return;
+          if (pending.acceptingPeers.size === 0) {
+            setMessages((m) => {
+              const sys = {
+                id: `sys-offer-expire-${offerId}`,
+                from: "System",
+                text: `No one accepted the file offer: ${file.name}`,
+                ts: Date.now(),
+                type: "system",
+              };
+              const next = [...m, sys];
+              persistMessages(next);
+              return next;
+            });
+            setTimeout(() => removeTransfer(offerId), 800);
+          }
+        } catch (e) {
+          console.warn("post-offer cleanup failed", e);
         }
-      } catch (e) {
-        console.warn("post-offer cleanup failed", e);
-      }
-    }, 20000);
+      }, 20000);
+    });
+
+    setAttachMenuOpen(false);
   };
 
   const handleFileInputClick = () => {
-    const input = document.createElement("input");
-    input.type = "file";
-    input.onchange = (e) => {
-      const f = e.target.files && e.target.files[0];
-      if (f) onFileSelected(f);
-    };
-    input.click();
+    // toggle the small attach menu (two choices)
+    setAttachMenuOpen((s) => !s);
   };
 
   // accept incoming offer
@@ -4166,7 +4260,6 @@ export default function Chat() {
 
         <div className="w-full text-white h-0.5 bg-white" />
         <br />
-
         <footer className="mt-auto">
           {typingSummary()}
           <div className="mb-3 text-sm text-blue-600">
@@ -4192,7 +4285,44 @@ export default function Chat() {
               </button>
             </div>
           )}
+
+          {/* Pending photo previews + caption */}
+          {pendingPhotos.length > 0 && (
+            <div className="mb-2 p-3 bg-white/10 rounded-lg">
+              <div className="flex flex-wrap gap-2 mb-2">
+                {pendingPhotos.map((p, i) => (
+                  <div key={i} className="relative">
+                    <img
+                      src={p.preview}
+                      alt={p.name}
+                      className="w-20 h-20 object-cover rounded-lg"
+                    />
+                    <button
+                      className="absolute top-0 right-0 bg-red-500 text-white rounded-full w-5 h-5 flex items-center justify-center text-xs"
+                      onClick={() =>
+                        setPendingPhotos((prev) =>
+                          prev.filter((_, idx) => idx !== i)
+                        )
+                      }
+                    >
+                      ×
+                    </button>
+                  </div>
+                ))}
+              </div>
+              <input
+                type="text"
+                value={caption}
+                onChange={(e) => setCaption(e.target.value)}
+                placeholder="Add a caption..."
+                className="w-full p-2 rounded bg-white/20 text-sm text-white"
+              />
+            </div>
+          )}
+
+          {/* Input row */}
           <div className="relative w-full flex items-center">
+            {/* Clip icon */}
             <svg
               onClick={handleFileInputClick}
               xmlns="http://www.w3.org/2000/svg"
@@ -4208,16 +4338,70 @@ export default function Chat() {
               <path d="M21.44 11.05l-9.19 9.19a5.5 5.5 0 01-7.78-7.78l9.19-9.19a3.5 3.5 0 015 5l-9.2 9.19a1.5 1.5 0 01-2.12-2.12l8.49-8.49" />
             </svg>
 
+            {/* Attach menu */}
+            {attachMenuOpen && (
+              <div
+                ref={attachMenuRef}
+                className="absolute left-0 -top-24 bg-white/10  rounded-lg backdrop-blur shadow-lg p-6 z-50 min-w-[80px]"
+              >
+                <button
+                  className="w-fit text-left px-3 py-2 bg-gradient-to-br from-purple-500 to-blue-600 text-white rounded m-1"
+                  onClick={() => {
+                    setAttachMenuOpen(false);
+                    if (fileInputImageRef.current)
+                      fileInputImageRef.current.click();
+                  }}
+                >
+                  Send image in chat
+                </button>
+                <button
+                  className="w-fit text-left px-3 py-2 bg-gradient-to-br from-blue-500 to-purple-600 text-white rounded mt-1"
+                  onClick={() => {
+                    setAttachMenuOpen(false);
+                    if (fileInputOfferRef.current)
+                      fileInputOfferRef.current.click();
+                  }}
+                >
+                  Send file as offer
+                </button>
+              </div>
+            )}
+
+            {/* Hidden inputs */}
+            <input
+              ref={fileInputImageRef}
+              type="file"
+              accept="image/*"
+              multiple
+              style={{ display: "none" }}
+              onChange={(e) => {
+                const files = e.target.files;
+                if (files?.length) onFileSelected(files, "inline");
+                e.target.value = null;
+              }}
+            />
+            <input
+              ref={fileInputOfferRef}
+              type="file"
+              multiple
+              style={{ display: "none" }}
+              onChange={(e) => {
+                const files = e.target.files;
+                if (files?.length) onFileSelected(files, "offer");
+                e.target.value = null;
+              }}
+            />
+
+            {/* Text input */}
             <input
               value={text}
               onChange={(e) => setText(e.target.value)}
               placeholder="Type a message..."
               className="flex-1 p-3 pl-10 pr-10 bg-white/10 placeholder-blue-300 text-blue-500 font-mono rounded-3xl border-2"
-              onKeyDown={(e) => {
-                if (e.key === "Enter") send();
-              }}
+              onKeyDown={(e) => e.key === "Enter" && send()}
             />
 
+            {/* Send button */}
             <svg
               onClick={send}
               xmlns="http://www.w3.org/2000/svg"
