@@ -3866,74 +3866,76 @@ export default function Chat() {
     }
   };
 
-  // UI rendering
-  return (
-    <>
-      {/* Thread View */}
-      {activeThread && (
+return (
+  <>
+    {/* Thread View (overlay) */}
+    {activeThread && (
+      <div className="fixed inset-0 z-60">
         <ReplyInThread
           rootMessage={activeThread}
           onClose={closeThread}
           username={username}
           myId={myId}
-          peers={peers} // ← added
+          peers={peers}
           threadMessages={threadMessages[activeThread.id] || []}
           onSendThreadReply={handleSendThreadReply}
           peerNamesMap={peerNamesMap}
           threadTypingUsers={threadTypingUsers}
         />
-      )}
+      </div>
+    )}
 
-      {/* Long Press Dialog */}
-      {longPressMessage && !activeThread && (
-        <LongPressDialog
-          message={longPressMessage}
-          onClose={() => setLongPressMessage(null)}
-          onOpenThread={() => showThread(longPressMessage)}
-        />
-      )}
+    {/* Long Press Dialog */}
+    {longPressMessage && !activeThread && (
+      <LongPressDialog
+        message={longPressMessage}
+        onClose={() => setLongPressMessage(null)}
+        onOpenThread={() => showThread(longPressMessage)}
+      />
+    )}
 
-      {/* Floating progress panel */}
-      {Object.keys(transfers).length > 0 && (
-        <div className="fixed left-1/2 -translate-x-1/2 top-4 z-50">
-          <div className="bg-black/80 text-white rounded-lg p-3 shadow-lg w-[min(720px,calc(100%-40px))]">
-            {Object.entries(transfers).map(([id, t]) => {
-              const pct = t.total
-                ? Math.min(100, Math.round((t.transferred / t.total) * 100))
-                : 0;
-              const label = t.label || id;
-              const directionText =
-                t.direction === "sending" ? "Sending" : "Receiving";
-              const humanTransferred = `${Math.round(
-                (t.transferred || 0) / 1024
-              )} KB`;
-              const humanTotal = `${Math.round((t.total || 0) / 1024)} KB`;
-              return (
-                <div key={id} className="mb-3 last:mb-0">
-                  <div className="flex justify-between items-center text-sm mb-1">
-                    <div className="font-semibold max-w-[70%] break-words whitespace-normal">
-                      {directionText}: {label}
-                    </div>
-                    <div className="text-xs">{pct}%</div>
+    {/* Floating progress panel */}
+    {Object.keys(transfers).length > 0 && (
+      <div className="fixed left-1/2 -translate-x-1/2 top-4 z-50">
+        <div className="bg-black/80 text-white rounded-lg p-3 shadow-lg w-[min(720px,calc(100%-40px))]">
+          {Object.entries(transfers).map(([id, t]) => {
+            const pct = t.total
+              ? Math.min(100, Math.round((t.transferred / t.total) * 100))
+              : 0;
+            const label = t.label || id;
+            const directionText =
+              t.direction === "sending" ? "Sending" : "Receiving";
+            const humanTransferred = `${Math.round(
+              (t.transferred || 0) / 1024
+            )} KB`;
+            const humanTotal = `${Math.round((t.total || 0) / 1024)} KB`;
+            return (
+              <div key={id} className="mb-3 last:mb-0">
+                <div className="flex justify-between items-center text-sm mb-1">
+                  <div className="font-semibold max-w-[70%] break-words whitespace-normal">
+                    {directionText}: {label}
                   </div>
-                  <div className="w-full bg-white/10 rounded h-2 overflow-hidden mb-1">
-                    <div
-                      style={{ width: `${pct}%` }}
-                      className="h-2 bg-blue-500 transition-all"
-                    />
-                  </div>
-                  <div className="text-xs text-white/60">
-                    {humanTransferred} / {humanTotal}
-                  </div>
+                  <div className="text-xs">{pct}%</div>
                 </div>
-              );
-            })}
-          </div>
+                <div className="w-full bg-white/10 rounded h-2 overflow-hidden mb-1">
+                  <div
+                    style={{ width: `${pct}%` }}
+                    className="h-2 bg-blue-500 transition-all"
+                  />
+                </div>
+                <div className="text-xs text-white/60">
+                  {humanTransferred} / {humanTotal}
+                </div>
+              </div>
+            );
+          })}
         </div>
-      )}
+      </div>
+    )}
 
-      <div className="fixed inset-0 z-50 bg-gray-50 text-purple-600 p-6 flex flex-col rounded-4xl">
-        <header className="flex items-center justify-between mb-4">
+    {/* Main Chat Container (background layer, lower z-index) */}
+    <div className="fixed inset-0 z-10 bg-gray-50 text-purple-600 p-6 flex flex-col">
+       <header className="flex items-center justify-between mb-4">
           <div className="flex gap-2.5">
             <div className="text-sm text-blue-600">YourID</div>
             <div className="font-mono">{myId || "..."}</div>
@@ -4080,40 +4082,66 @@ export default function Chat() {
             </svg>
           </div>
         </footer>
-      </div>
+      
+    </div>
 
-      {/* Leave confirmation modal */}
-      {confirmLeaveOpen && (
-        <div className="fixed inset-0 z-60 flex items-center justify-center">
-          <div
-            className="absolute inset-0 bg-black/50"
-            onClick={handleCancelLeave}
-          />
-          <div className="relative bg-white/10 p-6 rounded-lg backdrop-blur text-white w-80 z-70">
-            <h3 className="text-lg font-bold mb-2">Leave Hub?</h3>
-            <p className="text-sm text-white/80 mb-4">
-              Leaving will clear your local chat history. Are you sure?
-            </p>
-            <div className="flex justify-center gap-2">
-              <button
-                onClick={handleCancelLeave}
-                className="px-3 py-2 rounded bg-gradient-to-br from-green-500 to-green-600 text-white"
-              >
-                Cancel
-              </button>
-              <button
-                onClick={handleConfirmLeave}
-                className="px-3 py-2 rounded bg-gradient-to-br from-red-500 to-red-600 text-white"
-              >
-                Leave & Clear
-              </button>
-            </div>
+    {/* Leave confirmation modal */}
+    {confirmLeaveOpen && (
+      <div className="fixed inset-0 z-70 flex items-center justify-center">
+        <div
+          className="absolute inset-0 bg-black/50"
+          onClick={handleCancelLeave}
+        />
+        <div className="relative bg-white/10 p-6 rounded-lg backdrop-blur text-white w-80">
+          <h3 className="text-lg font-bold mb-2">Leave Hub?</h3>
+          <p className="text-sm text-white/80 mb-4">
+            Leaving will clear your local chat history. Are you sure?
+          </p>
+          <div className="flex justify-center gap-2">
+            <button
+              onClick={handleCancelLeave}
+              className="px-3 py-2 rounded bg-gradient-to-br from-green-500 to-green-600 text-white"
+            >
+              Cancel
+            </button>
+            <button
+              onClick={handleConfirmLeave}
+              className="px-3 py-2 rounded bg-gradient-to-br from-red-500 to-red-600 text-white"
+            >
+              Leave & Clear
+            </button>
           </div>
         </div>
-      )}
-    </>
-  );
+      </div>
+    )}
+  </>
+);
+
 }
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 // Round Video Streaming
 // src/components/Chat.jsx// Chat.jsx
