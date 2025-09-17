@@ -2989,8 +2989,35 @@ export default function Chat() {
   };
 
   // Send thread reply
+  // Send thread reply (update local state *and* broadcast)
   const handleSendThreadReply = (threadMessage) => {
     try {
+      // 1) locally add the thread message so sender sees it immediately
+      setThreadMessages((threads) => {
+        const rootId = threadMessage.threadRootId;
+        const existing = Array.isArray(threads[rootId]) ? threads[rootId] : [];
+
+        const msgObj = {
+          id: threadMessage.id,
+          from: threadMessage.fromName || threadMessage.from || "peer",
+          fromId: threadMessage.from || null,
+          text: threadMessage.text,
+          ts: threadMessage.ts || Date.now(),
+          type: "thread",
+          threadRootId: rootId,
+          deliveries: threadMessage.deliveries || [],
+          reads: threadMessage.reads || [],
+        };
+
+        const updated = {
+          ...threads,
+          [rootId]: [...existing, msgObj],
+        };
+        persistThreadMessages(updated);
+        return updated;
+      });
+
+      // 2) broadcast to peers
       sendChat(threadMessage);
     } catch (e) {
       console.warn("sendChat (thread) failed", e);
@@ -3897,42 +3924,6 @@ export default function Chat() {
     </>
   );
 }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 // Round Video Streaming
 // src/components/Chat.jsx// Chat.jsx

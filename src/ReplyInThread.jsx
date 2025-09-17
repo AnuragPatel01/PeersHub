@@ -59,7 +59,7 @@ const ReplyInThread = ({
     return (
       <div
         key={`${m.id ?? m.ts}`}
-        className={`p-2 rounded-2xl max-w-[80%] mb-2 ${
+        className={`p-2 rounded-2xl max-w-[40%] md:max-w-[10%] mb-2 ${
           isRoot
             ? "bg-blue-100 border-2 border-blue-300"
             : isMe
@@ -101,7 +101,7 @@ const ReplyInThread = ({
             <path d="M19 12H5M12 19l-7-7 7-7" />
           </svg>
         </button>
-        <h1 className="text-lg font-semibold text-gray-800">Thread</h1>
+        <h1 className="text-lg font-semibold text-blue-500">Thread</h1>
         <div className="w-10 h-10" /> {/* Spacer for centering */}
       </header>
 
