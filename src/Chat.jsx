@@ -3868,20 +3868,36 @@ export default function Chat() {
     <>
       {/* Thread View */}
       {activeThread && (
-        <ReplyInThread
-          rootMessage={activeThread}
-          onClose={closeThread}
-          username={username}
-          myId={myId}
-          peers={peers} // ← added
-          threadMessages={threadMessages[activeThread.id] || []}
-          onSendThreadReply={handleSendThreadReply}
-          peerNamesMap={peerNamesMap}
-          threadTypingUsers={threadTypingUsers}
-        />
+        <div
+          className="fixed inset-0 z-50 flex items-stretch justify-center"
+          role="dialog"
+          aria-modal="true"
+        >
+          {/* backdrop */}
+          <div
+            className="absolute inset-0 bg-black/40"
+            onClick={closeThread}
+            aria-hidden="true"
+          />
+
+          {/* centered panel (scrolls inside) */}
+          <div className="relative z-50 w-full max-w-[420px] h-[92vh] mx-auto p-0">
+            <ReplyInThread
+              rootMessage={activeThread}
+              onClose={closeThread}
+              username={username}
+              myId={myId}
+              peers={peers} // pass peers so status-dot logic can count recipients
+              threadMessages={threadMessages[activeThread.id] || []}
+              onSendThreadReply={handleSendThreadReply}
+              peerNamesMap={peerNamesMap}
+              threadTypingUsers={threadTypingUsers}
+            />
+          </div>
+        </div>
       )}
 
-      {/* Long Press Dialog */}
+      {/* Long Press Dialog (unchanged) */}
       {longPressMessage && !activeThread && (
         <LongPressDialog
           message={longPressMessage}
@@ -3929,7 +3945,12 @@ export default function Chat() {
         </div>
       )}
 
-      <div className="h-[92vh] md:h-[92vh] max-w-[420px] w-full mx-auto bg-gray-50 text-purple-600 p-6 flex flex-col rounded-4xl">
+      <div
+        className={`h-[92vh] md:h-[92vh] max-w-[420px] w-full mx-auto bg-gray-50 text-purple-600 p-6 flex flex-col rounded-4xl transition-all ${
+          activeThread ? "pointer-events-none select-none opacity-80" : ""
+        }`}
+        aria-hidden={activeThread ? "true" : "false"}
+      >
         <header className="flex items-center justify-between mb-4">
           <div className="flex gap-2.5">
             <div className="text-sm text-blue-600">YourID</div>
