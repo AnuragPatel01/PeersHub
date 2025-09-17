@@ -2720,6 +2720,15 @@ export default function Chat() {
             payloadOrText.threadId ||
             null;
 
+          // Debug log to see what's really coming in
+          console.debug("RCV ack_deliver:", {
+            fromPeer,
+            id,
+            isThread,
+            threadRootId,
+            raw: payloadOrText,
+          });
+
           addUniqueToMsgArray(
             id,
             "deliveries",
@@ -2746,6 +2755,14 @@ export default function Chat() {
             payloadOrText.rootId ||
             payloadOrText.threadId ||
             null;
+
+          console.debug("RCV ack_read:", {
+            fromPeer,
+            id,
+            isThread,
+            threadRootId,
+            raw: payloadOrText,
+          });
 
           addUniqueToMsgArray(id, "reads", fromPeer, !!isThread, threadRootId);
         } catch (e) {
