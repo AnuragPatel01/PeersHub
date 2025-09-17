@@ -2313,6 +2313,8 @@ export default function Chat() {
   });
   const [activeThread, setActiveThread] = useState(null);
 
+  const [threadTypingUsers, setThreadTypingUsers] = useState({});
+
   // file transfer
   const [incomingFileOffers, setIncomingFileOffers] = useState({});
   const [transfers, setTransfers] = useState({});
@@ -2483,6 +2485,28 @@ export default function Chat() {
     }
   };
 
+  // mark all messages in a thread as read (and send ack)
+  const markThreadAsRead = (rootId) => {
+    try {
+      const localId = getLocalPeerId() || myId;
+      const msgs = threadMessages[rootId] || [];
+      msgs.forEach((m) => {
+        const origin = m.fromId || m.from;
+        const alreadyRead = Array.isArray(m.reads) && m.reads.includes(localId);
+        if (!alreadyRead) {
+          try {
+            // sendAckRead signature in your code is used as sendAckRead(id, origin)
+            // we also pass isThread and threadRootId so peers know this is a thread read
+            sendAckRead(m.id, origin, true, rootId);
+          } catch (e) {}
+          addUniqueToMsgArray(m.id, "reads", localId, true, rootId);
+        }
+      });
+    } catch (e) {
+      console.warn("markThreadAsRead failed", e);
+    }
+  };
+
   // transfer UI helpers
   const setTransfer = (offerId, updaterOrObj) => {
     setTransfers((t) => {
@@ -2622,16 +2646,35 @@ export default function Chat() {
   // incoming messages callback from webrtc
   const handleIncoming = async (from, payloadOrText) => {
     // typing
+    // typing (main chat or thread)
     if (
       from === "__system_typing__" &&
       payloadOrText &&
       payloadOrText.fromName
     ) {
-      const { fromName, isTyping } = payloadOrText;
-      setTypingUsers((t) => {
+      const { fromName, isTyping, threadRootId } = payloadOrText;
+
+      // main chat typing (backwards compatible)
+      if (!threadRootId) {
+        setTypingUsers((t) => {
+          const copy = { ...t };
+          if (isTyping) copy[fromName] = Date.now();
+          else delete copy[fromName];
+          return copy;
+        });
+        return;
+      }
+
+      // thread typing: keep mapping { rootId: { name: timestamp } }
+      setThreadTypingUsers((t) => {
         const copy = { ...t };
-        if (isTyping) copy[fromName] = Date.now();
-        else delete copy[fromName];
+        const root = threadRootId;
+        const bucket = { ...(copy[root] || {}) };
+        if (isTyping) bucket[fromName] = Date.now();
+        else delete bucket[fromName];
+        // remove empty buckets
+        if (Object.keys(bucket).length) copy[root] = bucket;
+        else delete copy[root];
         return copy;
       });
       return;
@@ -2977,9 +3020,11 @@ export default function Chat() {
     };
   }, []);
 
-  // Show thread for a message
+  // Show thread for a message and mark its replies read
   const showThread = (message) => {
     setActiveThread(message);
+    // mark existing replies as read locally and notify origin peers
+    if (message && message.id) markThreadAsRead(message.id);
   };
 
   // Close thread view
@@ -3691,6 +3736,7 @@ export default function Chat() {
           threadMessages={threadMessages[activeThread.id] || []}
           onSendThreadReply={handleSendThreadReply}
           peerNamesMap={peerNamesMap}
+          threadTypingUsers={threadTypingUsers}
         />
       )}
 

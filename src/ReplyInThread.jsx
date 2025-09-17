@@ -1,6 +1,7 @@
 // src/components/ReplyInThread.jsx
 import React, { useState, useRef, useEffect } from "react";
-import { sendChat, getLocalPeerId } from "./webrtc";
+import { sendChat, getLocalPeerId, sendTyping, sendAckRead } from "./webrtc";
+
 import { nanoid } from "nanoid";
 
 const ReplyInThread = ({
@@ -11,9 +12,23 @@ const ReplyInThread = ({
   threadMessages,
   onSendThreadReply,
   peerNamesMap = {},
+  threadTypingUsers = {},
 }) => {
   const [text, setText] = useState("");
   const messagesEndRef = useRef(null);
+  const typingTimeoutRef = useRef(null);
+
+  useEffect(() => {
+    return () => {
+      try {
+        if (typingTimeoutRef.current) clearTimeout(typingTimeoutRef.current);
+        if (typeof sendTyping === "function") {
+          sendTyping(username, false, rootMessage.id);
+        }
+      } catch (e) {}
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // Auto-scroll to bottom when new messages arrive
   useEffect(() => {
@@ -25,6 +40,31 @@ const ReplyInThread = ({
       });
     } catch (e) {}
   }, [threadMessages]);
+
+  useEffect(() => {
+    // mark thread replies as read locally + send ack to origins
+    try {
+      const localId = getLocalPeerId() || myId;
+      (threadMessages || []).forEach((m) => {
+        const origin = m.fromId || m.from;
+        const alreadyRead = Array.isArray(m.reads) && m.reads.includes(localId);
+        if (!alreadyRead) {
+          try {
+            sendAckRead(m.id, origin, true, rootMessage.id);
+          } catch (e) {}
+        }
+      });
+    } catch (e) {}
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [rootMessage?.id, threadMessages]);
+
+  const typingBucket =
+    (threadTypingUsers && threadTypingUsers[rootMessage.id]) || {};
+  const typingNames = Object.keys(typingBucket || {}).filter((n) => {
+    // expire very old timestamps (3s)
+    const t = typingBucket[n];
+    return t && Date.now() - t < 3000;
+  });
 
   const handleSend = () => {
     if (!text.trim()) return;
@@ -139,10 +179,37 @@ const ReplyInThread = ({
 
       {/* Input */}
       <footer className="p-4 bg-white border-t border-gray-200">
+        {typingNames.length > 0 && (
+          <div className="px-4 text-sm text-blue-500 mb-2">
+            {typingNames.slice(0, 3).join(", ")}{" "}
+            {typingNames.length === 1 ? "is" : "are"} typing...
+          </div>
+        )}
         <div className="relative flex items-center">
           <input
             value={text}
-            onChange={(e) => setText(e.target.value)}
+            onChange={(e) => {
+              const val = e.target.value;
+              setText(val);
+
+              try {
+                // notify peers that we're typing in this thread
+                if (typeof sendTyping === "function") {
+                  sendTyping(username, true, rootMessage.id);
+                }
+              } catch (err) {}
+
+              // debounce turning off typing after 1200ms of inactivity
+              if (typingTimeoutRef.current)
+                clearTimeout(typingTimeoutRef.current);
+              typingTimeoutRef.current = setTimeout(() => {
+                try {
+                  if (typeof sendTyping === "function") {
+                    sendTyping(username, false, rootMessage.id);
+                  }
+                } catch (err) {}
+              }, 1200);
+            }}
             placeholder="Reply in thread..."
             className="flex-1 p-3 pr-12 bg-gray-100 placeholder-gray-500 text-gray-800 rounded-full border border-gray-300 focus:outline-none focus:ring-2 focus:ring-blue-500"
             onKeyDown={(e) => {
