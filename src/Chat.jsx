@@ -3288,7 +3288,7 @@ export default function Chat() {
   // Long press confirmation dialog
   const LongPressDialog = ({ message, onClose, onOpenThread }) => (
     <div className="fixed inset-0 z-50 flex items-center justify-center">
-      <div className="bg-white/10  rounded-lg backdrop-blur  p-6 m-4 max-w-sm w-full ">
+      <div className="bg-white/10  rounded-lg backdrop-blur  p-6 m-4 max-w-sm w-full">
         <h3 className="text-lg font-semibold mb-4 text-blue-600">
           Reply Options
         </h3>
@@ -3298,9 +3298,9 @@ export default function Chat() {
               handleTapMessage(message);
               onClose();
             }}
-            className="w-full p-3 text-left rounded-lg bg-gray-100 hover:bg-gray-200"
+            className="w-full p-3 text-left rounded-lg bg-gradient-to-br from-white to-white hover:bg-gray-200 text-blue-500"
           >
-            <div className="font-medium">Reply in Chat</div>
+            <div className="font-bold">Reply in Chat</div>
             <div className="text-sm text-gray-600">
               Quick reply in main conversation
             </div>
@@ -3310,9 +3310,9 @@ export default function Chat() {
               onOpenThread();
               onClose();
             }}
-            className="w-full p-3 text-left rounded-lg bg-blue-100 hover:bg-blue-200"
+            className="w-full p-3 text-left rounded-lg bg-gradient-to-br from-white to-white hover:bg-blue-200 text-blue-500"
           >
-            <div className="font-medium">Reply in Nest</div>
+            <div className="font-bold">Reply in Nest</div>
             <div className="text-sm text-gray-600">
               Start or continue a focused discussion
             </div>
@@ -3320,7 +3320,7 @@ export default function Chat() {
         </div>
         <button
           onClick={onClose}
-          className="w-full mt-4 p-2 text-gray-600 hover:text-gray-800"
+          className="w-full mt-4 p-2 bg-gradient-to-br from-red-500 to-red-500 text-white"
         >
           Cancel
         </button>
@@ -3437,7 +3437,9 @@ export default function Chat() {
 
   // send chat
 
+  // Replace the existing send() with this function
   const send = async () => {
+    // 1) Inline image path (existing behaviour)
     if (pendingPhotos.length > 0) {
       // convert previews to base64 data URLs
       const previews = await Promise.all(
@@ -3467,6 +3469,7 @@ export default function Chat() {
         text: caption,
         deliveries: [],
         reads: [getLocalPeerId() || myId],
+        replyTo: replyTo ? { ...replyTo } : undefined,
       };
 
       setMessages((m) => {
@@ -3475,12 +3478,66 @@ export default function Chat() {
         return next;
       });
 
-      sendChat(msgObj);
+      try {
+        sendChat(msgObj);
+      } catch (e) {
+        console.warn("sendChat (inline images) failed", e);
+      }
 
       setPendingPhotos([]);
       setCaption("");
+      setReplyTo(null);
+      setText("");
       return;
     }
+
+    // 2) Plain text message path (new)
+    const trimmed = (text || "").trim();
+    if (!trimmed) {
+      // nothing to send
+      return;
+    }
+
+    const id = `msg-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+
+    const msgObj = {
+      id,
+      from: username || "You",
+      fromId: getLocalPeerId() || myId,
+      fromName: username || undefined,
+      text: trimmed,
+      ts: Date.now(),
+      type: "chat",
+      deliveries: [],
+      reads: [getLocalPeerId() || myId],
+      replyTo: replyTo ? { ...replyTo } : undefined,
+    };
+
+    // persist + show locally
+    setMessages((m) => {
+      const next = [...m, msgObj];
+      persistMessages(next);
+      return next;
+    });
+
+    // broadcast to peers
+    try {
+      sendChat(msgObj);
+    } catch (e) {
+      console.warn("sendChat failed", e);
+    }
+
+    // locally mark read/delivery state and clear composer
+    setText("");
+    setReplyTo(null);
+
+    // optionally: focus input again
+    try {
+      const input = document.querySelector(
+        'input[placeholder="Type a message..."]'
+      );
+      if (input) input.focus();
+    } catch (e) {}
   };
 
   // reply + send ack_read
@@ -3589,16 +3646,6 @@ export default function Chat() {
       ? "ml-auto bg-blue-500 text-white"
       : "bg-white/100 text-black";
 
-    // helper to open large preview
-    const openPreview = (src) => {
-      const win = window.open("", "_blank");
-      if (!win) return;
-      win.document.write(
-        `<html><head><title>Photo</title><meta name="viewport" content="width=device-width,initial-scale=1"></head><body style="margin:0;background:#000;display:flex;align-items:center;justify-content:center;height:100vh"><img src="${src}" style="max-width:100%;max-height:100vh;object-fit:contain"/></body></html>`
-      );
-      win.document.close();
-    };
-
     return (
       <div
         onClick={() => !longPressTimeoutRef.current && handleTapMessage(m)}
@@ -3644,7 +3691,7 @@ export default function Chat() {
                 className="w-36 h-36 rounded-lg overflow-hidden bg-black/5"
                 onClick={(e) => {
                   e.stopPropagation();
-                  openPreview(src);
+                  openViewer(m, i);
                 }}
               >
                 <img
@@ -3672,7 +3719,7 @@ export default function Chat() {
               className="w-40 h-40 rounded-lg overflow-hidden bg-black/5"
               onClick={(e) => {
                 e.stopPropagation();
-                openPreview(m.imagePreview);
+                openViewer(m, 0);
               }}
             >
               <img
@@ -4086,6 +4133,51 @@ export default function Chat() {
     });
   };
 
+  // Photo viewer state (in-app viewer that also shows thread)
+  const [photoViewer, setPhotoViewer] = useState({
+    open: false,
+    message: null, // the original message object that contains imageGroup / imagePreview
+    index: 0, // which image in imageGroup to show
+  });
+
+  // Simple built-in photo viewer state (place with other useState calls)
+  const [viewer, setViewer] = useState({
+    open: false,
+    images: [], // array of src strings
+    index: 0,
+  });
+
+  const openViewer = (message, idx = 0) => {
+    // message may have imageGroup (array) or imagePreview (single)
+    const imgs =
+      Array.isArray(message?.imageGroup) && message.imageGroup.length
+        ? message.imageGroup
+        : message?.imagePreview
+        ? [message.imagePreview]
+        : [];
+
+    if (!imgs.length) return;
+    setViewer({ open: true, images: imgs, index: idx || 0 });
+  };
+
+  const closeViewer = () => setViewer({ open: false, images: [], index: 0 });
+
+  // keyboard navigation for viewer
+  useEffect(() => {
+    if (!viewer.open) return;
+    const onKey = (e) => {
+      if (e.key === "Escape") return closeViewer();
+      if (e.key === "ArrowRight" && viewer.index < viewer.images.length - 1) {
+        setViewer((v) => ({ ...v, index: v.index + 1 }));
+      }
+      if (e.key === "ArrowLeft" && viewer.index > 0) {
+        setViewer((v) => ({ ...v, index: v.index - 1 }));
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [viewer.open, viewer.index, viewer.images.length]);
+
   const maybeNotify = (fromDisplay, text) => {
     try {
       if (!fromDisplay || fromDisplay === username) return;
@@ -4134,6 +4226,42 @@ export default function Chat() {
           onClose={() => setLongPressMessage(null)}
           onOpenThread={() => showThread(longPressMessage)}
         />
+      )}
+
+      {/* Built-in photo viewer modal */}
+      {viewer.open && (
+        <div className="fixed inset-0 z-70 flex items-center justify-center bg-black/90">
+          <button
+            onClick={closeViewer}
+            className="absolute top-4 right-4 text-red-500 text-2xl p-2 rounded-full bg-black/40"
+          >
+            ✕
+          </button>
+
+          {viewer.index > 0 && (
+            <button
+              onClick={() => setViewer((v) => ({ ...v, index: v.index - 1 }))}
+              className="absolute left-4 text-blue-500 text-4xl"
+            >
+              ‹
+            </button>
+          )}
+
+          <img
+            src={viewer.images[viewer.index]}
+            alt={`view-${viewer.index}`}
+            className="max-w-full max-h-full object-contain"
+          />
+
+          {viewer.index < viewer.images.length - 1 && (
+            <button
+              onClick={() => setViewer((v) => ({ ...v, index: v.index + 1 }))}
+              className="absolute right-4 text-blue-500 text-4xl"
+            >
+              ›
+            </button>
+          )}
+        </div>
       )}
 
       {/* Floating progress panel */}

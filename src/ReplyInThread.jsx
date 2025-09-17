@@ -298,7 +298,7 @@ const ReplyInThread = ({
       <div
         key={`${m.id ?? m.ts}`}
         onClick={() => handleTapThreadMessage(m)}
-        className={`p-2 rounded-2xl max-w-[80%] mb-4 ${bubbleBase}`}
+        className={`p-2 rounded-2xl max-w-[40%] mb-4 ${bubbleBase}`}
       >
         <div className="text-xs font-bold flex items-center">
           <div className="flex-1">{isMe ? "You" : from}</div>
