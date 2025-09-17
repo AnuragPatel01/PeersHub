@@ -3986,11 +3986,10 @@ export default function Chat() {
 
   // send chat
 
-  // Replace the existing send() with this function
   const send = async () => {
-    // INLINE IMAGE BRANCH (replace existing inline-image block)
+    // 1) Inline image path
     if (pendingPhotos.length > 0) {
-      // convert previews to base64 data URLs
+      // read previews as data URLs
       const previews = await Promise.all(
         pendingPhotos.map(
           (p) =>
@@ -4003,15 +4002,16 @@ export default function Chat() {
         )
       );
 
-      const offerId = `img-group-${Date.now()}-${Math.random()
+      const msgId = `img-group-${Date.now()}-${Math.random()
         .toString(36)
         .slice(2, 7)}`;
+      const localId = getLocalPeerId() || myId;
 
-      // convert previews array -> store images in idb and use refs
+      // Save images to IndexedDB and produce imageRefs for persistence
       const imageRefs = [];
       await Promise.all(
         previews.map(async (p, i) => {
-          const key = `img-${offerId}-${i}`; // deterministic per message
+          const key = `img-${msgId}-${i}`;
           try {
             await idbPut(key, p.dataUrl);
             imageRefs.push(key);
@@ -4021,56 +4021,47 @@ export default function Chat() {
         })
       );
 
-      // local object we persist (lightweight: refs)
-      const msgObj = {
-        id: offerId,
+      // Local message object (lightweight - uses refs so localStorage isn't huge)
+      const localMsgObj = {
+        id: msgId,
         from: username || "You",
-        fromId: getLocalPeerId() || myId,
+        fromId: localId,
+        fromName: username || undefined,
         ts: Date.now(),
         type: "chat",
-        imageRefs, // refs for local storage
+        imageRefs,
         imageMeta: previews.map((p) => ({ name: p.name })),
-        text: caption,
+        text: caption || text || "",
         deliveries: [],
-        reads: [getLocalPeerId() || myId],
+        reads: [localId],
         replyTo: replyTo ? { ...replyTo } : undefined,
       };
 
-      // show locally + persist (persistMessages will strip heavy data)
+      // Show + persist locally
       setMessages((m) => {
-        const next = [...m, msgObj];
+        const next = [...m, localMsgObj];
         persistMessages(next);
         return next;
       });
 
-      // Build the outgoing object that includes inline data URLs
-      const sendObj = {
-        ...msgObj,
-        // include inline data URLs for recipients so they can render immediately
+      // Message to send to peers — include inline data URLs so they can render immediately.
+      const sendMsgObj = {
+        ...localMsgObj,
         imageGroup: previews.map((p) => p.dataUrl),
-        // include any other sender-side fields you want recipients to see
       };
 
-      // DEBUG: verify we are actually sending data URLs
-      console.debug("SENDING chat object", {
-        id: sendObj.id,
-        imageGroupLen: Array.isArray(sendObj.imageGroup)
-          ? sendObj.imageGroup.length
-          : 0,
-        imageGroup0IsDataUrl:
-          Array.isArray(sendObj.imageGroup) && sendObj.imageGroup[0]
-            ? typeof sendObj.imageGroup[0] === "string" &&
-              sendObj.imageGroup[0].startsWith("data:")
-            : false,
-        imageRefs: sendObj.imageRefs,
+      console.debug("Sending image message", {
+        id: sendMsgObj.id,
+        imageCount: sendMsgObj.imageGroup.length,
       });
 
       try {
-        sendChat(sendObj);
+        sendChat(sendMsgObj);
       } catch (e) {
         console.warn("sendChat (inline images) failed", e);
       }
 
+      // clear composer
       setPendingPhotos([]);
       setCaption("");
       setReplyTo(null);
@@ -4078,25 +4069,23 @@ export default function Chat() {
       return;
     }
 
-    // 2) Plain text message path (new)
+    // 2) Plain text message
     const trimmed = (text || "").trim();
-    if (!trimmed) {
-      // nothing to send
-      return;
-    }
+    if (!trimmed) return;
 
     const id = `msg-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+    const localId = getLocalPeerId() || myId;
 
     const msgObj = {
       id,
       from: username || "You",
-      fromId: getLocalPeerId() || myId,
+      fromId: localId,
       fromName: username || undefined,
       text: trimmed,
       ts: Date.now(),
       type: "chat",
       deliveries: [],
-      reads: [getLocalPeerId() || myId],
+      reads: [localId],
       replyTo: replyTo ? { ...replyTo } : undefined,
     };
 
@@ -4114,11 +4103,10 @@ export default function Chat() {
       console.warn("sendChat failed", e);
     }
 
-    // locally mark read/delivery state and clear composer
     setText("");
     setReplyTo(null);
 
-    // optionally: focus input again
+    // optionally refocus
     try {
       const input = document.querySelector(
         'input[placeholder="Type a message..."]'
