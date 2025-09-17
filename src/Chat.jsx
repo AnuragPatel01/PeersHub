@@ -2290,6 +2290,85 @@ const LS_MSGS = "ph_msgs_v1";
 const LS_THREADS = "ph_threads_v1";
 const MAX_MSGS = 100;
 
+// === tiny IndexedDB helper (paste near top of file) ===
+const IMG_DB_NAME = "peershub_images_v1";
+const IMG_STORE = "images";
+
+function openImgDB() {
+  return new Promise((resolve, reject) => {
+    const req = indexedDB.open(IMG_DB_NAME, 1);
+    req.onupgradeneeded = () => {
+      const db = req.result;
+      if (!db.objectStoreNames.contains(IMG_STORE)) {
+        db.createObjectStore(IMG_STORE);
+      }
+    };
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error);
+  });
+}
+
+async function deleteImgDB() {
+  return new Promise((resolve, reject) => {
+    const req = indexedDB.deleteDatabase(IMG_DB_NAME);
+    req.onsuccess = () => resolve(true);
+    req.onblocked = () => resolve(true); // treat blocked as success (best-effort)
+    req.onerror = (e) => reject(e.target?.error || e);
+  });
+}
+
+async function idbPut(key, value) {
+  const db = await openImgDB();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(IMG_STORE, "readwrite");
+    const store = tx.objectStore(IMG_STORE);
+    const r = store.put(value, key);
+    r.onsuccess = () => {
+      tx.oncomplete = () => {
+        db.close();
+        resolve(true);
+      };
+    };
+    r.onerror = () => {
+      db.close();
+      reject(r.error);
+    };
+  });
+}
+
+async function idbGet(key) {
+  const db = await openImgDB();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(IMG_STORE, "readonly");
+    const store = tx.objectStore(IMG_STORE);
+    const r = store.get(key);
+    r.onsuccess = () => {
+      db.close();
+      resolve(r.result);
+    };
+    r.onerror = () => {
+      db.close();
+      reject(r.error);
+    };
+  });
+}
+
+async function idbDelete(key) {
+  const db = await openImgDB();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(IMG_STORE, "readwrite");
+    const r = tx.objectStore(IMG_STORE).delete(key);
+    r.onsuccess = () => {
+      db.close();
+      resolve(true);
+    };
+    r.onerror = () => {
+      db.close();
+      reject(r.error);
+    };
+  });
+}
+
 export default function Chat() {
   // core state
   const [myId, setMyId] = useState(() => getLocalPeerId() || "...");
@@ -2303,13 +2382,113 @@ export default function Chat() {
     return [];
   });
 
-  // UI: attach menu + file input refs
-  const [attachMenuOpen, setAttachMenuOpen] = useState(false);
-  const fileInputImageRef = useRef(null);
-  const fileInputOfferRef = useRef(null);
+  // after messages state is defined
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const raw = localStorage.getItem(LS_MSGS);
+        if (!raw) return;
+        const parsed = JSON.parse(raw);
+        if (!Array.isArray(parsed)) return;
 
-  const [pendingPhotos, setPendingPhotos] = useState([]);
-  const [caption, setCaption] = useState("");
+        // For each message with imageRefs, fetch images from idb
+        const rehydrated = await Promise.all(
+          parsed.map(async (m) => {
+            if (
+              m.imageRefs &&
+              Array.isArray(m.imageRefs) &&
+              m.imageRefs.length
+            ) {
+              const imgs = [];
+              for (const key of m.imageRefs) {
+                try {
+                  const dataUrl = await idbGet(key);
+                  if (dataUrl) imgs.push(dataUrl);
+                } catch (e) {
+                  // ignore
+                }
+              }
+              if (imgs.length) {
+                // for groups put imageGroup, for single pref use imagePreview
+                return {
+                  ...m,
+                  imageGroup: imgs /* keep imageRefs if you want */,
+                };
+              }
+            }
+            // fallback: if message already had inline imageGroup as strings, keep them
+            return m;
+          })
+        );
+
+        if (!cancelled) {
+          setMessages(rehydrated);
+        }
+      } catch (e) {
+        console.warn("rehydrate images failed", e);
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+    // run only on mount
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // hydrate any messages that have imageRefs but no imageGroup (runs after mount & on new messages)
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        // find messages needing hydration
+        const need = messages.filter(
+          (m) =>
+            Array.isArray(m.imageRefs) &&
+            m.imageRefs.length &&
+            !Array.isArray(m.imageGroup)
+        );
+        if (!need.length) return;
+
+        // fetch for all needed messages
+        const updatesMap = {};
+        await Promise.all(
+          need.map(async (m) => {
+            const imgs = [];
+            for (const key of m.imageRefs || []) {
+              try {
+                const dataUrl = await idbGet(key);
+                if (dataUrl) imgs.push(dataUrl);
+              } catch (e) {
+                // ignore errors per-image
+              }
+            }
+            if (imgs.length) updatesMap[m.id] = imgs;
+          })
+        );
+
+        if (cancelled) return;
+
+        if (Object.keys(updatesMap).length) {
+          setMessages((prev) =>
+            prev.map((m) =>
+              updatesMap[m.id]
+                ? { ...m, imageGroup: updatesMap[m.id] } // add imageGroup (data URLs) for rendering
+                : m
+            )
+          );
+        }
+      } catch (e) {
+        console.warn("hydrate imageRefs failed", e);
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+    // only re-run when messages array length or contents change
+  }, [messages]);
 
   // Threading state
   const [threadMessages, setThreadMessages] = useState(() => {
@@ -2319,6 +2498,80 @@ export default function Chat() {
     } catch (e) {}
     return {};
   });
+
+  // hydrate thread messages that have imageRefs but no imageGroup
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const need = [];
+        Object.keys(threadMessages || {}).forEach((rootId) => {
+          (threadMessages[rootId] || []).forEach((m) => {
+            if (
+              Array.isArray(m.imageRefs) &&
+              m.imageRefs.length &&
+              !Array.isArray(m.imageGroup)
+            ) {
+              need.push({ rootId, m });
+            }
+          });
+        });
+        if (!need.length) return;
+
+        const updates = {}; // { rootId: { msgId: [dataUrls...] } }
+        await Promise.all(
+          need.map(async ({ rootId, m }) => {
+            const imgs = [];
+            for (const key of m.imageRefs || []) {
+              try {
+                const dataUrl = await idbGet(key);
+                if (dataUrl) imgs.push(dataUrl);
+              } catch (e) {
+                // ignore individual failures
+              }
+            }
+            if (imgs.length) {
+              updates[rootId] = updates[rootId] || {};
+              updates[rootId][m.id] = imgs;
+            }
+          })
+        );
+
+        if (cancelled) return;
+
+        if (Object.keys(updates).length) {
+          setThreadMessages((prev) => {
+            const copy = { ...prev };
+            Object.keys(updates).forEach((rootId) => {
+              copy[rootId] = (copy[rootId] || []).map((msg) =>
+                updates[rootId][msg.id]
+                  ? { ...msg, imageGroup: updates[rootId][msg.id] }
+                  : msg
+              );
+            });
+            // persist after hydration so localStorage stays consistent
+            persistThreadMessages(copy);
+            return copy;
+          });
+        }
+      } catch (e) {
+        console.warn("hydrate thread imageRefs failed", e);
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [threadMessages]);
+
+  // UI: attach menu + file input refs
+  const [attachMenuOpen, setAttachMenuOpen] = useState(false);
+  const fileInputImageRef = useRef(null);
+  const fileInputOfferRef = useRef(null);
+
+  const [pendingPhotos, setPendingPhotos] = useState([]);
+  const [caption, setCaption] = useState("");
+
   const [activeThread, setActiveThread] = useState(null);
 
   const [threadTypingUsers, setThreadTypingUsers] = useState({});
@@ -2399,16 +2652,90 @@ export default function Chat() {
   // persist messages helper
   const persistMessages = (arr) => {
     try {
-      const tail = arr.slice(-MAX_MSGS);
+      // store only lightweight info to avoid localStorage quota issues
+      const tail = arr.slice(-MAX_MSGS).map((msg) => {
+        const m = { ...msg };
+
+        // if message holds big image data, replace with references before saving
+        if (Array.isArray(m.imageGroup)) {
+          // if imageGroup items are full-data URLs we replace them with refs if present,
+          // otherwise leave small strings alone (safer).
+          m.imageRefs =
+            m.imageRefs && Array.isArray(m.imageRefs) ? m.imageRefs : null;
+          if (!m.imageRefs) {
+            // we will attempt to convert inline dataUrls -> refs at send time; but if some exist, strip them here
+            m.imageGroup = m.imageGroup
+              .map((it) =>
+                typeof it === "string" && it.length < 200 ? it : null
+              )
+              .filter(Boolean);
+          } else {
+            // remove raw data from storage
+            delete m.imageGroup;
+          }
+        }
+        if (
+          m.imagePreview &&
+          typeof m.imagePreview === "string" &&
+          m.imagePreview.length > 200
+        ) {
+          // large preview -> remove and rely on imageRef
+          if (m.imageRef) {
+            delete m.imagePreview;
+          } else {
+            // small fallback: keep preview if short
+            // otherwise remove to avoid quota
+            delete m.imagePreview;
+          }
+        }
+        return m;
+      });
+
       localStorage.setItem(LS_MSGS, JSON.stringify(tail));
-    } catch (e) {}
+    } catch (e) {
+      console.warn("persistMessages failed", e);
+    }
   };
 
   // persist thread messages helper
+  // persist thread messages helper (strip big image data, store refs if present)
   const persistThreadMessages = (threads) => {
     try {
-      localStorage.setItem(LS_THREADS, JSON.stringify(threads));
-    } catch (e) {}
+      // threads is object { rootId: [msg, ...], ... }
+      const safe = {};
+      Object.keys(threads).forEach((rootId) => {
+        safe[rootId] = (threads[rootId] || []).map((msg) => {
+          const m = { ...msg };
+          // imageGroup may be large -> prefer imageRefs where present
+          if (Array.isArray(m.imageGroup)) {
+            m.imageRefs =
+              m.imageRefs && Array.isArray(m.imageRefs) ? m.imageRefs : null;
+            if (!m.imageRefs) {
+              // don't persist raw large data URLs — keep only small items (under 200 chars)
+              m.imageGroup = m.imageGroup
+                .map((it) =>
+                  typeof it === "string" && it.length < 200 ? it : null
+                )
+                .filter(Boolean);
+            } else {
+              delete m.imageGroup;
+            }
+          }
+          if (
+            m.imagePreview &&
+            typeof m.imagePreview === "string" &&
+            m.imagePreview.length > 200
+          ) {
+            if (m.imageRef) delete m.imagePreview;
+            else delete m.imagePreview;
+          }
+          return m;
+        });
+      });
+      localStorage.setItem(LS_THREADS, JSON.stringify(safe));
+    } catch (e) {
+      console.warn("persistThreadMessages failed", e);
+    }
   };
 
   // messages helpers
@@ -3220,38 +3547,80 @@ export default function Chat() {
     setLongPressMessage(null);
   };
 
-  // Send thread reply (update local state *and* broadcast)
-  const handleSendThreadReply = (threadMessage) => {
+  const handleSendThreadReply = async (threadMessage) => {
     try {
-      // Normalize the thread message object we will persist / broadcast.
-      // If ReplyInThread already created a full object, use it; otherwise
-      // build fallback fields.
-      const msgObj = {
-        id:
-          threadMessage.id ||
-          `thread-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+      // build base msg
+      const id =
+        threadMessage.id ||
+        `thread-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+      const fromId =
+        threadMessage.from || threadMessage.fromId || getLocalPeerId() || myId;
+      const msgObjBase = {
+        id,
         from:
           threadMessage.fromName || threadMessage.from || username || "peer",
-        fromId:
-          threadMessage.from ||
-          threadMessage.fromId ||
-          getLocalPeerId() ||
-          myId,
-        fromName: threadMessage.fromName || threadMessage.fromName || username,
+        fromId,
+        fromName: threadMessage.fromName || username,
         text: threadMessage.text || "",
         ts: threadMessage.ts || Date.now(),
         type: "thread",
-        threadRootId:
-          threadMessage.threadRootId || threadMessage.threadRootId || null,
+        threadRootId: threadMessage.threadRootId || null,
         deliveries: threadMessage.deliveries || [],
         reads: threadMessage.reads || [getLocalPeerId() || myId],
         replyTo: threadMessage.replyTo || null,
-        // IMPORTANT: include any inline preview data (imageGroup/imagePreview/imageMeta)
-        imageGroup: Array.isArray(threadMessage.imageGroup)
-          ? threadMessage.imageGroup
-          : undefined,
-        imagePreview: threadMessage.imagePreview || undefined,
         imageMeta: threadMessage.imageMeta || undefined,
+      };
+
+      // If threadMessage contains inline images (data URLs), persist them to idb
+      // and replace with imageRefs to avoid blowing up localStorage
+      const imageRefs = [];
+      if (
+        Array.isArray(threadMessage.imageGroup) &&
+        threadMessage.imageGroup.length
+      ) {
+        await Promise.all(
+          threadMessage.imageGroup.map(async (it, i) => {
+            try {
+              // choose deterministic key using root + msg id + index
+              const key = `img-thread-${msgObjBase.threadRootId || "root"}-${
+                msgObjBase.id
+              }-${i}`;
+              await idbPut(key, it);
+              imageRefs.push(key);
+            } catch (e) {
+              console.warn("idbPut (thread image) failed", e);
+            }
+          })
+        );
+      } else if (
+        threadMessage.imagePreview &&
+        typeof threadMessage.imagePreview === "string"
+      ) {
+        // single preview image
+        try {
+          const key = `img-thread-${msgObjBase.threadRootId || "root"}-${
+            msgObjBase.id
+          }-0`;
+          await idbPut(key, threadMessage.imagePreview);
+          imageRefs.push(key);
+        } catch (e) {
+          console.warn("idbPut (thread preview) failed", e);
+        }
+      }
+
+      const msgObj = {
+        ...msgObjBase,
+        // store imageRefs (if any) rather than heavy inline data
+        imageRefs: imageRefs.length ? imageRefs : undefined,
+        // keep inline small imageGroup only if you didn't create refs (rare)
+        imageGroup:
+          !imageRefs.length && Array.isArray(threadMessage.imageGroup)
+            ? threadMessage.imageGroup
+            : undefined,
+        imagePreview:
+          !imageRefs.length && threadMessage.imagePreview
+            ? threadMessage.imagePreview
+            : undefined,
       };
 
       // 1) locally add to threadMessages and persist
@@ -3266,10 +3635,8 @@ export default function Chat() {
         return updated;
       });
 
-      // 2) broadcast to peers using the same object (so they get images)
+      // 2) broadcast to peers using the same object (so they get images if we left inline)
       try {
-        // sendChat expects the message payload shape your peers expect.
-        // Using the same msgObj ensures receivers get imageGroup/imagePreview.
         sendChat(msgObj);
       } catch (e) {
         console.warn("sendChat (thread) failed", e);
@@ -3399,38 +3766,127 @@ export default function Chat() {
     setMenuOpen(false);
     setConfirmLeaveOpen(true);
   };
-
-  const handleConfirmLeave = () => {
+  const handleConfirmLeave = async () => {
     try {
-      leaveHub();
-    } catch (e) {}
-    setJoinedBootstrap("");
+      // delete stored images from IndexedDB (best-effort)
+      try {
+        await deleteImgDB();
+      } catch (e) {
+        console.warn("deleteImgDB failed:", e);
+        // fallback: try to remove specific keys if you used a prefix pattern (optional)
+      }
 
-    localStorage.removeItem("ph_hub_bootstrap");
-    localStorage.removeItem("ph_should_autojoin");
+      // leave hub networking
+      try {
+        leaveHub();
+      } catch (e) {}
 
+      setJoinedBootstrap("");
+
+      localStorage.removeItem("ph_hub_bootstrap");
+      localStorage.removeItem("ph_should_autojoin");
+
+      try {
+        localStorage.removeItem(LS_MSGS);
+      } catch (e) {}
+      try {
+        localStorage.removeItem(LS_THREADS);
+      } catch (e) {}
+      seenSystemIdsRef.current.clear();
+      setMessages([]);
+      setThreadMessages({});
+      const sys = {
+        id: `sys-left-${Date.now()}`,
+        from: "System",
+        text: "You left the hub. Auto-join cleared.",
+        ts: Date.now(),
+        type: "system",
+      };
+      setMessages((m) => {
+        const next = [...m, sys];
+        persistMessages(next);
+        return next;
+      });
+      setConfirmLeaveOpen(false);
+    } catch (e) {
+      console.warn("handleConfirmLeave failed:", e);
+      setConfirmLeaveOpen(false);
+    }
+  };
+
+  // clear all stored images (IndexedDB + message refs)
+  const handleClearAllImages = async () => {
     try {
-      localStorage.removeItem(LS_MSGS);
-    } catch (e) {}
-    try {
-      localStorage.removeItem(LS_THREADS);
-    } catch (e) {}
-    seenSystemIdsRef.current.clear();
-    setMessages([]);
-    setThreadMessages({});
-    const sys = {
-      id: `sys-left-${Date.now()}`,
-      from: "System",
-      text: "You left the hub. Auto-join cleared.",
-      ts: Date.now(),
-      type: "system",
-    };
-    setMessages((m) => {
-      const next = [...m, sys];
-      persistMessages(next);
-      return next;
-    });
-    setConfirmLeaveOpen(false);
+      const ok = window.confirm(
+        "Clear all stored images? This will remove locally cached images but keep chat text. Proceed?"
+      );
+      if (!ok) return;
+
+      // delete the IndexedDB (best-effort)
+      try {
+        await deleteImgDB();
+      } catch (e) {
+        console.warn("deleteImgDB failed:", e);
+      }
+
+      // remove image fields from messages in state + persist lightweight messages
+      setMessages((prev) => {
+        const cleaned = prev.map((m) => {
+          const copy = { ...m };
+          delete copy.imageGroup;
+          delete copy.imagePreview;
+          delete copy.imageRefs;
+          delete copy.imageRef;
+          delete copy.imageMeta;
+          return copy;
+        });
+        // persist cleaned messages
+        try {
+          persistMessages(cleaned);
+        } catch (e) {
+          console.warn("persistMessages after clear images failed", e);
+        }
+        return cleaned;
+      });
+
+      // Also clear thread messages if you stored images there
+      setThreadMessages((threads) => {
+        const cleaned = {};
+        for (const rootId of Object.keys(threads || {})) {
+          cleaned[rootId] = (threads[rootId] || []).map((m) => {
+            const copy = { ...m };
+            delete copy.imageGroup;
+            delete copy.imagePreview;
+            delete copy.imageRefs;
+            delete copy.imageRef;
+            delete copy.imageMeta;
+            return copy;
+          });
+        }
+        try {
+          persistThreadMessages(cleaned);
+        } catch (e) {
+          console.warn("persistThreadMessages after clear images failed", e);
+        }
+        return cleaned;
+      });
+
+      // small feedback to user
+      const sys = {
+        id: `sys-clear-images-${Date.now()}`,
+        from: "System",
+        text: "Cleared all locally cached images.",
+        ts: Date.now(),
+        type: "system",
+      };
+      setMessages((m) => {
+        const next = [...m, sys];
+        persistMessages(next);
+        return next;
+      });
+    } catch (e) {
+      console.warn("handleClearAllImages failed", e);
+    }
   };
 
   const handleCancelLeave = () => setConfirmLeaveOpen(false);
@@ -3458,13 +3914,27 @@ export default function Chat() {
         .toString(36)
         .slice(2, 7)}`;
 
+      // convert previews array -> store images in idb and use refs
+      const imageRefs = [];
+      await Promise.all(
+        previews.map(async (p, i) => {
+          const key = `img-${offerId}-${i}`; // deterministic per message
+          try {
+            await idbPut(key, p.dataUrl);
+            imageRefs.push(key);
+          } catch (e) {
+            console.warn("idbPut failed", e);
+          }
+        })
+      );
+
       const msgObj = {
         id: offerId,
         from: username || "You",
         fromId: getLocalPeerId() || myId,
         ts: Date.now(),
         type: "chat",
-        imageGroup: previews.map((p) => p.dataUrl), // persistable base64
+        imageRefs, // ✅ refs instead of giant base64
         imageMeta: previews.map((p) => ({ name: p.name })),
         text: caption,
         deliveries: [],
@@ -3612,7 +4082,11 @@ export default function Chat() {
   };
 
   // message renderer
+  // Updated renderMessage — replace the existing function in Chat.jsx
   const renderMessage = (m, idx) => {
+    // debug line (optional) - uncomment if you need to inspect shapes
+    // console.debug("renderMessage", m.id, "raw imageGroup:", m.imageGroup, "raw preview:", m.imagePreview);
+
     const from = m.from ?? "peer";
     const txt =
       m.text == null
@@ -3621,52 +4095,45 @@ export default function Chat() {
         ? m.text
         : JSON.stringify(m.text);
 
-    const time = new Date(m.ts).toLocaleTimeString([], {
+    const time = new Date(m.ts || Date.now()).toLocaleTimeString([], {
       hour: "2-digit",
       minute: "2-digit",
     });
     const isSystem = m.type && m.type.toString().startsWith("system");
     const isMe =
       (m.fromId || m.from) === (getLocalPeerId() || myId) || from === username;
-
     const threadCount = getThreadCount(m.id);
 
-    // image flags: single preview (imagePreview) or group (imageGroup: array of src)
     // --- normalize image fields (handles saved shapes after refresh) ---
-    let imageGroup =
-      Array.isArray(m.imageGroup) && m.imageGroup.length
-        ? [...m.imageGroup]
-        : null;
-
-    // If imageGroup was accidentally saved as a JSON string, try to parse
-    if (!imageGroup && typeof m.imageGroup === "string") {
+    let imageGroup = null;
+    if (Array.isArray(m.imageGroup) && m.imageGroup.length) {
+      imageGroup = [...m.imageGroup];
+    } else if (typeof m.imageGroup === "string") {
       try {
         const parsed = JSON.parse(m.imageGroup);
         if (Array.isArray(parsed) && parsed.length) imageGroup = parsed;
       } catch (err) {
-        // ignore parse error
+        // ignore parse errors
       }
     }
 
-    // Normalize each item to a data URL string if it's an object {dataUrl} or {src}
     if (Array.isArray(imageGroup)) {
       imageGroup = imageGroup
         .map((it) =>
           typeof it === "string" ? it : it?.dataUrl || it?.src || ""
         )
-        .filter(Boolean);
+        .map((s) => (typeof s === "string" ? s.trim() : ""))
+        .filter((s) => s && s !== "photo") // remove empty or placeholder
+        .filter((v, i, a) => a.indexOf(v) === i); // dedupe
     }
 
-    // Normalize single-image preview — accept string or object { dataUrl }
-    const imagePreview =
+    const imagePreviewRaw =
       typeof m.imagePreview === "string"
         ? m.imagePreview
-        : m.imagePreview?.dataUrl || null;
+        : m.imagePreview?.dataUrl || m.imagePreview?.src || null;
 
-    // Fallback: if preview missing but group exists, set preview to first group item
-    const normalizedImagePreview =
-      imagePreview ||
-      (Array.isArray(imageGroup) && imageGroup.length ? imageGroup[0] : null);
+    // Only treat a true preview as preview — don't fall back to group[0]
+    const normalizedImagePreview = imagePreviewRaw || null;
 
     const isImagePreview = !!normalizedImagePreview;
     const isImageGroup = Array.isArray(imageGroup) && imageGroup.length > 0;
@@ -3683,8 +4150,9 @@ export default function Chat() {
       );
     }
 
-    // choose max width: image bubbles get larger width allowance
+    // bubble sizing: image bubbles shrink-to-fit to avoid large empty background
     const bubbleWidthClass = isImageMessage ? "max-w-[80%]" : "max-w-[50%]";
+    const bubbleFitClass = isImageMessage ? "w-fit" : "w-full";
     const bubbleBgClass = isMe
       ? "ml-auto bg-blue-500 text-white"
       : "bg-white/100 text-black";
@@ -3699,8 +4167,8 @@ export default function Chat() {
         onTouchEnd={handleTouchEnd}
         onTouchCancel={handleTouchEnd}
         key={`${m.id ?? m.ts}-${idx}`}
-        className={`p-2 rounded-2xl mb-2 cursor-pointer select-none relative ${bubbleWidthClass} ${bubbleBgClass}`}
-        style={{ wordBreak: "break-word" }}
+        className={`p-2 rounded-2xl mb-2 cursor-pointer select-none relative ${bubbleWidthClass} ${bubbleFitClass} ${bubbleBgClass}`}
+        style={{ wordBreak: "break-word", overflow: "hidden" }}
       >
         {/* header */}
         <div className="text-xs font-bold flex items-center">
@@ -3708,6 +4176,7 @@ export default function Chat() {
           <div className="text-[10px] text-gray-700/70 ml-2">{time}</div>
           {isMe && renderStatusDot(m)}
         </div>
+
         {/* reply-to context */}
         {m.replyTo && (
           <div className="mt-2 mb-2 p-2 rounded border border-white/5 text-xs text-gray-600 bg-gray-300">
@@ -3722,18 +4191,19 @@ export default function Chat() {
             </span>
           </div>
         )}
-        {/* GROUP IMAGE BUBBLE — replace previous m.imageGroup mapping  */}
-        {isImageGroup && (
+
+        {/* IMAGE GROUP */}
+        {isImageGroup && imageGroup && imageGroup.length > 0 && (
           <div className="mt-2 grid grid-cols-2 gap-2">
             {imageGroup.slice(0, 4).map((src, i) => (
               <div
                 key={i}
-                className="relative w-full rounded-lg overflow-hidden bg-black/5"
+                className="relative rounded-lg overflow-hidden bg-black/5"
                 onClick={(e) => {
                   e.stopPropagation();
-                  openViewer(m, i); // or openPhotoViewer if using that
+                  if (typeof openViewer === "function") openViewer(m, i);
                 }}
-                style={{ paddingBottom: "100%" }} // <-- makes the div square
+                style={{ paddingBottom: "100%", minWidth: "120px" }}
               >
                 <img
                   src={src}
@@ -3743,9 +4213,9 @@ export default function Chat() {
               </div>
             ))}
 
-            {m.imageGroup.length > 4 && (
+            {imageGroup.length > 4 && (
               <div className="col-span-2 text-xs text-gray-500 mt-1">
-                +{m.imageGroup.length - 4} more
+                +{imageGroup.length - 4} more
               </div>
             )}
 
@@ -3756,31 +4226,33 @@ export default function Chat() {
             )}
           </div>
         )}
-        {/* SINGLE IMAGE BUBBLE  */}
-        {isImagePreview && (
-          <div className="mt-2 flex items-center justify-center">
+
+        {/* SINGLE IMAGE */}
+        {isImagePreview && normalizedImagePreview && !isImageGroup && (
+          <div className="mt-2 flex flex-col items-center justify-center">
             <div
-              className="w-full max-w-[420px] rounded-lg overflow-hidden bg-black/5"
+              className="rounded-lg overflow-hidden bg-black/5"
               onClick={(e) => {
                 e.stopPropagation();
-                openViewer(m, 0);
+                if (typeof openViewer === "function") openViewer(m, 0);
               }}
-              style={{ aspectRatio: "1 / 1" }} // supported in modern browsers; fallback below if needed
+              style={{ width: 320, maxWidth: "80vw", aspectRatio: "1 / 1" }}
             >
               <img
-                src={m.imagePreview}
+                src={normalizedImagePreview}
                 alt={m.imageMeta?.name || "photo"}
                 className="w-full h-full object-cover"
               />
             </div>
+
             {m.text && (
               <div className="mt-2 text-sm whitespace-pre-wrap">{m.text}</div>
             )}
           </div>
         )}
 
-        {/* normal text (when message is not an image group/preview) */}
-        {!isImageMessage && (
+        {/* normal text */}
+        {!isImageMessage && txt && (
           <div className="break-words whitespace-pre-wrap mt-1">{txt}</div>
         )}
 
@@ -3816,10 +4288,12 @@ export default function Chat() {
   };
 
   // Unified file selection handler — supports multi-file and two modes
-  // mode: 'inline' => embed images directly in chat (no offer)
+  // mode: 'inline' => embed images directly in chat (store images in idb + refs)
   // mode: 'offer'  => create file offers (existing behavior)
   const onFileSelected = async (fileOrFiles, mode = "offer") => {
     if (!fileOrFiles) return;
+
+    // accept FileList, array or single File
     const files = Array.isArray(fileOrFiles)
       ? fileOrFiles
       : fileOrFiles instanceof FileList
@@ -3829,42 +4303,59 @@ export default function Chat() {
     if (mode === "inline") {
       // Filter only image files
       const imageFiles = files.filter(
-        (f) => f.type && f.type.startsWith("image/")
+        (f) => f && f.type && f.type.startsWith("image/")
       );
       if (!imageFiles.length) return;
 
-      // read previews in parallel
+      // read previews (base64) in parallel
       const previews = await Promise.all(
         imageFiles.map(
           (file) =>
             new Promise((resolve) => {
               const reader = new FileReader();
               reader.onload = (e) =>
-                resolve({ file, dataUrl: e.target.result, name: file.name });
+                resolve({ dataUrl: e.target.result, name: file.name });
               reader.readAsDataURL(file);
             })
         )
       );
 
-      // Build message object grouping images (multi-photo bubble)
+      // message id (deterministic-ish)
       const offerId = `img-group-${Date.now()}-${Math.random()
         .toString(36)
         .slice(2, 7)}`;
 
+      // Save each dataUrl into IndexedDB and produce refs
+      const imageRefs = [];
+      await Promise.all(
+        previews.map(async (p, i) => {
+          const key = `img-${offerId}-${i}`;
+          try {
+            await idbPut(key, p.dataUrl);
+            imageRefs.push(key);
+          } catch (err) {
+            console.warn("idbPut failed for", key, err);
+            // if idbPut fails, we could fallback to storing small previews inline,
+            // but keep it simple and ignore failed images.
+          }
+        })
+      );
+
+      // Build lightweight message object (no base64 inside)
       const msgObj = {
         id: offerId,
         from: username || "You",
         fromId: getLocalPeerId() || myId,
         ts: Date.now(),
         type: "chat",
-        imageGroup: previews.map((p) => p.dataUrl),
+        imageRefs, // store refs only
         imageMeta: previews.map((p) => ({ name: p.name })),
         text: caption || text || "",
         deliveries: [],
         reads: [getLocalPeerId() || myId],
       };
 
-      // persist + show locally
+      // persist + show locally (persistMessages strips heavy fields)
       setMessages((m) => {
         const next = [...m, msgObj];
         persistMessages(next);
@@ -3878,7 +4369,7 @@ export default function Chat() {
         console.warn("sendChat (inline images) failed", e);
       }
 
-      // clear composer state
+      // clear UI state
       setPendingPhotos([]);
       setCaption("");
       setText("");
@@ -3886,14 +4377,12 @@ export default function Chat() {
       return;
     }
 
-    // ---------- mode === 'offer' ----------
-    // For each file create an offer (old behavior). We'll call offerFileToPeers for each file.
+    // ---------- mode === 'offer' (unchanged) ----------
     files.forEach((file) => {
       const offerId = `offer-${Date.now()}-${Math.random()
         .toString(36)
         .slice(2, 7)}`;
 
-      // Track pending outgoing offers (keeps backward compatibility)
       outgoingPendingOffers.current[offerId] = {
         file,
         acceptingPeers: new Set(),
@@ -3920,7 +4409,6 @@ export default function Chat() {
         console.warn("offerFileToPeers failed", e);
       }
 
-      // show a system line locally to reflect the offer (same as before)
       setMessages((m) => {
         const sys = {
           id: `sys-offer-${offerId}`,
@@ -4425,6 +4913,19 @@ export default function Chat() {
                 <span className="font-semibold">Join Hub</span>
                 <div className="text-xs text-gray-400">
                   Enter a host ID to join
+                </div>
+              </button>
+
+              <button
+                onClick={async () => {
+                  setMenuOpen(false);
+                  await handleClearAllImages();
+                }}
+                className="w-full text-left px-4 py-3 hover:bg-white/20 border-b border-white/5 text-yellow-500"
+              >
+                <span className="font-semibold">Clear all images</span>
+                <div className="text-xs text-gray-400">
+                  Remove cached images (local)
                 </div>
               </button>
 
