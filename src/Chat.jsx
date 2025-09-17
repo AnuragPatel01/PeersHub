@@ -2260,7 +2260,6 @@
 // }
 
 // Reply in Thread
-
 // src/components/Chat.jsx
 import "./App.css";
 import React, { useEffect, useState, useRef } from "react";
@@ -2290,29 +2289,83 @@ const LS_MSGS = "ph_msgs_v1";
 const LS_THREADS = "ph_threads_v1";
 const MAX_MSGS = 100;
 
+/* -------------------- Simple IndexedDB helpers -------------------- */
+/* Usage:
+     await idbSet(key, value)
+     const v = await idbGet(key)
+*/
+const DB_NAME = "peershub_v1";
+const DB_VERSION = 1;
+const STORE_NAME = "kv";
+
+const openDb = () =>
+  new Promise((resolve, reject) => {
+    if (!window.indexedDB) {
+      resolve(null);
+      return;
+    }
+    const req = window.indexedDB.open(DB_NAME, DB_VERSION);
+    req.onerror = (e) => {
+      console.warn("IDB open error", e);
+      resolve(null);
+    };
+    req.onupgradeneeded = (e) => {
+      const db = e.target.result;
+      if (!db.objectStoreNames.contains(STORE_NAME)) {
+        db.createObjectStore(STORE_NAME);
+      }
+    };
+    req.onsuccess = (e) => resolve(e.target.result);
+  });
+
+const idbGet = async (key) => {
+  try {
+    const db = await openDb();
+    if (!db) return null;
+    return await new Promise((resolve, reject) => {
+      const tx = db.transaction(STORE_NAME, "readonly");
+      const store = tx.objectStore(STORE_NAME);
+      const r = store.get(key);
+      r.onsuccess = () => resolve(r.result ?? null);
+      r.onerror = () => resolve(null);
+    });
+  } catch (e) {
+    console.warn("idbGet failed", e);
+    return null;
+  }
+};
+
+const idbSet = async (key, value) => {
+  try {
+    const db = await openDb();
+    if (!db) return false;
+    return await new Promise((resolve, reject) => {
+      const tx = db.transaction(STORE_NAME, "readwrite");
+      const store = tx.objectStore(STORE_NAME);
+      const r = store.put(value, key);
+      r.onsuccess = () => resolve(true);
+      r.onerror = () => {
+        console.warn("idbSet error", r.error);
+        resolve(false);
+      };
+    });
+  } catch (e) {
+    console.warn("idbSet failed", e);
+    return false;
+  }
+};
+
+/* -------------------- Chat component -------------------- */
 export default function Chat() {
   // core state
   const [myId, setMyId] = useState(() => getLocalPeerId() || "...");
   const [peers, setPeers] = useState([]);
   const [peerNamesMap, setPeerNamesMap] = useState({});
-  const [messages, setMessages] = useState(() => {
-    try {
-      const raw = localStorage.getItem(LS_MSGS);
-      if (raw) return JSON.parse(raw);
-    } catch (e) {}
-    return [];
-  });
+  const [messages, setMessages] = useState([]); // loaded from IDB in effect
+  const [threadMessages, setThreadMessages] = useState({}); // loaded from IDB in effect
 
-  // Threading state
-  const [threadMessages, setThreadMessages] = useState(() => {
-    try {
-      const raw = localStorage.getItem(LS_THREADS);
-      if (raw) return JSON.parse(raw);
-    } catch (e) {}
-    return {};
-  });
+  // Thread state
   const [activeThread, setActiveThread] = useState(null);
-
   const [threadTypingUsers, setThreadTypingUsers] = useState({});
 
   // file transfer
@@ -2325,6 +2378,8 @@ export default function Chat() {
 
   // UI / other state
   const [text, setText] = useState("");
+  const [caption, setCaption] = useState("");
+  const [pendingPhotos, setPendingPhotos] = useState([]); // { file, dataUrl, name, offerId }
   const [username, setUsername] = useState(
     () => localStorage.getItem("ph_name") || ""
   );
@@ -2368,22 +2423,65 @@ export default function Chat() {
     return () => clearInterval(id);
   }, [incomingFileOffers]);
 
-  // persist messages helper
-  const persistMessages = (arr) => {
+  /* -------------------- Persistence helpers (IDB + fallback) -------------------- */
+  const persistMessages = async (arr) => {
     try {
       const tail = arr.slice(-MAX_MSGS);
-      localStorage.setItem(LS_MSGS, JSON.stringify(tail));
-    } catch (e) {}
+      // attempt IDB write first
+      const ok = await idbSet(LS_MSGS, tail);
+      if (!ok) localStorage.setItem(LS_MSGS, JSON.stringify(tail));
+    } catch (e) {
+      try {
+        localStorage.setItem(LS_MSGS, JSON.stringify(arr.slice(-MAX_MSGS)));
+      } catch (er) {}
+    }
   };
 
-  // persist thread messages helper
-  const persistThreadMessages = (threads) => {
+  const persistThreadMessages = async (threads) => {
     try {
-      localStorage.setItem(LS_THREADS, JSON.stringify(threads));
-    } catch (e) {}
+      const ok = await idbSet(LS_THREADS, threads);
+      if (!ok) localStorage.setItem(LS_THREADS, JSON.stringify(threads));
+    } catch (e) {
+      try {
+        localStorage.setItem(LS_THREADS, JSON.stringify(threads));
+      } catch (er) {}
+    }
   };
 
-  // messages helpers
+  // On mount, load persisted messages & threads (IDB -> fallback localStorage)
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const idbMsgs = await idbGet(LS_MSGS);
+        const idbThreads = await idbGet(LS_THREADS);
+        if (!cancelled) {
+          if (Array.isArray(idbMsgs)) setMessages(idbMsgs);
+          else {
+            try {
+              const raw = localStorage.getItem(LS_MSGS);
+              if (raw) setMessages(JSON.parse(raw));
+            } catch (e) {}
+          }
+          if (idbThreads && typeof idbThreads === "object")
+            setThreadMessages(idbThreads);
+          else {
+            try {
+              const rawT = localStorage.getItem(LS_THREADS);
+              if (rawT) setThreadMessages(JSON.parse(rawT));
+            } catch (e) {}
+          }
+        }
+      } catch (e) {
+        console.warn("load persisted messages failed", e);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  /* -------------------- Messages helpers -------------------- */
   const upsertIncomingChat = (incoming) => {
     if (incoming.type === "thread" && incoming.threadRootId) {
       setThreadMessages((threads) => {
@@ -2410,8 +2508,10 @@ export default function Chat() {
             threadRootId: incoming.threadRootId,
             deliveries: incoming.deliveries || [],
             reads: incoming.reads || [],
-            // <<-- include replyTo if the incoming message has it
             replyTo: incoming.replyTo || null,
+            imageGroup: incoming.imageGroup || undefined,
+            imagePreview: incoming.imagePreview || undefined,
+            imageMeta: incoming.imageMeta || undefined,
           };
           updated = {
             ...threads,
@@ -2440,10 +2540,13 @@ export default function Chat() {
         fromId: incoming.from,
         text: incoming.text,
         ts: incoming.ts || Date.now(),
-        type: "chat",
+        type: incoming.type || "chat",
         replyTo: incoming.replyTo || null,
         deliveries: incoming.deliveries || [],
         reads: incoming.reads || [],
+        imageGroup: incoming.imageGroup || undefined,
+        imagePreview: incoming.imagePreview || undefined,
+        imageMeta: incoming.imageMeta || undefined,
       };
       const next = [...m, msgObj];
       persistMessages(next);
@@ -2497,8 +2600,7 @@ export default function Chat() {
         const alreadyRead = Array.isArray(m.reads) && m.reads.includes(localId);
         if (!alreadyRead) {
           try {
-            // sendAckRead signature in your code is used as sendAckRead(id, origin)
-            // we also pass isThread and threadRootId so peers know this is a thread read
+            // sendAckRead signature in your code is sendAckRead(id, origin, isThread?, threadRootId?)
             sendAckRead(m.id, origin, true, rootId);
           } catch (e) {}
           addUniqueToMsgArray(m.id, "reads", localId, true, rootId);
@@ -2509,7 +2611,7 @@ export default function Chat() {
     }
   };
 
-  // transfer UI helpers
+  /* -------------------- Transfer helpers (unchanged) -------------------- */
   const setTransfer = (offerId, updaterOrObj) => {
     setTransfers((t) => {
       const prev = t[offerId] || {};
@@ -2529,7 +2631,6 @@ export default function Chat() {
     });
   };
 
-  // handle incoming file chunk and write to disk using saved handle
   const handleIncomingFileChunk = async (data) => {
     let { id: offerId, seq, chunk, final } = data || {};
     try {
@@ -2644,13 +2745,12 @@ export default function Chat() {
       } catch (er) {}
     }
   };
-  // incoming messages callback from webrtc
+
+  /* -------------------- Incoming message handler (wire-in) -------------------- */
   const handleIncoming = async (from, payloadOrText) => {
-    // DEBUG: inspect raw incoming envelope occasionally while testing
     console.debug("handleIncoming:", { from, payloadOrText });
-    console.debug("SYS_TYPING recv:", { from, payloadOrText });
     try {
-      // ---------- 1) typing (main chat or thread) ----------
+      // typing
       if (from === "__system_typing__" && payloadOrText) {
         try {
           const fromName =
@@ -2666,12 +2766,8 @@ export default function Chat() {
             payloadOrText.threadId ||
             null;
 
-          if (!fromName) {
-            // nothing we can do
-            return;
-          }
+          if (!fromName) return;
 
-          // main-chat typing
           if (!threadRootId) {
             setTypingUsers((t) => {
               const copy = { ...t };
@@ -2682,7 +2778,6 @@ export default function Chat() {
             return;
           }
 
-          // thread typing: mapping { rootId: { name: timestamp } }
           setThreadTypingUsers((t) => {
             const copy = { ...t };
             const root = threadRootId;
@@ -2695,16 +2790,12 @@ export default function Chat() {
           });
           return;
         } catch (e) {
-          console.warn(
-            "handleIncoming: typing handling failed",
-            e,
-            payloadOrText
-          );
+          console.warn("handleIncoming: typing handling failed", e, payloadOrText);
           return;
         }
       }
 
-      // ---------- 2) ack deliver ----------
+      // ack deliver
       if (
         from === "__system_ack_deliver__" &&
         payloadOrText &&
@@ -2722,15 +2813,6 @@ export default function Chat() {
             payloadOrText.threadId ||
             null;
 
-          // Debug log to see what's really coming in
-          console.debug("RCV ack_deliver:", {
-            fromPeer,
-            id,
-            isThread,
-            threadRootId,
-            raw: payloadOrText,
-          });
-
           addUniqueToMsgArray(
             id,
             "deliveries",
@@ -2744,7 +2826,7 @@ export default function Chat() {
         return;
       }
 
-      // ---------- 3) ack read ----------
+      // ack read
       if (from === "__system_ack_read__" && payloadOrText && payloadOrText.id) {
         try {
           const fromPeer =
@@ -2758,14 +2840,6 @@ export default function Chat() {
             payloadOrText.threadId ||
             null;
 
-          console.debug("RCV ack_read:", {
-            fromPeer,
-            id,
-            isThread,
-            threadRootId,
-            raw: payloadOrText,
-          });
-
           addUniqueToMsgArray(id, "reads", fromPeer, !!isThread, threadRootId);
         } catch (e) {
           console.warn("handleIncoming: ack_read failed", e, payloadOrText);
@@ -2773,7 +2847,7 @@ export default function Chat() {
         return;
       }
 
-      // ---------- 4) system messages ----------
+      // system messages
       if (
         payloadOrText &&
         typeof payloadOrText === "object" &&
@@ -2806,7 +2880,7 @@ export default function Chat() {
         return;
       }
 
-      // ---------- 5) file offer received ----------
+      // file offer
       if (from === "__system_file_offer__" && payloadOrText) {
         try {
           const offer = payloadOrText;
@@ -2823,7 +2897,6 @@ export default function Chat() {
             return copy;
           });
 
-          // auto-expire after 20s if not handled locally
           setTimeout(() => {
             setIncomingFileOffers((s) => {
               const copy = { ...s };
@@ -2846,7 +2919,7 @@ export default function Chat() {
         return;
       }
 
-      // ---------- 6) file offer response (peer accepted/declined our offer) ----------
+      // file offer response
       if (from === "__system_file_offer_response__" && payloadOrText) {
         try {
           const { id: offerId, from: responder, accept } = payloadOrText;
@@ -2881,7 +2954,7 @@ export default function Chat() {
         return;
       }
 
-      // ---------- 7) file chunk ----------
+      // file chunk
       if (from === "__system_file_chunk__" && payloadOrText) {
         try {
           await handleIncomingFileChunk(payloadOrText);
@@ -2895,7 +2968,7 @@ export default function Chat() {
         return;
       }
 
-      // ---------- 8) file transfer done ----------
+      // file transfer done
       if (from === "__system_file_transfer_done__" && payloadOrText) {
         try {
           const { id: offerId } = payloadOrText;
@@ -2928,7 +3001,7 @@ export default function Chat() {
         return;
       }
 
-      // ---------- 9) chat object (regular chat or thread) ----------
+      // chat or thread object
       if (
         payloadOrText &&
         typeof payloadOrText === "object" &&
@@ -2939,10 +3012,10 @@ export default function Chat() {
           upsertIncomingChat(payloadOrText);
           maybeNotify(
             payloadOrText.fromName || payloadOrText.from,
-            payloadOrText.text
+            payloadOrText.text || (payloadOrText.imageGroup ? "Photo(s)" : "")
           );
 
-          // if message came from another peer and tab is visible, send ack_read
+          // auto ack read if visible
           try {
             const origin = payloadOrText.from || payloadOrText.origin || null;
             const localId = getLocalPeerId() || myId;
@@ -2952,7 +3025,6 @@ export default function Chat() {
               document.visibilityState === "visible"
             ) {
               try {
-                // send basic ack read for chat; we pass thread info when it's a thread message
                 if (payloadOrText.type === "thread") {
                   sendAckRead(
                     payloadOrText.id,
@@ -2986,7 +3058,7 @@ export default function Chat() {
         return;
       }
 
-      // ---------- 10) string fallback ----------
+      // string fallback
       if (typeof payloadOrText === "string") {
         try {
           const safeText = payloadOrText;
@@ -3023,7 +3095,7 @@ export default function Chat() {
     }
   };
 
-  // peer list update
+  /* -------------------- Peer list + bootstrap handlers -------------------- */
   const handlePeerListUpdate = (list) => {
     setPeers(list || []);
     try {
@@ -3036,7 +3108,7 @@ export default function Chat() {
     setJoinedBootstrap(newBootstrapId || "");
   };
 
-  // init peer
+  /* -------------------- Initialize peer -------------------- */
   useEffect(() => {
     if (!username) return;
     const p = initPeer(
@@ -3057,7 +3129,7 @@ export default function Chat() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [username]);
 
-  // autoscroll
+  /* -------------------- Auto-scroll -------------------- */
   useEffect(() => {
     if (!messagesEndRef.current) return;
     try {
@@ -3068,7 +3140,7 @@ export default function Chat() {
     } catch (e) {}
   }, [messages]);
 
-  // visibility ack_read
+  /* -------------------- Visibility ack_read -------------------- */
   useEffect(() => {
     const onVisibility = () => {
       if (document.visibilityState === "visible") {
@@ -3096,7 +3168,7 @@ export default function Chat() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [messages, myId]);
 
-  // outside click for menu
+  /* -------------------- Outside click for menu -------------------- */
   useEffect(() => {
     const onDocClick = (e) => {
       if (!menuRef.current) return;
@@ -3107,7 +3179,7 @@ export default function Chat() {
     return () => document.removeEventListener("mousedown", onDocClick);
   }, [menuOpen]);
 
-  // typing broadcast
+  /* -------------------- Typing broadcast -------------------- */
   useEffect(() => {
     if (!username) return;
     if (typingTimeoutRef.current) clearTimeout(typingTimeoutRef.current);
@@ -3125,35 +3197,30 @@ export default function Chat() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [text]);
 
-  // Long press handlers
+  /* -------------------- Long press handlers -------------------- */
   const handleMouseDown = (e, message) => {
     e.preventDefault();
     longPressTimeoutRef.current = setTimeout(() => {
       setLongPressMessage(message);
     }, 500);
   };
-
   const handleMouseUp = () => {
     if (longPressTimeoutRef.current) {
       clearTimeout(longPressTimeoutRef.current);
       longPressTimeoutRef.current = null;
     }
   };
-
   const handleTouchStart = (e, message) => {
     longPressTimeoutRef.current = setTimeout(() => {
       setLongPressMessage(message);
     }, 500);
   };
-
   const handleTouchEnd = () => {
     if (longPressTimeoutRef.current) {
       clearTimeout(longPressTimeoutRef.current);
       longPressTimeoutRef.current = null;
     }
   };
-
-  // Cleanup long press timeout
   useEffect(() => {
     return () => {
       if (longPressTimeoutRef.current) {
@@ -3162,23 +3229,19 @@ export default function Chat() {
     };
   }, []);
 
-  // Show thread for a message and mark its replies read
+  /* -------------------- Thread helpers -------------------- */
   const showThread = (message) => {
     setActiveThread(message);
-    // mark existing replies as read locally and notify origin peers
     if (message && message.id) markThreadAsRead(message.id);
   };
-
-  // Close thread view
   const closeThread = () => {
     setActiveThread(null);
     setLongPressMessage(null);
   };
 
-  // Send thread reply (update local state *and* broadcast)
+  // Send thread reply (update state & broadcast)
   const handleSendThreadReply = (threadMessage) => {
     try {
-      // 1) locally add the thread message so sender sees it immediately
       setThreadMessages((threads) => {
         const rootId = threadMessage.threadRootId;
         const existing = Array.isArray(threads[rootId]) ? threads[rootId] : [];
@@ -3193,8 +3256,10 @@ export default function Chat() {
           threadRootId: rootId,
           deliveries: threadMessage.deliveries || [],
           reads: threadMessage.reads || [],
-          // <<-- include replyTo so UI can render the quoted preview
           replyTo: threadMessage.replyTo || null,
+          imageGroup: threadMessage.imageGroup || undefined,
+          imagePreview: threadMessage.imagePreview || undefined,
+          imageMeta: threadMessage.imageMeta || undefined,
         };
 
         const updated = {
@@ -3205,20 +3270,19 @@ export default function Chat() {
         return updated;
       });
 
-      // 2) broadcast to peers
+      // broadcast
       sendChat(threadMessage);
     } catch (e) {
       console.warn("sendChat (thread) failed", e);
     }
   };
 
-  // Get thread replies count for a message
   const getThreadCount = (messageId) => {
     const threads = threadMessages[messageId] || [];
     return threads.length;
   };
 
-  // Long press confirmation dialog
+  /* -------------------- LongPressDialog component -------------------- */
   const LongPressDialog = ({ message, onClose, onOpenThread }) => (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50">
       <div className="bg-white rounded-lg p-6 m-4 max-w-sm w-full">
@@ -3232,9 +3296,7 @@ export default function Chat() {
             className="w-full p-3 text-left rounded-lg bg-gray-100 hover:bg-gray-200"
           >
             <div className="font-medium">Reply in Chat</div>
-            <div className="text-sm text-gray-600">
-              Quick reply in main conversation
-            </div>
+            <div className="text-sm text-gray-600">Quick reply in main conversation</div>
           </button>
           <button
             onClick={() => {
@@ -3244,22 +3306,17 @@ export default function Chat() {
             className="w-full p-3 text-left rounded-lg bg-blue-100 hover:bg-blue-200"
           >
             <div className="font-medium">Reply in Nest</div>
-            <div className="text-sm text-gray-600">
-              Start or continue a focused discussion
-            </div>
+            <div className="text-sm text-gray-600">Start or continue a focused discussion</div>
           </button>
         </div>
-        <button
-          onClick={onClose}
-          className="w-full mt-4 p-2 text-gray-600 hover:text-gray-800"
-        >
+        <button onClick={onClose} className="w-full mt-4 p-2 text-gray-600 hover:text-gray-800">
           Cancel
         </button>
       </div>
     </div>
   );
 
-  // create hub
+  /* -------------------- Hub handlers -------------------- */
   const handleCreateHub = () => {
     const id = getLocalPeerId() || myId;
     if (!id) return alert("Peer not ready yet. Wait a moment and try again.");
@@ -3292,7 +3349,6 @@ export default function Chat() {
     setMenuOpen(false);
   };
 
-  // join hub
   const handleJoinHub = async () => {
     const id = prompt("Enter Hub bootstrap peer ID (the host's ID):");
     if (!id) {
@@ -3325,7 +3381,6 @@ export default function Chat() {
     setMenuOpen(false);
   };
 
-  // leave hub
   const handleLeaveClick = () => {
     setMenuOpen(false);
     setConfirmLeaveOpen(true);
@@ -3366,43 +3421,82 @@ export default function Chat() {
 
   const handleCancelLeave = () => setConfirmLeaveOpen(false);
 
-  // send chat
-  const send = () => {
-    if (!text.trim()) return;
-    const id = nanoid();
-    const msgObj = {
+  /* -------------------- Send (text or grouped images) -------------------- */
+  const send = async () => {
+    // image group send
+    if (pendingPhotos.length > 0) {
+      // we already have dataUrl previews in pendingPhotos
+      const offerId = `img-group-${Date.now()}-${Math.random()
+        .toString(36)
+        .slice(2, 7)}`;
+
+      const msgObj = {
+        id: offerId,
+        from: username || "You",
+        fromId: getLocalPeerId() || myId,
+        ts: Date.now(),
+        type: "chat",
+        imageGroup: pendingPhotos.map((p) => p.dataUrl),
+        imageMeta: pendingPhotos.map((p) => ({ name: p.name })),
+        text: caption || "",
+        deliveries: [],
+        reads: [getLocalPeerId() || myId],
+      };
+
+      setMessages((m) => {
+        const next = [...m, msgObj];
+        persistMessages(next);
+        return next;
+      });
+
+      try {
+        sendChat(msgObj);
+      } catch (e) {
+        console.warn("sendChat failed for image group", e);
+      }
+
+      setPendingPhotos([]);
+      setCaption("");
+      setText("");
+      return;
+    }
+
+    // normal text send
+    const trimmed = (text || "").trim();
+    if (!trimmed) return;
+    const id = `msg-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+    const msg = {
       id,
-      from: getLocalPeerId() || myId,
-      fromName: username,
-      text: text.trim(),
+      from: username || "You",
+      fromId: getLocalPeerId() || myId,
+      text: trimmed,
       ts: Date.now(),
-      replyTo: replyTo
-        ? { id: replyTo.id, from: replyTo.from, text: replyTo.text }
-        : null,
+      type: "chat",
       deliveries: [],
       reads: [getLocalPeerId() || myId],
+      replyTo: replyTo || null,
     };
     setMessages((m) => {
-      const next = [...m, msgObj];
+      const next = [...m, msg];
       persistMessages(next);
       return next;
     });
+
     try {
-      sendChat(msgObj);
+      sendChat(msg);
     } catch (e) {
       console.warn("sendChat failed", e);
     }
+
     setText("");
     setReplyTo(null);
   };
 
-  // reply + send ack_read
+  // reply + send ack_read on tap
   const handleTapMessage = (m) => {
     if (m.type && m.type.startsWith("system")) return;
     setReplyTo({ id: m.id, from: m.from, text: m.text });
-    const input = document.querySelector(
-      'input[placeholder="Type a message..."]'
-    );
+    const input = document.querySelector('input[placeholder="Type a message..."]');
     if (input) input.focus();
 
     const originPeerId = m.fromId || m.from;
@@ -3416,7 +3510,7 @@ export default function Chat() {
     }
   };
 
-  // render status dot
+  /* -------------------- Status dot renderer -------------------- */
   const renderStatusDot = (m) => {
     const totalPeers = peers?.length || 0;
     if (totalPeers === 0) {
@@ -3462,12 +3556,10 @@ export default function Chat() {
       );
     }
 
-    return (
-      <span className="inline-block w-2 h-2 rounded-full bg-gray-400 ml-2" />
-    );
+    return <span className="inline-block w-2 h-2 rounded-full bg-gray-400 ml-2" />;
   };
 
-  // message renderer
+  /* -------------------- Message renderer (with image groups) -------------------- */
   const renderMessage = (m, idx) => {
     const from = m.from ?? "peer";
     const txt = typeof m.text === "string" ? m.text : JSON.stringify(m.text);
@@ -3481,6 +3573,11 @@ export default function Chat() {
 
     const threadCount = getThreadCount(m.id);
 
+    // image flags
+    const isImagePreview = !!m.imagePreview;
+    const isImageGroup = Array.isArray(m.imageGroup) && m.imageGroup.length > 0;
+    const isImageMessage = isImagePreview || isImageGroup;
+
     if (isSystem) {
       return (
         <div key={`${m.id ?? m.ts}-${idx}`} className="w-full text-center my-2">
@@ -3490,6 +3587,18 @@ export default function Chat() {
         </div>
       );
     }
+
+    const bubbleWidthClass = isImageMessage ? "max-w-[80%]" : "max-w-[50%]";
+    const bubbleBgClass = isMe ? "ml-auto bg-blue-500 text-white" : "bg-white/100 text-black";
+
+    const openPreview = (src) => {
+      const win = window.open("", "_blank");
+      if (!win) return;
+      win.document.write(
+        `<html><head><title>Photo</title><meta name="viewport" content="width=device-width,initial-scale=1"></head><body style="margin:0;background:#000;display:flex;align-items:center;justify-content:center;height:100vh"><img src="${src}" style="max-width:100%;max-height:100vh;object-fit:contain"/></body></html>`
+      );
+      win.document.close();
+    };
 
     return (
       <div
@@ -3501,26 +3610,61 @@ export default function Chat() {
         onTouchEnd={handleTouchEnd}
         onTouchCancel={handleTouchEnd}
         key={`${m.id ?? m.ts}-${idx}`}
-        className={`p-2 rounded-2xl max-w-[50%] mb-2 cursor-pointer select-none relative ${
-          isMe ? "ml-auto bg-blue-500 text-white" : "bg-white/100 text-black"
-        }`}
+        className={`p-2 rounded-2xl mb-2 cursor-pointer select-none relative ${bubbleWidthClass} ${bubbleBgClass}`}
+        style={{ wordBreak: "break-word" }}
       >
         <div className="text-xs font-bold flex items-center">
           <div className="flex-1">{isMe ? "You" : from}</div>
           <div className="text-[10px] text-gray-700/70 ml-2">{time}</div>
           {isMe && renderStatusDot(m)}
         </div>
+
         {m.replyTo && (
           <div className="mt-2 mb-2 p-2 rounded border border-white/5 text-xs text-gray-600 bg-gray-300">
-            <strong className="text-xs text-blue-400">
-              Reply to {m.replyTo.from}:
-            </strong>{" "}
-            {m.replyTo.text}
+            <strong className="text-xs text-blue-400">Reply to {m.replyTo.from}:</strong>{" "}
+            <span className="inline-block ml-1 truncate" style={{ maxWidth: "100%" }}>
+              {m.replyTo.text}
+            </span>
           </div>
         )}
-        <div className="break-words">{txt}</div>
 
-        {/* Thread indicator */}
+        {/* IMAGE GROUP */}
+        {isImageGroup ? (
+          <div className="mt-2 grid grid-cols-2 gap-2">
+            {m.imageGroup.slice(0, 4).map((src, i) => (
+              <div
+                key={i}
+                className="w-36 h-36 rounded-lg overflow-hidden bg-black/5"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  openPreview(src);
+                }}
+              >
+                <img src={src} alt={`photo-${i}`} className="w-full h-full object-cover" />
+              </div>
+            ))}
+            {m.imageGroup.length > 4 && (
+              <div className="col-span-2 text-xs text-gray-500 mt-1">+{m.imageGroup.length - 4} more</div>
+            )}
+            {m.text && <div className="col-span-2 mt-2 text-sm whitespace-pre-wrap">{m.text}</div>}
+          </div>
+        ) : isImagePreview ? (
+          <div className="mt-2 flex items-center">
+            <div
+              className="w-40 h-40 rounded-lg overflow-hidden bg-black/5"
+              onClick={(e) => {
+                e.stopPropagation();
+                openPreview(m.imagePreview);
+              }}
+            >
+              <img src={m.imagePreview} alt={m.imageMeta?.name || "photo"} className="w-full h-full object-cover" />
+            </div>
+            {m.text && <div className="ml-3 break-words whitespace-pre-wrap">{txt}</div>}
+          </div>
+        ) : (
+          <div className="break-words whitespace-pre-wrap mt-1">{txt}</div>
+        )}
+
         {threadCount > 0 && (
           <div
             className="mt-2 flex items-center justify-between text-xs bg-blue-50 text-blue-600 rounded px-2 py-1 cursor-pointer hover:bg-blue-100"
@@ -3530,14 +3674,7 @@ export default function Chat() {
             }}
           >
             <div className="flex items-center space-x-1">
-              <svg
-                width="12"
-                height="12"
-                viewBox="0 0 24 24"
-                fill="none"
-                stroke="currentColor"
-                strokeWidth="2"
-              >
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
                 <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
               </svg>
               <span>
@@ -3551,87 +3688,113 @@ export default function Chat() {
     );
   };
 
-  // file input (sender) - file picker
-  const onFileSelected = async (file) => {
-    if (!file) return;
-    const offerId = `offer-${Date.now()}-${Math.random()
-      .toString(36)
-      .slice(2, 7)}`;
-    outgoingPendingOffers.current[offerId] = {
-      file,
-      acceptingPeers: new Set(),
-    };
-
-    setTransfer(offerId, {
-      direction: "sending",
-      label: file.name,
-      total: file.size || 0,
-      transferred: 0,
-      peers: [],
-    });
-
-    const meta = {
-      id: offerId,
-      name: file.name,
-      size: file.size,
-      mime: file.type,
-      from: getLocalPeerId() || myId,
-    };
-    try {
-      offerFileToPeers(meta);
-    } catch (e) {
-      console.warn("offerFileToPeers failed", e);
-    }
-
-    setMessages((m) => {
-      const sys = {
-        id: `sys-offer-${offerId}`,
-        from: "System",
-        text: `Offered file: ${file.name} (${Math.round(file.size / 1024)} KB)`,
-        ts: Date.now(),
-        type: "system",
-      };
-      const next = [...m, sys];
-      persistMessages(next);
-      return next;
-    });
-
-    setTimeout(() => {
-      try {
-        const pending = outgoingPendingOffers.current[offerId];
-        if (!pending) return;
-        if (pending.acceptingPeers.size === 0) {
-          setMessages((m) => {
-            const sys = {
-              id: `sys-offer-expire-${offerId}`,
-              from: "System",
-              text: `No one accepted the file offer: ${file.name}`,
-              ts: Date.now(),
-              type: "system",
-            };
-            const next = [...m, sys];
-            persistMessages(next);
-            return next;
-          });
-          setTimeout(() => removeTransfer(offerId), 800);
-        }
-      } catch (e) {
-        console.warn("post-offer cleanup failed", e);
-      }
-    }, 20000);
-  };
-
+  /* -------------------- File selection + previews (multi select) -------------------- */
   const handleFileInputClick = () => {
     const input = document.createElement("input");
     input.type = "file";
+    input.multiple = true;
+    input.accept = "image/*,application/*";
     input.onchange = (e) => {
-      const f = e.target.files && e.target.files[0];
-      if (f) onFileSelected(f);
+      const files = Array.from(e.target.files || []);
+      if (!files.length) return;
+      onFileSelected(files);
     };
     input.click();
   };
 
-  // accept incoming offer
+  // Accept array of files
+  const onFileSelected = async (fileOrFiles) => {
+    const files = Array.isArray(fileOrFiles) ? fileOrFiles : [fileOrFiles];
+    if (!files.length) return;
+
+    const previews = await Promise.all(
+      files.map(
+        (file) =>
+          new Promise((resolve) => {
+            const offerId = `offer-${Date.now()}-${Math.random()
+              .toString(36)
+              .slice(2, 7)}`;
+
+            outgoingPendingOffers.current[offerId] = {
+              file,
+              acceptingPeers: new Set(),
+            };
+
+            setTransfer(offerId, {
+              direction: "sending",
+              label: file.name,
+              total: file.size || 0,
+              transferred: 0,
+              peers: [],
+            });
+
+            const meta = {
+              id: offerId,
+              name: file.name,
+              size: file.size,
+              mime: file.type,
+              from: getLocalPeerId() || myId,
+            };
+            try {
+              offerFileToPeers(meta);
+            } catch (e) {
+              console.warn("offerFileToPeers failed", e);
+            }
+
+            if (file.type && file.type.startsWith("image/")) {
+              const reader = new FileReader();
+              reader.onload = (ev) =>
+                resolve({
+                  file,
+                  dataUrl: ev.target.result,
+                  name: file.name,
+                  offerId,
+                });
+              reader.readAsDataURL(file);
+            } else {
+              resolve({
+                file,
+                dataUrl: null,
+                name: file.name,
+                offerId,
+              });
+            }
+
+            setTimeout(() => {
+              try {
+                const pending = outgoingPendingOffers.current[offerId];
+                if (!pending) return;
+                if (pending.acceptingPeers.size === 0) {
+                  setMessages((m) => {
+                    const sys = {
+                      id: `sys-offer-expire-${offerId}`,
+                      from: "System",
+                      text: `No one accepted the file offer: ${file.name}`,
+                      ts: Date.now(),
+                      type: "system",
+                    };
+                    const next = [...m, sys];
+                    persistMessages(next);
+                    return next;
+                  });
+                  setTimeout(() => removeTransfer(offerId), 800);
+                }
+              } catch (e) {
+                console.warn("post-offer cleanup failed", e);
+              }
+            }, 20000);
+          })
+      )
+    );
+
+    const imagePreviews = previews
+      .filter((p) => p && p.dataUrl)
+      .map((p) => ({ file: p.file, dataUrl: p.dataUrl, name: p.name, offerId: p.offerId }));
+
+    // Append to pendingPhotos
+    setPendingPhotos((prev) => [...prev, ...imagePreviews]);
+  };
+
   const acceptFileOffer = async (offerId) => {
     const entry = incomingFileOffers[offerId];
     if (!entry) return;
@@ -3753,7 +3916,7 @@ export default function Chat() {
     });
   };
 
-  // wire up progress/completion callbacks
+  /* -------------------- File progress wiring -------------------- */
   useEffect(() => {
     const progressCb = (offerId, peerId, bytes, totalBytes) => {
       setTransfer(offerId, (prev) => ({
@@ -3787,10 +3950,8 @@ export default function Chat() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // connected peer names
-  const connectedNames = peers.length
-    ? peers.map((id) => peerNamesMap[id] || id)
-    : [];
+  /* -------------------- Connected peer names + typing summary -------------------- */
+  const connectedNames = peers.length ? peers.map((id) => peerNamesMap[id] || id) : [];
 
   const typingSummary = () => {
     const names = Object.keys(typingUsers);
@@ -3799,6 +3960,7 @@ export default function Chat() {
     return <div className="text-sm text-blue-500 mb-2">{shown} typing...</div>;
   };
 
+  /* -------------------- Incoming file offers UI -------------------- */
   const renderIncomingFileOffers = () => {
     const keys = Object.keys(incomingFileOffers);
     if (!keys.length) return null;
@@ -3807,35 +3969,22 @@ export default function Chat() {
       const offer = entry.offer;
       const remaining = Math.max(0, Math.ceil((entry.expiresAt - now) / 1000));
       return (
-        <div
-          key={k}
-          className="mb-2 p-2 rounded bg-white/10 text-sm text-black"
-        >
+        <div key={k} className="mb-2 p-2 rounded bg-white/10 text-sm text-black">
           <div className="font-semibold">
             <span className="inline-block max-w-[260px] whitespace-normal break-words">
               File offer:&nbsp;
               <strong className="break-words">{offer.name}</strong>
             </span>
-            <span className="ml-2 text-xs text-gray-500">
-              ({Math.round((offer.size || 0) / 1024)} KB)
-            </span>
+            <span className="ml-2 text-xs text-gray-500">({Math.round((offer.size || 0) / 1024)} KB)</span>
           </div>
-
           <div className="text-xs text-gray-600">
-            From: {peerNamesMap[offer.from] || offer.from} — Expires in{" "}
-            {remaining}s
+            From: {peerNamesMap[offer.from] || offer.from} — Expires in {remaining}s
           </div>
           <div className="mt-2 flex justify-center gap-2">
-            <button
-              onClick={() => acceptFileOffer(k)}
-              className="px-3 py-1 rounded bg-gradient-to-br from-green-500 to-green-600 text-white"
-            >
+            <button onClick={() => acceptFileOffer(k)} className="px-3 py-1 rounded bg-gradient-to-br from-green-500 to-green-600 text-white">
               Accept
             </button>
-            <button
-              onClick={() => ignoreFileOffer(k)}
-              className="px-3 py-1 rounded bg-gradient-to-br from-red-500 to-red-600 text-white"
-            >
+            <button onClick={() => ignoreFileOffer(k)} className="px-3 py-1 rounded bg-gradient-to-br from-red-500 to-red-600 text-white">
               Ignore
             </button>
           </div>
@@ -3844,18 +3993,18 @@ export default function Chat() {
     });
   };
 
-  const maybeNotify = (fromDisplay, text) => {
+  const maybeNotify = (fromDisplay, textVal) => {
     try {
       if (!fromDisplay || fromDisplay === username) return;
       if (!document.hidden && document.hasFocus()) return;
 
       const title = `${fromDisplay}`;
       const body =
-        typeof text === "string"
-          ? text.length > 120
-            ? text.slice(0, 117) + "..."
-            : text
-          : JSON.stringify(text);
+        typeof textVal === "string"
+          ? textVal.length > 120
+            ? textVal.slice(0, 117) + "..."
+            : textVal
+          : JSON.stringify(textVal);
       showNotification(title, {
         body,
         tag: `peershub-${fromDisplay}`,
@@ -3866,138 +4015,95 @@ export default function Chat() {
     }
   };
 
-return (
-  <>
-    {/* Thread View (overlay) */}
-    {activeThread && (
-      <div className="fixed inset-0 z-60">
-        <ReplyInThread
-          rootMessage={activeThread}
-          onClose={closeThread}
-          username={username}
-          myId={myId}
-          peers={peers}
-          threadMessages={threadMessages[activeThread.id] || []}
-          onSendThreadReply={handleSendThreadReply}
-          peerNamesMap={peerNamesMap}
-          threadTypingUsers={threadTypingUsers}
-        />
-      </div>
-    )}
-
-    {/* Long Press Dialog */}
-    {longPressMessage && !activeThread && (
-      <LongPressDialog
-        message={longPressMessage}
-        onClose={() => setLongPressMessage(null)}
-        onOpenThread={() => showThread(longPressMessage)}
-      />
-    )}
-
-    {/* Floating progress panel */}
-    {Object.keys(transfers).length > 0 && (
-      <div className="fixed left-1/2 -translate-x-1/2 top-4 z-50">
-        <div className="bg-black/80 text-white rounded-lg p-3 shadow-lg w-[min(720px,calc(100%-40px))]">
-          {Object.entries(transfers).map(([id, t]) => {
-            const pct = t.total
-              ? Math.min(100, Math.round((t.transferred / t.total) * 100))
-              : 0;
-            const label = t.label || id;
-            const directionText =
-              t.direction === "sending" ? "Sending" : "Receiving";
-            const humanTransferred = `${Math.round(
-              (t.transferred || 0) / 1024
-            )} KB`;
-            const humanTotal = `${Math.round((t.total || 0) / 1024)} KB`;
-            return (
-              <div key={id} className="mb-3 last:mb-0">
-                <div className="flex justify-between items-center text-sm mb-1">
-                  <div className="font-semibold max-w-[70%] break-words whitespace-normal">
-                    {directionText}: {label}
-                  </div>
-                  <div className="text-xs">{pct}%</div>
-                </div>
-                <div className="w-full bg-white/10 rounded h-2 overflow-hidden mb-1">
-                  <div
-                    style={{ width: `${pct}%` }}
-                    className="h-2 bg-blue-500 transition-all"
-                  />
-                </div>
-                <div className="text-xs text-white/60">
-                  {humanTransferred} / {humanTotal}
-                </div>
-              </div>
-            );
-          })}
+  /* -------------------- Render component -------------------- */
+  return (
+    <>
+      {/* Thread View (overlay) */}
+      {activeThread && (
+        <div className="fixed inset-0 z-60">
+          <ReplyInThread
+            rootMessage={activeThread}
+            onClose={closeThread}
+            username={username}
+            myId={myId}
+            peers={peers}
+            threadMessages={threadMessages[activeThread.id] || []}
+            onSendThreadReply={handleSendThreadReply}
+            peerNamesMap={peerNamesMap}
+            threadTypingUsers={threadTypingUsers}
+          />
         </div>
-      </div>
-    )}
+      )}
 
-    {/* Main Chat Container (background layer, lower z-index) */}
-    <div className="fixed inset-0 z-10 bg-gray-50 text-purple-600 p-6 flex flex-col">
-       <header className="flex items-center justify-between mb-4">
+      {/* Long Press Dialog */}
+      {longPressMessage && !activeThread && (
+        <LongPressDialog
+          message={longPressMessage}
+          onClose={() => setLongPressMessage(null)}
+          onOpenThread={() => showThread(longPressMessage)}
+        />
+      )}
+
+      {/* Floating progress panel */}
+      {Object.keys(transfers).length > 0 && (
+        <div className="fixed left-1/2 -translate-x-1/2 top-4 z-50">
+          <div className="bg-black/80 text-white rounded-lg p-3 shadow-lg w-[min(720px,calc(100%-40px))]">
+            {Object.entries(transfers).map(([id, t]) => {
+              const pct = t.total ? Math.min(100, Math.round((t.transferred / t.total) * 100)) : 0;
+              const label = t.label || id;
+              const directionText = t.direction === "sending" ? "Sending" : "Receiving";
+              const humanTransferred = `${Math.round((t.transferred || 0) / 1024)} KB`;
+              const humanTotal = `${Math.round((t.total || 0) / 1024)} KB`;
+              return (
+                <div key={id} className="mb-3 last:mb-0">
+                  <div className="flex justify-between items-center text-sm mb-1">
+                    <div className="font-semibold max-w-[70%] break-words whitespace-normal">{directionText}: {label}</div>
+                    <div className="text-xs">{pct}%</div>
+                  </div>
+                  <div className="w-full bg-white/10 rounded h-2 overflow-hidden mb-1">
+                    <div style={{ width: `${pct}%` }} className="h-2 bg-blue-500 transition-all" />
+                  </div>
+                  <div className="text-xs text-white/60">{humanTransferred} / {humanTotal}</div>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
+      {/* Main Chat Container */}
+      <div className="fixed inset-0 z-10 bg-gray-50 text-purple-600 p-6 flex flex-col">
+        <header className="flex items-center justify-between mb-4">
           <div className="flex gap-2.5">
             <div className="text-sm text-blue-600">YourID</div>
             <div className="font-mono">{myId || "..."}</div>
             <div className="text-sm text-blue-600">Name: {username}</div>
-            <div className="text-xs text-purple-500 mt-1">
-              Auto-join: {joinedBootstrap || "none"}
-            </div>
+            <div className="text-xs text-purple-500 mt-1">Auto-join: {joinedBootstrap || "none"}</div>
           </div>
 
           <div className="relative" ref={menuRef}>
-            <button
-              onClick={() => setMenuOpen((s) => !s)}
-              className="p-2 rounded-full bg-gradient-to-br from-gray-50 to-gray-50 text-white"
-              aria-label="Menu"
-            >
-              <svg
-                width="18"
-                height="18"
-                viewBox="0 0 24 24"
-                className="inline-block"
-              >
+            <button onClick={() => setMenuOpen((s) => !s)} className="p-2 rounded-full bg-gradient-to-br from-gray-50 to-gray-50 text-white" aria-label="Menu">
+              <svg width="18" height="18" viewBox="0 0 24 24" className="inline-block">
                 <circle cx="12" cy="5" r="2" fill="blue" />
                 <circle cx="12" cy="12" r="2" fill="blue" />
                 <circle cx="12" cy="19" r="2" fill="blue" />
               </svg>
             </button>
 
-            <div
-              className={`absolute right-0 mt-2 w-44 bg-white/10 backdrop-blur rounded-lg shadow-lg z-50 transform origin-top-right transition-all duration-200 ${
-                menuOpen
-                  ? "opacity-100 scale-100 pointer-events-auto"
-                  : "opacity-0 scale-95 pointer-events-none"
-              }`}
-            >
-              <button
-                onClick={handleCreateHub}
-                className="w-full text-left px-4 py-3 hover:bg-white/20 border-b border-white/5 text-green-500"
-              >
+            <div className={`absolute right-0 mt-2 w-44 bg-white/10 backdrop-blur rounded-lg shadow-lg z-50 transform origin-top-right transition-all duration-200 ${menuOpen ? "opacity-100 scale-100 pointer-events-auto" : "opacity-0 scale-95 pointer-events-none"}`}>
+              <button onClick={handleCreateHub} className="w-full text-left px-4 py-3 hover:bg-white/20 border-b border-white/5 text-green-500">
                 <span className="font-semibold">Create Hub</span>
-                <div className="text-xs text-gray-400">
-                  Make this device the host
-                </div>
+                <div className="text-xs text-gray-400">Make this device the host</div>
               </button>
 
-              <button
-                onClick={handleJoinHub}
-                className="w-full text-left px-4 py-3 hover:bg-white/20 border-b border-white/5 text-blue-500"
-              >
+              <button onClick={handleJoinHub} className="w-full text-left px-4 py-3 hover:bg-white/20 border-b border-white/5 text-blue-500">
                 <span className="font-semibold">Join Hub</span>
-                <div className="text-xs text-gray-400">
-                  Enter a host ID to join
-                </div>
+                <div className="text-xs text-gray-400">Enter a host ID to join</div>
               </button>
 
-              <button
-                onClick={handleLeaveClick}
-                className="w-full text-left px-4 py-3 hover:bg-white/20 text-red-500 rounded-b-lg"
-              >
+              <button onClick={handleLeaveClick} className="w-full text-left px-4 py-3 hover:bg-white/20 text-red-500 rounded-b-lg">
                 <span className="font-semibold">Leave</span>
-                <div className="text-xs text-gray-400">
-                  Leave and clear local history
-                </div>
+                <div className="text-xs text-gray-400">Leave and clear local history</div>
               </button>
             </div>
           </div>
@@ -4008,9 +4114,7 @@ return (
 
         <main className="flex-1 overflow-auto mb-4 min-h-0">
           <div style={{ paddingBottom: 8 }}>
-            {messages.length === 0 && (
-              <div className="text-sm text-white/60">No messages yet</div>
-            )}
+            {messages.length === 0 && <div className="text-sm text-white/60">No messages yet</div>}
             {messages.map((m, i) => renderMessage(m, i))}
             <div ref={messagesEndRef} />
           </div>
@@ -4022,125 +4126,69 @@ return (
         <footer className="mt-auto">
           {typingSummary()}
           <div className="mb-3 text-sm text-blue-600">
-            Connected peers:{" "}
-            {connectedNames.length === 0 ? (
-              <span className="text-red-500">none</span>
-            ) : (
-              connectedNames.join(", ")
-            )}
+            Connected peers: {connectedNames.length === 0 ? <span className="text-red-500">none</span> : connectedNames.join(", ")}
           </div>
 
           {renderIncomingFileOffers()}
 
           {replyTo && (
             <div className="mb-2 p-3 bg-white/10 text-gray-500 rounded-lg">
-              Replying to <strong>{replyTo.from}</strong>:{" "}
-              <span className="text-sm text-blue-400">{replyTo.text}</span>
-              <button
-                onClick={() => setReplyTo(null)}
-                className="ml-4 text-xs text-red-500"
-              >
-                x
-              </button>
+              Replying to <strong>{replyTo.from}</strong>: <span className="text-sm text-blue-400">{replyTo.text}</span>
+              <button onClick={() => setReplyTo(null)} className="ml-4 text-xs text-red-500">x</button>
             </div>
           )}
-          <div className="relative w-full flex items-center">
-            <svg
-              onClick={handleFileInputClick}
-              xmlns="http://www.w3.org/2000/svg"
-              viewBox="0 0 24 24"
-              fill="none"
-              stroke="currentColor"
-              strokeWidth="2"
-              strokeLinecap="round"
-              strokeLinejoin="round"
-              className="absolute left-3 top-1/2 -translate-y-1/2 w-5 h-5 text-blue-500 cursor-pointer hover:text-blue-700"
-              title="Attach File"
-            >
-              <path d="M21.44 11.05l-9.19 9.19a5.5 5.5 0 01-7.78-7.78l9.19-9.19a3.5 3.5 0 015 5l-9.2 9.19a1.5 1.5 0 01-2.12-2.12l8.49-8.49" />
-            </svg>
 
-            <input
-              value={text}
-              onChange={(e) => setText(e.target.value)}
-              placeholder="Type a message..."
-              className="flex-1 p-3 pl-10 pr-10 bg-white/10 placeholder-blue-300 text-blue-500 font-mono rounded-3xl border-2"
-              onKeyDown={(e) => {
-                if (e.key === "Enter") send();
-              }}
-            />
+          {/* When photos selected show preview grid + caption */}
+          {pendingPhotos.length > 0 ? (
+            <div className="mb-3 p-3 bg-white/5 rounded-lg">
+              <div className="grid grid-cols-4 gap-2 mb-2">
+                {pendingPhotos.map((p, i) => (
+                  <div key={i} className="w-16 h-16 rounded-md overflow-hidden bg-black/5">
+                    <img src={p.dataUrl} alt={p.name} className="w-full h-full object-cover" />
+                  </div>
+                ))}
+              </div>
 
-            <svg
-              onClick={send}
-              xmlns="http://www.w3.org/2000/svg"
-              viewBox="0 0 24 24"
-              fill="currentColor"
-              className="absolute right-3 top-1/2 -translate-y-1/2 w-8 h-8 text-blue-500 cursor-pointer hover:text-blue-700"
-              title="Send"
-            >
-              <path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z" />
-            </svg>
-          </div>
+              <input value={caption} onChange={(e) => setCaption(e.target.value)} placeholder="Add a caption (optional)..." className="w-full p-2 rounded border border-gray-200 mb-2 text-black" />
+
+              <div className="flex gap-2">
+                <button onClick={() => { setPendingPhotos([]); setCaption(""); }} className="px-3 py-1 rounded bg-white/10 text-sm text-red-500">Cancel</button>
+                <button onClick={() => send()} className="ml-auto px-4 py-1 rounded bg-blue-500 text-blue-500">Send {pendingPhotos.length > 1 ? `(${pendingPhotos.length})` : ""}</button>
+              </div>
+            </div>
+          ) : (
+            <div className="relative w-full flex items-center">
+              <svg onClick={handleFileInputClick} xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="absolute left-3 top-1/2 -translate-y-1/2 w-5 h-5 text-blue-500 cursor-pointer hover:text-blue-700" title="Attach File">
+                <path d="M21.44 11.05l-9.19 9.19a5.5 5.5 0 01-7.78-7.78l9.19-9.19a3.5 3.5 0 015 5l-9.2 9.19a1.5 1.5 0 01-2.12-2.12l8.49-8.49" />
+              </svg>
+
+              <input value={text} onChange={(e) => setText(e.target.value)} placeholder="Type a message..." className="flex-1 p-3 pl-10 pr-10 bg-white/10 placeholder-blue-300 text-blue-500 font-mono rounded-3xl border-2" onKeyDown={(e) => { if (e.key === "Enter") send(); }} />
+
+              <svg onClick={send} xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" className="absolute right-3 top-1/2 -translate-y-1/2 w-8 h-8 text-blue-500 cursor-pointer hover:text-blue-700" title="Send">
+                <path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z" />
+              </svg>
+            </div>
+          )}
         </footer>
-      
-    </div>
+      </div>
 
-    {/* Leave confirmation modal */}
-    {confirmLeaveOpen && (
-      <div className="fixed inset-0 z-70 flex items-center justify-center">
-        <div
-          className="absolute inset-0 bg-black/50"
-          onClick={handleCancelLeave}
-        />
-        <div className="relative bg-white/10 p-6 rounded-lg backdrop-blur text-white w-80">
-          <h3 className="text-lg font-bold mb-2">Leave Hub?</h3>
-          <p className="text-sm text-white/80 mb-4">
-            Leaving will clear your local chat history. Are you sure?
-          </p>
-          <div className="flex justify-center gap-2">
-            <button
-              onClick={handleCancelLeave}
-              className="px-3 py-2 rounded bg-gradient-to-br from-green-500 to-green-600 text-white"
-            >
-              Cancel
-            </button>
-            <button
-              onClick={handleConfirmLeave}
-              className="px-3 py-2 rounded bg-gradient-to-br from-red-500 to-red-600 text-white"
-            >
-              Leave & Clear
-            </button>
+      {/* Leave confirmation modal */}
+      {confirmLeaveOpen && (
+        <div className="fixed inset-0 z-70 flex items-center justify-center">
+          <div className="absolute inset-0 bg-black/50" onClick={handleCancelLeave} />
+          <div className="relative bg-white/10 p-6 rounded-lg backdrop-blur text-white w-80">
+            <h3 className="text-lg font-bold mb-2">Leave Hub?</h3>
+            <p className="text-sm text-white/80 mb-4">Leaving will clear your local chat history. Are you sure?</p>
+            <div className="flex justify-center gap-2">
+              <button onClick={handleCancelLeave} className="px-3 py-2 rounded bg-gradient-to-br from-green-500 to-green-600 text-white">Cancel</button>
+              <button onClick={handleConfirmLeave} className="px-3 py-2 rounded bg-gradient-to-br from-red-500 to-red-600 text-white">Leave & Clear</button>
+            </div>
           </div>
         </div>
-      </div>
-    )}
-  </>
-);
-
+      )}
+    </>
+  );
 }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 
 // Round Video Streaming
