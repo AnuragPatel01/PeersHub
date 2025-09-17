@@ -3632,9 +3632,46 @@ export default function Chat() {
     const threadCount = getThreadCount(m.id);
 
     // image flags: single preview (imagePreview) or group (imageGroup: array of src)
-    const isImagePreview = !!m.imagePreview;
-    const isImageGroup = Array.isArray(m.imageGroup) && m.imageGroup.length > 0;
+    // --- normalize image fields (handles saved shapes after refresh) ---
+    let imageGroup =
+      Array.isArray(m.imageGroup) && m.imageGroup.length
+        ? [...m.imageGroup]
+        : null;
+
+    // If imageGroup was accidentally saved as a JSON string, try to parse
+    if (!imageGroup && typeof m.imageGroup === "string") {
+      try {
+        const parsed = JSON.parse(m.imageGroup);
+        if (Array.isArray(parsed) && parsed.length) imageGroup = parsed;
+      } catch (err) {
+        // ignore parse error
+      }
+    }
+
+    // Normalize each item to a data URL string if it's an object {dataUrl} or {src}
+    if (Array.isArray(imageGroup)) {
+      imageGroup = imageGroup
+        .map((it) =>
+          typeof it === "string" ? it : it?.dataUrl || it?.src || ""
+        )
+        .filter(Boolean);
+    }
+
+    // Normalize single-image preview — accept string or object { dataUrl }
+    const imagePreview =
+      typeof m.imagePreview === "string"
+        ? m.imagePreview
+        : m.imagePreview?.dataUrl || null;
+
+    // Fallback: if preview missing but group exists, set preview to first group item
+    const normalizedImagePreview =
+      imagePreview ||
+      (Array.isArray(imageGroup) && imageGroup.length ? imageGroup[0] : null);
+
+    const isImagePreview = !!normalizedImagePreview;
+    const isImageGroup = Array.isArray(imageGroup) && imageGroup.length > 0;
     const isImageMessage = isImagePreview || isImageGroup;
+    // --- end normalization ---
 
     if (isSystem) {
       return (
@@ -3688,7 +3725,7 @@ export default function Chat() {
         {/* GROUP IMAGE BUBBLE — replace previous m.imageGroup mapping  */}
         {isImageGroup && (
           <div className="mt-2 grid grid-cols-2 gap-2">
-            {m.imageGroup.slice(0, 4).map((src, i) => (
+            {imageGroup.slice(0, 4).map((src, i) => (
               <div
                 key={i}
                 className="relative w-full rounded-lg overflow-hidden bg-black/5"
