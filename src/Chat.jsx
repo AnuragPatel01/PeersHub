@@ -3614,7 +3614,13 @@ export default function Chat() {
   // message renderer
   const renderMessage = (m, idx) => {
     const from = m.from ?? "peer";
-    const txt = typeof m.text === "string" ? m.text : JSON.stringify(m.text);
+    const txt =
+      m.text == null
+        ? ""
+        : typeof m.text === "string"
+        ? m.text
+        : JSON.stringify(m.text);
+
     const time = new Date(m.ts).toLocaleTimeString([], {
       hour: "2-digit",
       minute: "2-digit",
@@ -3665,7 +3671,6 @@ export default function Chat() {
           <div className="text-[10px] text-gray-700/70 ml-2">{time}</div>
           {isMe && renderStatusDot(m)}
         </div>
-
         {/* reply-to context */}
         {m.replyTo && (
           <div className="mt-2 mb-2 p-2 rounded border border-white/5 text-xs text-gray-600 bg-gray-300">
@@ -3680,47 +3685,50 @@ export default function Chat() {
             </span>
           </div>
         )}
-
-        {/* IMAGE MESSAGES */}
-        {isImageGroup ? (
-          // grid for group of images (2x2 max). images are squares (w-36 h-36)
+        {/* GROUP IMAGE BUBBLE — replace previous m.imageGroup mapping  */}
+        {isImageGroup && (
           <div className="mt-2 grid grid-cols-2 gap-2">
             {m.imageGroup.slice(0, 4).map((src, i) => (
               <div
                 key={i}
-                className="w-36 h-36 rounded-lg overflow-hidden bg-black/5"
+                className="relative w-full rounded-lg overflow-hidden bg-black/5"
                 onClick={(e) => {
                   e.stopPropagation();
-                  openViewer(m, i);
+                  openViewer(m, i); // or openPhotoViewer if using that
                 }}
+                style={{ paddingBottom: "100%" }} // <-- makes the div square
               >
                 <img
                   src={src}
                   alt={`photo-${i}`}
-                  className="w-full h-full object-cover"
+                  className="absolute inset-0 w-full h-full object-cover"
                 />
               </div>
             ))}
+
             {m.imageGroup.length > 4 && (
               <div className="col-span-2 text-xs text-gray-500 mt-1">
                 +{m.imageGroup.length - 4} more
               </div>
             )}
+
             {m.text && (
               <div className="col-span-2 mt-2 text-sm whitespace-pre-wrap">
                 {m.text}
               </div>
             )}
           </div>
-        ) : isImagePreview ? (
-          // single image fixed square (160x160) centered inside the bubble
-          <div className="mt-2 flex items-center">
+        )}
+        {/* SINGLE IMAGE BUBBLE  */}
+        {isImagePreview && (
+          <div className="mt-2 flex items-center justify-center">
             <div
-              className="w-40 h-40 rounded-lg overflow-hidden bg-black/5"
+              className="w-full max-w-[420px] rounded-lg overflow-hidden bg-black/5"
               onClick={(e) => {
                 e.stopPropagation();
                 openViewer(m, 0);
               }}
+              style={{ aspectRatio: "1 / 1" }} // supported in modern browsers; fallback below if needed
             >
               <img
                 src={m.imagePreview}
@@ -3728,9 +3736,14 @@ export default function Chat() {
                 className="w-full h-full object-cover"
               />
             </div>
+            {m.text && (
+              <div className="mt-2 text-sm whitespace-pre-wrap">{m.text}</div>
+            )}
           </div>
-        ) : (
-          // normal text
+        )}
+
+        {/* normal text (when message is not an image group/preview) */}
+        {!isImageMessage && (
           <div className="break-words whitespace-pre-wrap mt-1">{txt}</div>
         )}
 
@@ -4088,10 +4101,28 @@ export default function Chat() {
     return <div className="text-sm text-blue-500 mb-2">{shown} typing...</div>;
   };
 
+  // Replace your existing renderIncomingFileOffers with this
   const renderIncomingFileOffers = () => {
     const keys = Object.keys(incomingFileOffers);
     if (!keys.length) return null;
-    return keys.map((k) => {
+
+    // Only show offers that are NOT thread-scoped in the main chat UI.
+    const chatOfferKeys = keys.filter((k) => {
+      const entry = incomingFileOffers[k];
+      const offer = entry?.offer || {};
+      // Detect common thread markers and skip those in main chat UI
+      return !(
+        offer.threadRootId ||
+        offer.threadId ||
+        offer.rootId ||
+        offer.isThread ||
+        offer.type === "thread"
+      );
+    });
+
+    if (!chatOfferKeys.length) return null;
+
+    return chatOfferKeys.map((k) => {
       const entry = incomingFileOffers[k];
       const offer = entry.offer;
       const remaining = Math.max(0, Math.ceil((entry.expiresAt - now) / 1000));
