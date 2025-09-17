@@ -3021,6 +3021,7 @@ export default function Chat() {
     // DEBUG: inspect raw incoming envelope occasionally while testing
     console.debug("handleIncoming:", { from, payloadOrText });
     console.debug("SYS_TYPING recv:", { from, payloadOrText });
+
     try {
       // ---------- 1) typing (main chat or thread) ----------
       if (from === "__system_typing__" && payloadOrText) {
@@ -3308,15 +3309,66 @@ export default function Chat() {
         payloadOrText.id
       ) {
         try {
-          upsertIncomingChat(payloadOrText);
-          maybeNotify(
-            payloadOrText.fromName || payloadOrText.from,
-            payloadOrText.text
-          );
+          // Debug log - helps confirm whether sender actually included inline images.
+          console.debug("Incoming chat payload:", payloadOrText);
+
+          // Make a shallow copy so we can attach imageRefs without mutating source.
+          const incoming = { ...payloadOrText };
+
+          // Helper to detect data-URL string
+          const looksLikeDataUrl = (s) =>
+            typeof s === "string" && s.startsWith("data:");
+
+          // If the incoming message includes an inline imageGroup (array of data URLs),
+          // persist them into IndexedDB and create deterministic refs for persistence.
+          if (
+            Array.isArray(incoming.imageGroup) &&
+            incoming.imageGroup.length
+          ) {
+            const keys = [];
+            await Promise.all(
+              incoming.imageGroup.map(async (it, i) => {
+                try {
+                  if (looksLikeDataUrl(it)) {
+                    const key = `img-${incoming.id}-${i}`;
+                    await idbPut(key, it);
+                    keys.push(key);
+                  }
+                } catch (e) {
+                  console.warn("Receiver idbPut failed for incoming image:", e);
+                }
+              })
+            );
+            if (keys.length) {
+              // Attach refs for persistMessages to store instead of raw data
+              incoming.imageRefs = keys;
+              // Keep incoming.imageGroup (data URLs) in-memory so UI renders immediately.
+            }
+          }
+
+          // If the incoming message includes a single inline imagePreview (single data URL),
+          // persist and attach imageRef.
+          if (
+            incoming.imagePreview &&
+            looksLikeDataUrl(incoming.imagePreview)
+          ) {
+            try {
+              const key = `img-${incoming.id}-preview`;
+              await idbPut(key, incoming.imagePreview);
+              incoming.imageRef = key;
+              // keep imagePreview for immediate render
+            } catch (e) {
+              console.warn("Receiver idbPut failed for imagePreview:", e);
+            }
+          }
+
+          // Now hand off to your existing upsert handler (it will persist messages + hydrate)
+          upsertIncomingChat(incoming);
+          maybeNotify(incoming.fromName || incoming.from, incoming.text);
 
           // if message came from another peer and tab is visible, send ack_read
           try {
-            const origin = payloadOrText.from || payloadOrText.origin || null;
+            const origin = incoming.from || incoming.origin || null;
             const localId = getLocalPeerId() || myId;
             if (
               origin &&
@@ -3324,24 +3376,18 @@ export default function Chat() {
               document.visibilityState === "visible"
             ) {
               try {
-                // send basic ack read for chat; we pass thread info when it's a thread message
-                if (payloadOrText.type === "thread") {
-                  sendAckRead(
-                    payloadOrText.id,
-                    origin,
-                    true,
-                    payloadOrText.threadRootId
-                  );
+                if (incoming.type === "thread") {
+                  sendAckRead(incoming.id, origin, true, incoming.threadRootId);
                   addUniqueToMsgArray(
-                    payloadOrText.id,
+                    incoming.id,
                     "reads",
                     localId,
                     true,
-                    payloadOrText.threadRootId
+                    incoming.threadRootId
                   );
                 } else {
-                  sendAckRead(payloadOrText.id, origin);
-                  addUniqueToMsgArray(payloadOrText.id, "reads", localId);
+                  sendAckRead(incoming.id, origin);
+                  addUniqueToMsgArray(incoming.id, "reads", localId);
                 }
               } catch (e) {
                 console.warn("sendAckRead failed (auto visibility):", e);
