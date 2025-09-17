@@ -1,103 +1,229 @@
-// // ReplyInThread.jsx
-// import React, { useEffect, useState, useRef } from "react";
+import React, { useState, useEffect, useRef } from "react";
+import { nanoid } from "nanoid";
+import { sendChat, sendTyping, sendAckRead, getLocalPeerId } from "./webrtc";
 
-// /**
-//  * ReplyInThread
-//  *
-//  * Props:
-//  * - parentMsg: the parent message object (id, from, text, ts, etc.)
-//  * - threadMessages: array of thread messages [{id, from, fromName, text, ts, ...}]
-//  * - participants: array of peerIds
-//  * - onSend(text) => send thread message
-//  * - onClose() => close panel
-//  * - onMarkRead() => mark as read
-//  * - myId, peerNamesMap (optional)
-//  *
-//  * This is a scaffold with a tidy UI and basic accessibility.
-//  */
-// export default function ReplyInThread({
-//   parentMsg,
-//   threadMessages = [],
-//   participants = [],
-//   onSend,
-//   onClose,
-//   onMarkRead,
-//   myId,
-//   peerNamesMap = {},
-// }) {
-//   const [replyText, setReplyText] = useState("");
-//   const messagesEndRef = useRef(null);
+const ReplyInThread = ({
+  rootMessage,
+  onClose,
+  username,
+  myId,
+  peers,
+  peerNamesMap,
+  threadMessages = [],
+  onSendThreadReply,
+  onTypingInThread,
+}) => {
+  const [text, setText] = useState("");
+  const [typingUsers, setTypingUsers] = useState({});
+  const messagesEndRef = useRef(null);
+  const typingTimeoutRef = useRef(null);
 
-//   useEffect(() => {
-//     // scroll to bottom when thread changes
-//     try {
-//       messagesEndRef.current && messagesEndRef.current.scrollIntoView({ behavior: "smooth", block: "end" });
-//     } catch (e) {}
-//   }, [threadMessages]);
+  // Auto-scroll to bottom
+  useEffect(() => {
+    if (messagesEndRef.current) {
+      messagesEndRef.current.scrollIntoView({ behavior: "smooth" });
+    }
+  }, [threadMessages]);
 
-//   const handleSend = () => {
-//     const t = replyText.trim();
-//     if (!t) return;
-//     onSend && onSend(t);
-//     setReplyText("");
-//   };
+  // Handle typing indicator
+  useEffect(() => {
+    if (!username || !text) return;
 
-//   const formatTime = (ts) => {
-//     try {
-//       return new Date(ts).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
-//     } catch (e) {
-//       return "";
-//     }
-//   };
+    if (typingTimeoutRef.current) clearTimeout(typingTimeoutRef.current);
 
-//   const renderParticipant = (pid) => {
-//     const name = peerNamesMap[pid] || pid;
-//     return (
-//       <div key={pid} className="inline-block bg-gray-100 text-sm text-gray-700 px-2 py-1 rounded mr-1">
-//         {name === myId ? "You" : name}
-//       </div>
-//     );
-//   };
+    if (typeof onTypingInThread === "function") {
+      onTypingInThread(username, true, rootMessage.id);
+    }
 
-//   return (
-//     <div className="h-full flex flex-col">
-//       <div className="p-4 border-b border-gray-200 flex items-center justify-between">
-//         <div>
-//           <div className="text-sm text-gray-600">Thread</div>
-//           <div className="text-lg font-semibold">{parentMsg ? (parentMsg.from || "peer") : "Thread"}</div>
-//           <div className="text-xs text-gray-500 mt-1">{parentMsg ? parentMsg.text : ""}</div>
-//         </div>
-//         <div className="flex items-center gap-2">
-//           <button onClick={() => { onMarkRead && onMarkRead(); }} className="px-3 py-1 rounded bg-gray-100 text-sm">Mark read</button>
-//           <button onClick={() => onClose && onClose()} aria-label="Close thread" className="px-3 py-1 rounded bg-red-500 text-white">Close</button>
-//         </div>
-//       </div>
+    typingTimeoutRef.current = setTimeout(() => {
+      if (typeof onTypingInThread === "function") {
+        onTypingInThread(username, false, rootMessage.id);
+      }
+    }, 1200);
 
-//       <div className="flex-1 overflow-auto p-4 bg-white">
-//         {threadMessages.length === 0 ? (
-//           <div className="text-sm text-gray-400">No replies yet. Be the first to reply.</div>
-//         ) : (
-//           threadMessages.map((t) => (
-//             <div key={t.id} className="mb-3">
-//               <div className="text-xs text-gray-500">{t.fromName || t.from} · {formatTime(t.ts)}</div>
-//               <div className="mt-1 p-2 rounded bg-gray-100 text-gray-800">{t.text}</div>
-//             </div>
-//           ))
-//         )}
-//         <div ref={messagesEndRef} />
-//       </div>
+    return () => {
+      if (typingTimeoutRef.current) clearTimeout(typingTimeoutRef.current);
+    };
+  }, [text, username, rootMessage.id, onTypingInThread]);
 
-//       <div className="p-4 border-t border-gray-200 bg-gray-50">
-//         <div className="mb-2 text-xs text-gray-600">Participants</div>
-//         <div className="mb-3">
-//           {participants && participants.length ? participants.map(renderParticipant) : <div className="text-xs text-gray-400">No subscribers yet</div>}
-//         </div>
+  const handleSend = () => {
+    if (!text.trim()) return;
 
-//         <div className="flex gap-2">
-//           <input value={replyText} onChange={(e) => setReplyText(e.target.value)} placeholder="Reply in thread..." className="flex-1 p-2 rounded border border-gray-200" onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); handleSend(); } }} />
-//           <button onClick={handleSend} className="px-4 py-2 rounded bg-blue-600 text-white">Reply</button>
-//         </div>
-//       </div>
-//     </div>
-//   );
-// }
+    const threadReply = {
+      id: nanoid(),
+      from: getLocalPeerId() || myId,
+      fromName: username,
+      text: text.trim(),
+      ts: Date.now(),
+      type: "thread_reply",
+      threadId: rootMessage.id,
+      deliveries: [],
+      reads: [getLocalPeerId() || myId],
+    };
+
+    if (typeof onSendThreadReply === "function") {
+      onSendThreadReply(threadReply);
+    }
+
+    setText("");
+  };
+
+  const renderTime = (ts) => {
+    return new Date(ts).toLocaleTimeString([], {
+      hour: "2-digit",
+      minute: "2-digit",
+    });
+  };
+
+  const renderThreadMessage = (msg) => {
+    const isMe = (msg.fromId || msg.from) === (getLocalPeerId() || myId);
+    const from = msg.fromName || msg.from || "peer";
+
+    return (
+      <div
+        key={msg.id}
+        className={`p-3 rounded-2xl max-w-[85%] mb-3 ${
+          isMe ? "ml-auto bg-blue-500 text-white" : "bg-white text-black"
+        }`}
+      >
+        <div className="text-xs font-bold flex items-center mb-1">
+          <span className="flex-1">{isMe ? "You" : from}</span>
+          <span className="text-[10px] opacity-70 ml-2">
+            {renderTime(msg.ts)}
+          </span>
+        </div>
+        <div className="break-words text-sm">{msg.text}</div>
+      </div>
+    );
+  };
+
+  const renderRootMessage = () => {
+    const isMe = (rootMessage.fromId || rootMessage.from) === (getLocalPeerId() || myId);
+    const from = rootMessage.fromName || rootMessage.from || "peer";
+
+    return (
+      <div className="bg-gray-100 border-l-4 border-blue-500 p-3 mb-4 rounded-r-lg">
+        <div className="text-xs font-bold text-gray-600 mb-1 flex items-center">
+          <span className="flex-1">Thread started by {isMe ? "You" : from}</span>
+          <span className="text-[10px] opacity-70 ml-2">
+            {renderTime(rootMessage.ts)}
+          </span>
+        </div>
+        <div className="text-sm text-gray-800 break-words">
+          {rootMessage.text}
+        </div>
+      </div>
+    );
+  };
+
+  const typingSummary = () => {
+    const names = Object.keys(typingUsers).filter(name => name !== username);
+    if (!names.length) return null;
+    const shown = names.slice(0, 2).join(", ");
+    return (
+      <div className="text-xs text-blue-500 mb-2 px-3">
+        {shown} typing...
+      </div>
+    );
+  };
+
+  return (
+    <div className="fixed inset-0 z-50 bg-gray-50 flex flex-col">
+      {/* Header */}
+      <div className="bg-white shadow-sm p-4 flex items-center justify-between border-b">
+        <div className="flex items-center gap-3">
+          <button
+            onClick={onClose}
+            className="p-2 hover:bg-gray-100 rounded-full transition-colors"
+            aria-label="Close thread"
+          >
+            <svg
+              className="w-5 h-5 text-gray-600"
+              fill="none"
+              stroke="currentColor"
+              viewBox="0 0 24 24"
+            >
+              <path
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                strokeWidth={2}
+                d="M15 19l-7-7 7-7"
+              />
+            </svg>
+          </button>
+          <div>
+            <h2 className="font-semibold text-gray-800">Thread</h2>
+            <p className="text-xs text-gray-500">
+              {threadMessages.length} {threadMessages.length === 1 ? 'reply' : 'replies'}
+            </p>
+          </div>
+        </div>
+        <div className="text-xs text-gray-500">
+          {peers.length} connected
+        </div>
+      </div>
+
+      {/* Messages */}
+      <div className="flex-1 overflow-y-auto p-4">
+        {/* Root message */}
+        {renderRootMessage()}
+
+        {/* Thread replies */}
+        <div className="space-y-1">
+          {threadMessages.length === 0 ? (
+            <div className="text-center text-gray-500 text-sm py-8">
+              No replies yet. Start the conversation!
+            </div>
+          ) : (
+            threadMessages.map(renderThreadMessage)
+          )}
+        </div>
+
+        {/* Typing indicator */}
+        {typingSummary()}
+
+        <div ref={messagesEndRef} />
+      </div>
+
+      {/* Input */}
+      <div className="bg-white border-t p-4">
+        <div className="flex items-center gap-3">
+          <div className="flex-1 relative">
+            <input
+              value={text}
+              onChange={(e) => setText(e.target.value)}
+              placeholder="Reply in thread..."
+              className="w-full p-3 pr-12 bg-gray-50 text-gray-800 rounded-full border border-gray-200 focus:border-blue-400 focus:outline-none transition-colors"
+              onKeyDown={(e) => {
+                if (e.key === "Enter") handleSend();
+              }}
+              autoFocus
+            />
+            <button
+              onClick={handleSend}
+              disabled={!text.trim()}
+              className="absolute right-2 top-1/2 -translate-y-1/2 w-8 h-8 flex items-center justify-center rounded-full bg-blue-500 text-white disabled:bg-gray-300 disabled:cursor-not-allowed transition-colors"
+              aria-label="Send reply"
+            >
+              <svg
+                className="w-4 h-4"
+                fill="none"
+                stroke="currentColor"
+                viewBox="0 0 24 24"
+              >
+                <path
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  strokeWidth={2}
+                  d="M12 19l9 2-9-18-9 18 9-2zm0 0v-8"
+                />
+              </svg>
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+};
+
+export default ReplyInThread;
