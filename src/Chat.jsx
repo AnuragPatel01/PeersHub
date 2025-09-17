@@ -1262,7 +1262,7 @@ export default function Chat() {
         const copy = { ...s };
         copy[offerId] = {
           offer,
-          expiresAt: Date.now() + 10000,
+          expiresAt: Date.now() + 20000,
           origin: offer.from,
         };
         return copy;
@@ -1279,7 +1279,7 @@ export default function Chat() {
           delete copy[offerId];
           return copy;
         });
-      }, 10000);
+      }, 20000);
 
       maybeNotify(
         peerNamesMap[offer.from] || offer.from,
@@ -1826,7 +1826,7 @@ export default function Chat() {
       } catch (e) {
         console.warn("post-offer cleanup failed", e);
       }
-    }, 10000);
+    }, 20000);
   };
 
   const handleFileInputClick = () => {
@@ -2136,7 +2136,7 @@ export default function Chat() {
           <div className="relative" ref={menuRef}>
             <button
               onClick={() => setMenuOpen((s) => !s)}
-              className="p-2 rounded-full bg-white/10 text-white"
+              className="p-2 rounded-full bg-gradient-to-br from-gray-50 to-gray-50 text-white"
               aria-label="Menu"
             >
               <svg
