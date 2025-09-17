@@ -3942,14 +3942,22 @@ export default function Chat() {
         replyTo: replyTo ? { ...replyTo } : undefined,
       };
 
+      // persist + show locally (persistMessages will strip large data when saving)
       setMessages((m) => {
         const next = [...m, msgObj];
         persistMessages(next); // <- will survive refresh
         return next;
       });
 
+      // Broadcast: include full data URLs *only for the outgoing message*, so peers can render.
+      // We don't store these data URLs in localStorage (persistMessages will strip them).
       try {
-        sendChat(msgObj);
+        const sendObj = {
+          ...msgObj,
+          // include inline data URLs for recipients so they can render immediately
+          imageGroup: previews.map((p) => p.dataUrl),
+        };
+        sendChat(sendObj);
       } catch (e) {
         console.warn("sendChat (inline images) failed", e);
       }
