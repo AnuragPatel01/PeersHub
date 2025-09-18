@@ -3496,47 +3496,61 @@ export default function Chat() {
         payloadOrText.id
       ) {
         try {
-          // Store the message with images intact
+          // Normalize sender fields so we always have payloadOrText.fromId and payloadOrText.from
+          const canonicalFromId =
+            payloadOrText.fromId ||
+            payloadOrText.from ||
+            payloadOrText.origin ||
+            payloadOrText.peer ||
+            payloadOrText.sender ||
+            null;
+          const canonicalFromName =
+            payloadOrText.fromName || payloadOrText.name || null;
+
+          if (!payloadOrText.fromId && canonicalFromId)
+            payloadOrText.fromId = canonicalFromId;
+          if (!payloadOrText.from && (canonicalFromName || canonicalFromId)) {
+            payloadOrText.from = canonicalFromName || canonicalFromId;
+          }
+
+          console.debug("Chat/thread incoming normalized:", {
+            id: payloadOrText.id,
+            raw: {
+              from: payloadOrText.from,
+              fromId: payloadOrText.fromId,
+              fromName: payloadOrText.fromName,
+            },
+            envelopeFrom: from,
+          });
+
+          // store message and UI update
           upsertIncomingChat(payloadOrText);
           maybeNotify(
             payloadOrText.fromName || payloadOrText.from,
             payloadOrText.text
           );
 
-          // Auto-read if tab is visible
+          // acknowledgments: always send delivery first, then read (if visible)
           try {
-            const origin = payloadOrText.from || payloadOrText.origin;
-            const localId = getLocalPeerId() || myId;
-
-            if (
-              payloadOrText &&
-              typeof payloadOrText === "object" &&
-              (payloadOrText.type === "chat" ||
-                payloadOrText.type === "thread") &&
-              payloadOrText.id
-            ) {
-              try {
-                // Store the message with images intact
-                upsertIncomingChat(payloadOrText);
-                maybeNotify(
-                  payloadOrText.fromName || payloadOrText.from,
-                  payloadOrText.text
-                );
-
-                // Handle acknowledgments
-                await handleAutoAcknowledgment(payloadOrText);
-              } catch (e) {
-                console.warn("Chat message handler failed:", e, payloadOrText);
-              }
-              return;
-            }
+            await handleAutoAcknowledgment(payloadOrText);
           } catch (e) {
-            console.warn("Auto-read failed:", e);
+            console.warn(
+              "handleAutoAcknowledgment failed for chat/thread:",
+              e,
+              payloadOrText
+            );
           }
-        } catch (e) {
-          console.warn("Chat message handler failed:", e, payloadOrText);
+
+          // done handling this chat/thread object
+          return;
+        } catch (err) {
+          console.warn(
+            "Chat/thread message handler failed:",
+            err,
+            payloadOrText
+          );
+          return;
         }
-        return;
       }
 
       // 10) String fallback
