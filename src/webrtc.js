@@ -1859,22 +1859,27 @@ const sendAckDeliver = (
   threadRootId = null
 ) => {
   if (!msgId) return;
+
   const payload = {
     type: "ack_deliver",
     id: msgId,
     from: peer ? peer.id : null,
     isThread: !!isThread,
     threadRootId: threadRootId || null,
+    // keep optional 'to' when broadcasting so intermediate nodes know intended recipient
+    to: toPeerId || null,
   };
 
+  // prefer direct connection to the origin when possible
   if (toPeerId && connections[toPeerId]) {
-    // direct send to specific peer when possible
-    sendToConn(connections[toPeerId], payload);
-    return;
+    const direct = { ...payload };
+    // when sending directly we don't need 'to' field
+    delete direct.to;
+    sendToConn(connections[toPeerId], direct);
+  } else {
+    // broadcast (some peers may ignore if not relevant)
+    broadcastRaw(payload);
   }
-
-  // fallback: broadcast but include "to" so other peers can ignore if irrelevant
-  broadcastRaw({ ...payload, to: toPeerId || null });
 };
 
 // sendAckRead: now supports thread read acks
@@ -2256,9 +2261,8 @@ const setupConnection = (
         onMessage("__system_ack_deliver__", {
           fromPeer: data.from,
           id: data.id,
-          isThread: !!data.isThread,
+          isThread: data.isThread || false,
           threadRootId: data.threadRootId || null,
-          to: data.to || null,
         });
       return;
     }
@@ -2268,9 +2272,8 @@ const setupConnection = (
         onMessage("__system_ack_read__", {
           fromPeer: data.from,
           id: data.id,
-          isThread: !!data.isThread,
+          isThread: data.isThread || false,
           threadRootId: data.threadRootId || null,
-          to: data.to || null,
         });
       return;
     }
