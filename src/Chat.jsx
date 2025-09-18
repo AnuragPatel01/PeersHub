@@ -2885,7 +2885,7 @@ export default function Chat() {
 
         try {
           // messageId, peerId, isThread, threadRootId
-          sendAckRead(m.id, origin, true, rootId);
+          sendAckRead(m.id, origin, true, m.threadRootId);
           addUniqueToMsgArray(m.id, "reads", localId, true, rootId);
         } catch (e) {
           console.warn("markThreadAsRead: sendAckRead failed", e);
@@ -3129,39 +3129,27 @@ export default function Chat() {
         try {
           const origin = payloadOrText.from || payloadOrText.origin;
           const localId = getLocalPeerId() || myId;
+
           if (!origin || origin === localId) return;
 
-          // normalize a few values we'll use
-          const toPeer =
-            payloadOrText.fromId ||
-            payloadOrText.from ||
-            payloadOrText.origin ||
-            null;
-          const isThread = payloadOrText.type === "thread";
-          const msgId = payloadOrText.id;
-          const threadRootId =
-            payloadOrText.threadRootId || payloadOrText.rootId || null;
-
-          if (!toPeer) return;
-
-          // --- Always send DELIVERY ack immediately (not read) ---
-          try {
-            if (isThread) {
-              // sendAckDeliver(toPeer, messageId, isThread, threadRootId)
-              sendAckDeliver(toPeer, msgId, true, threadRootId);
-              addUniqueToMsgArray(
-                msgId,
-                "deliveries",
-                localId,
-                true,
-                threadRootId
-              );
-            } else {
-              sendAckDeliver(toPeer, msgId);
-              addUniqueToMsgArray(msgId, "deliveries", localId);
-            }
-          } catch (e) {
-            console.warn("handleAutoAcknowledgment: sendAckDeliver failed", e);
+          // Always send delivery acknowledgment immediately
+          if (payloadOrText.type === "thread") {
+            sendAckDeliver(
+              origin,
+              payloadOrText.id,
+              true,
+              payloadOrText.threadRootId
+            );
+            addUniqueToMsgArray(
+              payloadOrText.id,
+              "deliveries",
+              localId,
+              true,
+              payloadOrText.threadRootId
+            );
+          } else {
+            sendAckDeliver(origin, payloadOrText.id);
+            addUniqueToMsgArray(payloadOrText.id, "deliveries", localId);
           }
 
           // Send read acknowledgment based on visibility and focus
@@ -3170,26 +3158,48 @@ export default function Chat() {
             (document.hasFocus() || !document.hidden);
 
           if (shouldAutoRead) {
-            // small delay so the delivery ack is processed first
+            // Small delay to ensure delivery ack is processed first
+            // Small delay to ensure delivery ack is processed first
+            // Small delay to ensure delivery ack is processed first
             setTimeout(() => {
               try {
-                // double-check toPeer in closure (still available)
+                const toPeer =
+                  payloadOrText.fromId ||
+                  payloadOrText.from ||
+                  payloadOrText.origin ||
+                  null;
+                const localId = getLocalPeerId() || myId;
+
+                console.debug(
+                  "auto-ack: will send read -> to:",
+                  toPeer,
+                  "msg:",
+                  payloadOrText.id,
+                  "isThread:",
+                  payloadOrText.type === "thread",
+                  "threadRootId:",
+                  payloadOrText.threadRootId
+                );
+
                 if (!toPeer) return;
 
-                if (isThread) {
-                  // sendAckRead(messageId, toPeerId, isThread, threadRootId)
-                  sendAckRead(msgId, toPeer, true, threadRootId);
+                if (payloadOrText.type === "thread") {
+                  sendAckRead(
+                    payloadOrText.id,
+                    toPeer,
+                    true,
+                    payloadOrText.threadRootId
+                  );
                   addUniqueToMsgArray(
-                    msgId,
+                    payloadOrText.id,
                     "reads",
                     localId,
                     true,
-                    threadRootId
+                    payloadOrText.threadRootId
                   );
                 } else {
-                  // sendAckRead(messageId, toPeerId)
-                  sendAckRead(msgId, toPeer);
-                  addUniqueToMsgArray(msgId, "reads", localId);
+                  // sendAckRead(toPeerId, messageId)
+                  addUniqueToMsgArray(payloadOrText.id, "reads", localId);
                 }
               } catch (e) {
                 console.warn("auto-ack timeout block error", e);
@@ -3616,6 +3626,38 @@ export default function Chat() {
     setJoinedBootstrap(newBootstrapId || "");
   };
 
+  // init peer — always init even if username is not yet set
+  useEffect(() => {
+    // don't block peer creation on username — pass username or null
+    const p = initPeer(
+      handleIncoming,
+      handlePeerListUpdate,
+      username || "", // allow empty display name
+      handleBootstrapChange
+    );
+    peerRef.current = p;
+    p.on && p.on("open", (id) => setMyId(id));
+    const bootstrap = localStorage.getItem("ph_hub_bootstrap");
+    setJoinedBootstrap(bootstrap || "");
+    return () => {
+      try {
+        p && p.destroy && p.destroy();
+      } catch (e) {}
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []); // run once on mount
+
+  // autoscroll
+  useEffect(() => {
+    if (!messagesEndRef.current) return;
+    try {
+      messagesEndRef.current.scrollIntoView({
+        behavior: "smooth",
+        block: "end",
+      });
+    } catch (e) {}
+  }, [messages]);
+
   useEffect(() => {
     const onVisibility = () => {
       if (document.visibilityState !== "visible") return;
@@ -3647,7 +3689,7 @@ export default function Chat() {
         }
       });
 
-      // thread messages
+      // thread messages — IMPORTANT: rootId is declared here
       Object.keys(threadMessages || {}).forEach((rootId) => {
         (threadMessages[rootId] || []).forEach((m) => {
           if (!m || m.type !== "thread") return;
@@ -3680,7 +3722,9 @@ export default function Chat() {
     };
 
     document.addEventListener("visibilitychange", onVisibility);
+    // run immediately if visible now
     if (document.visibilityState === "visible") onVisibility();
+
     return () => document.removeEventListener("visibilitychange", onVisibility);
   }, [messages, threadMessages, myId]);
 
