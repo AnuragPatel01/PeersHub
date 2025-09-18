@@ -829,6 +829,876 @@
   - All existing behavior preserved (intro, reconnect, acks, etc.).
 */
 
+// import Peer from "peerjs";
+// import { nanoid } from "nanoid";
+
+// let peer = null;
+// let connections = {}; // peerId -> DataConnection
+// let peersList = [];
+// let peerNames = {};
+
+// const LS_PEER_ID = "ph_peer_id";
+// const LS_HUB_BOOTSTRAP = "ph_hub_bootstrap";
+// const LS_KNOWN_PEERS = "ph_known_peers";
+// const LS_LOCAL_NAME = "ph_name";
+// const LS_SHOULD_AUTOJOIN = "ph_should_autojoin";
+// const LS_LEFT_AT = "ph_left_at";
+
+// let reconnectInterval = null;
+// const RECONNECT_INTERVAL_MS = 3000;
+
+// const retryCounts = {};
+// const LAST_ATTEMPT = {};
+// const MAX_RETRY_PER_PEER = 6;
+// const BACKOFF_BASE_MS = 2000;
+// const COOLDOWN_AFTER_MAX = 5 * 60 * 1000;
+
+// let onMessageGlobal = null;
+// let onPeerListUpdateGlobal = null;
+// let onBootstrapChangedGlobal = null;
+
+// // NEW: sender-side progress callback: (offerId, targetPeerId, bytesSent, totalBytes) => void
+// let onFileProgressGlobal = null;
+// let onFileCompleteGlobal = null;
+
+// export const setOnFileProgress = (fn) => {
+//   onFileProgressGlobal = fn;
+// };
+// export const setOnFileComplete = (fn) => {
+//   onFileCompleteGlobal = fn;
+// };
+
+// window.__PH_debug = () => ({
+//   peerId: peer ? peer.id : null,
+//   connections: Object.keys(connections || {}),
+//   peersList,
+//   peerNames,
+//   localStorageKeys: {
+//     ph_hub_bootstrap: localStorage.getItem("ph_hub_bootstrap"),
+//     ph_should_autojoin: localStorage.getItem("ph_should_autojoin"),
+//     ph_known_peers: localStorage.getItem("ph_known_peers"),
+//     ph_left_at: localStorage.getItem("ph_left_at"),
+//   },
+//   reconnectIntervalActive: !!reconnectInterval,
+//   retryCounts: { ...retryCounts },
+//   lastAttempt: { ...LAST_ATTEMPT },
+// });
+
+// window.__PH_stopReconnect = () => {
+//   try {
+//     stopReconnectLoop();
+//     localStorage.setItem(LS_SHOULD_AUTOJOIN, "false");
+//     console.log(
+//       "Called window.__PH_stopReconnect(): reconnect loop stopped and autojoin disabled."
+//     );
+//   } catch (e) {
+//     console.warn("window.__PH_stopReconnect error", e);
+//   }
+// };
+
+// window.__PH_resumeReconnect = () => {
+//   try {
+//     localStorage.removeItem(LS_LEFT_AT);
+//     localStorage.setItem(LS_SHOULD_AUTOJOIN, "true");
+//     if (peer) {
+//       startReconnectLoop(
+//         onMessageGlobal,
+//         onPeerListUpdateGlobal,
+//         peerNames[peer.id]
+//       );
+//     }
+//     console.log(
+//       "Called window.__PH_resumeReconnect(): left marker cleared, autojoin enabled."
+//     );
+//   } catch (e) {
+//     console.warn("window.__PH_resumeReconnect error", e);
+//   }
+// };
+
+// const loadKnownPeers = () => {
+//   try {
+//     const raw = localStorage.getItem(LS_KNOWN_PEERS);
+//     if (!raw) return new Set();
+//     const arr = JSON.parse(raw);
+//     if (!Array.isArray(arr)) return new Set();
+//     return new Set(arr);
+//   } catch (e) {
+//     return new Set();
+//   }
+// };
+
+// const saveKnownPeers = (set) => {
+//   try {
+//     localStorage.setItem(LS_KNOWN_PEERS, JSON.stringify(Array.from(set)));
+//   } catch (e) {}
+// };
+
+// const addKnownPeer = (id) => {
+//   if (!id || id === getLocalPeerId()) return;
+//   const s = loadKnownPeers();
+//   s.add(id);
+//   saveKnownPeers(s);
+// };
+
+// // Updated: do NOT stringify objects — we rely on structured clone for objects with ArrayBuffer/Blob
+// const sendToConn = (conn, payload) => {
+//   try {
+//     if (!conn || conn.open === false) return;
+//     if (typeof payload === "string") conn.send(payload);
+//     else conn.send(payload); // allow structured clone (ArrayBuffer, Blob, objects)
+//   } catch (e) {
+//     console.warn("Send failed", e);
+//   }
+// };
+
+// const broadcastRaw = (payload) => {
+//   Object.values(connections).forEach((conn) => {
+//     try {
+//       sendToConn(conn, payload);
+//     } catch (e) {}
+//   });
+// };
+
+// export const sendChat = (msgObj) => {
+//   const payload = { type: "chat", ...msgObj };
+//   broadcastRaw(payload);
+// };
+
+// // sendTyping: now accepts optional threadRootId
+// export const sendTyping = (fromName, isTyping, threadRootId = null) => {
+//   try {
+//     const payload = {
+//       type: "typing",
+//       fromName,
+//       isTyping: !!isTyping,
+//       // include threadRootId (null for main chat)
+//       threadRootId: threadRootId || null,
+//     };
+//     // DEBUG: outgoing typing envelope
+//     console.debug("OUTGOING typing:", payload);
+//     broadcastRaw(payload);
+//   } catch (e) {
+//     console.warn("sendTyping failed:", e);
+//   }
+// };
+
+// const sendAckDeliver = (toPeerId, msgId) => {
+//   if (!msgId) return;
+//   const conn = connections[toPeerId];
+//   if (conn) {
+//     sendToConn(conn, { type: "ack_deliver", id: msgId, from: peer.id });
+//   } else {
+//     broadcastRaw({
+//       type: "ack_deliver",
+//       id: msgId,
+//       from: peer.id,
+//       to: toPeerId,
+//     });
+//   }
+// };
+
+// // sendAckRead: now supports thread read acks
+// export const sendAckRead = (
+//   msgId,
+//   originPeerId = null,
+//   isThread = false,
+//   threadRootId = null
+// ) => {
+//   if (!msgId) return;
+//   try {
+//     const payload = {
+//       type: "ack_read",
+//       id: msgId,
+//       from: peer ? peer.id : null,
+//       // include thread marker and thread root id (null for main chat)
+//       isThread: !!isThread,
+//       threadRootId: threadRootId || null,
+//       to: originPeerId || null, // optional "to" for targeted delivery
+//     };
+
+//     // DEBUG: outgoing ack read
+//     console.debug("OUTGOING ack_read:", payload);
+
+//     if (originPeerId && connections[originPeerId]) {
+//       // prefer direct send to the origin peer
+//       const direct = { ...payload };
+//       // remove 'to' when sending directly (not needed)
+//       delete direct.to;
+//       sendToConn(connections[originPeerId], direct);
+//       return;
+//     }
+
+//     // broadcast to everyone (some peers will ignore if not relevant)
+//     broadcastRaw(payload);
+//   } catch (e) {
+//     console.warn("sendAckRead failed", e);
+//   }
+// };
+
+// export const broadcastSystem = (type, text, id = null) => {
+//   try {
+//     const payload = {
+//       type: type || "system_public",
+//       text: text || "",
+//       id: id || `sys-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+//       origin: peer ? peer.id : null,
+//     };
+//     broadcastRaw(payload);
+//   } catch (e) {
+//     console.warn("broadcastSystem failed", e);
+//   }
+// };
+
+// export const getPeers = () => [...peersList];
+// export const getPeerNames = () => ({ ...peerNames });
+// export const getLocalPeerId = () =>
+//   peer ? peer.id : localStorage.getItem(LS_PEER_ID) || null;
+// export const getKnownPeers = () => Array.from(loadKnownPeers());
+
+// /* ---------- File transfer helpers ---------- */
+// // file offer structure: { type: 'file_offer', id: offerId, from: peer.id, name, size, mime }
+// // file offer response: { type: 'file_offer_response', id: offerId, from: peer.id, accept: true/false }
+// // file_chunk: { type: 'file_chunk', id: offerId, seq, chunk (ArrayBuffer), final: boolean }
+// // file_transfer_done: { type: 'file_transfer_done', id: offerId }
+
+// // sender: create offer to specific peers (or broadcast)
+// export const offerFileToPeers = (fileMeta, targetPeerIds = []) => {
+//   // fileMeta must include: offerId, name, size, mime
+//   const payload = {
+//     type: "file_offer",
+//     ...fileMeta,
+//     from: peer ? peer.id : null,
+//   };
+//   if (!targetPeerIds || targetPeerIds.length === 0) {
+//     broadcastRaw(payload);
+//     return;
+//   }
+//   targetPeerIds.forEach((pid) => {
+//     const conn = connections[pid];
+//     if (conn) sendToConn(conn, payload);
+//   });
+// };
+
+// // internal: start streaming file to one specific peer connection
+// const streamFileToConn = async (conn, file, offerId) => {
+//   try {
+//     if (!conn || conn.open === false) return;
+//     const reader = file.stream().getReader();
+//     let seq = 0;
+//     let bytesSent = 0;
+//     const totalBytes = file.size || 0;
+
+//     while (true) {
+//       const { done, value } = await reader.read();
+//       if (done) break;
+
+//       // value is typically a Uint8Array chunk
+//       const arrBuf = value && value.buffer ? value.buffer : value;
+//       try {
+//         sendToConn(conn, {
+//           type: "file_chunk",
+//           id: offerId,
+//           seq: seq++,
+//           chunk: arrBuf,
+//           final: false,
+//         });
+//       } catch (e) {
+//         console.warn("sendToConn chunk failed", e);
+//       }
+
+//       // update local bytes counter + progress hook
+//       try {
+//         const chunkBytes =
+//           (value && value.byteLength) || (arrBuf && arrBuf.byteLength) || 0;
+//         bytesSent += chunkBytes;
+//         if (typeof onFileProgressGlobal === "function") {
+//           onFileProgressGlobal(offerId, conn.peer, bytesSent, totalBytes);
+//         }
+//       } catch (e) {
+//         // swallow progress errors
+//       }
+
+//       // yield briefly (avoid blocking)
+//       await new Promise((r) => setTimeout(r, 0));
+//     }
+
+//     // ---------------- FINALIZATION BLOCK (place here) ----------------
+//     try {
+//       // final marker: single final chunk (null)
+//       sendToConn(conn, {
+//         type: "file_chunk",
+//         id: offerId,
+//         seq: seq,
+//         chunk: null,
+//         final: true,
+//       });
+
+//       // notify done to peer
+//       sendToConn(conn, {
+//         type: "file_transfer_done",
+//         id: offerId,
+//         from: peer.id,
+//       });
+
+//       // ensure UI sees 100% progress
+//       try {
+//         if (typeof onFileProgressGlobal === "function") {
+//           onFileProgressGlobal(offerId, conn.peer, totalBytes, totalBytes);
+//         }
+//       } catch (e) {}
+
+//       // notify completion hook if UI registered it
+//       try {
+//         if (typeof onFileCompleteGlobal === "function") {
+//           onFileCompleteGlobal(offerId, conn.peer);
+//         }
+//       } catch (e) {}
+//     } catch (e) {
+//       console.warn("streamFileToConn finalization error", e);
+//       try {
+//         sendToConn(conn, {
+//           type: "file_transfer_cancel",
+//           id: offerId,
+//           from: peer.id,
+//           reason: e && e.message,
+//         });
+//       } catch (err) {}
+//     }
+//     // -----------------------------------------------------------------
+//   } catch (e) {
+//     console.warn("streamFileToConn error", e);
+//     try {
+//       sendToConn(conn, {
+//         type: "file_transfer_cancel",
+//         id: offerId,
+//         from: peer.id,
+//         reason: e && e.message,
+//       });
+//     } catch (err) {}
+//   }
+// };
+
+// // public: sender triggers streaming to a set of accepting peers
+// export const startSendingFile = (file, offerId, acceptingPeerIds = []) => {
+//   acceptingPeerIds.forEach((pid) => {
+//     const conn = connections[pid];
+//     if (conn) streamFileToConn(conn, file, offerId);
+//   });
+// };
+
+// // receiver: helper to respond to offer
+// export const respondToFileOffer = (offerId, toPeerId, accept) => {
+//   const conn = connections[toPeerId];
+//   if (!conn) {
+//     // fallback broadcast so origin gets it
+//     broadcastRaw({
+//       type: "file_offer_response",
+//       id: offerId,
+//       from: peer.id,
+//       accept,
+//     });
+//     return;
+//   }
+//   sendToConn(conn, {
+//     type: "file_offer_response",
+//     id: offerId,
+//     from: peer.id,
+//     accept,
+//   });
+// };
+
+// /* ---------- parse incoming raw data ---------- */
+// const parseMessage = (raw) => {
+//   if (typeof raw === "string") {
+//     try {
+//       return JSON.parse(raw);
+//     } catch (e) {
+//       return { type: "chat", text: raw };
+//     }
+//   }
+//   if (typeof raw === "object" && raw !== null) return raw;
+//   return { type: "chat", text: String(raw) };
+// };
+
+// /* ---------- setupConnection (updated to route file messages to UI) ---------- */
+// const setupConnection = (
+//   conn,
+//   onMessage,
+//   onPeerListUpdate,
+//   localName = "Anonymous"
+// ) => {
+//   try {
+//     const leftAt = localStorage.getItem(LS_LEFT_AT);
+//     if (leftAt) {
+//       try {
+//         conn.close && conn.close();
+//       } catch (e) {}
+//       return;
+//     }
+//   } catch (e) {
+//     console.warn("PH: error checking left marker before setupConnection:", e);
+//   }
+
+//   conn.on("open", () => {
+//     connections[conn.peer] = conn;
+//     if (!peersList.includes(conn.peer)) peersList.push(conn.peer);
+//     if (onPeerListUpdate)
+//       try {
+//         onPeerListUpdate([...peersList]);
+//       } catch (e) {
+//         console.warn(e);
+//       }
+//     retryCounts[conn.peer] = 0;
+//     LAST_ATTEMPT[conn.peer] = 0;
+//     sendToConn(conn, {
+//       type: "intro",
+//       id: peer.id,
+//       name: peerNames[peer.id] || localName,
+//       peers: [...peersList],
+//     });
+//   });
+
+//   conn.on("data", async (raw) => {
+//     const data = parseMessage(raw);
+//     if (!data || typeof data !== "object") return;
+
+//     if (data.type === "system_leave") {
+//       const origin = data.origin || null;
+//       if (origin) {
+//         retryCounts[origin] = MAX_RETRY_PER_PEER;
+//         LAST_ATTEMPT[origin] = Date.now();
+//       }
+//       if (onMessage) onMessage("__system_leave__", data);
+//       return;
+//     }
+
+//     if (data.to && data.to !== peer.id) return;
+
+//     if (data.type === "intro") {
+//       if (data.id && data.name) peerNames[data.id] = data.name;
+//       if (data.id && !peersList.includes(data.id)) peersList.push(data.id);
+//       (data.peers || []).forEach((p) => {
+//         if (!p || p === peer.id) return;
+//         addKnownPeer(p);
+//         try {
+//           const leftAt = localStorage.getItem(LS_LEFT_AT);
+//           if (leftAt) return;
+//         } catch (e) {}
+//         if (!connections[p])
+//           setTimeout(() => {
+//             try {
+//               connectToPeer(
+//                 p,
+//                 onMessageGlobal,
+//                 onPeerListUpdateGlobal,
+//                 peerNames[peer.id] || localName
+//               );
+//             } catch (e) {
+//               console.warn("PH: connectToPeer failed for known peer", p, e);
+//             }
+//           }, 100);
+//       });
+//       if (onPeerListUpdate)
+//         try {
+//           onPeerListUpdate([...peersList]);
+//         } catch (e) {
+//           console.warn(e);
+//         }
+//       return;
+//     }
+
+//     // file transfer signaling/flow
+//     if (data.type === "file_offer") {
+//       // forward offer to UI so it can present accept/ignore prompt
+//       if (onMessage) onMessage("__system_file_offer__", data);
+//       return;
+//     }
+
+//     if (data.type === "file_offer_response") {
+//       // forward response to UI (sender will start streaming if accept:true)
+//       if (onMessage) onMessage("__system_file_offer_response__", data);
+//       return;
+//     }
+
+//     if (data.type === "file_chunk") {
+//       // chunks may contain ArrayBuffer in data.chunk (structured)
+//       if (onMessage) onMessage("__system_file_chunk__", data);
+//       return;
+//     }
+
+//     if (
+//       data.type === "file_transfer_done" ||
+//       data.type === "file_transfer_cancel"
+//     ) {
+//       if (onMessage) onMessage("__system_file_transfer_done__", data);
+//       return;
+//     }
+
+//     if (data.type === "typing") {
+//       if (onMessage)
+//         onMessage("__system_typing__", {
+//           fromName: data.fromName || data.from || data.name,
+//           isTyping: data.isTyping ?? data.typing ?? false,
+//           threadRootId: data.threadRootId || data.rootId || null,
+//         });
+//       return;
+//     }
+
+//     if (data.type === "chat") {
+//       if (onMessage) onMessage(data.from, data);
+//       const origin = data.origin || data.from;
+//       if (origin && origin !== peer.id) {
+//         try {
+//           sendAckDeliver(origin, data.id);
+//         } catch (e) {
+//           broadcastRaw({
+//             type: "ack_deliver",
+//             id: data.id,
+//             from: peer.id,
+//             to: origin,
+//           });
+//         }
+//       }
+//       return;
+//     }
+
+//     if (data.type === "ack_deliver") {
+//       if (onMessage)
+//         onMessage("__system_ack_deliver__", {
+//           fromPeer: data.from,
+//           id: data.id,
+//         });
+//       return;
+//     }
+
+//     if (data.type === "ack_read") {
+//       if (onMessage)
+//         onMessage("__system_ack_read__", { fromPeer: data.from, id: data.id });
+//       return;
+//     }
+
+//     if (onMessage) onMessage(data.from || conn.peer, data);
+//   });
+
+//   conn.on("close", () => {
+//     try {
+//       delete connections[conn.peer];
+//     } catch (e) {}
+//     peersList = peersList.filter((p) => p !== conn.peer);
+//     delete peerNames[conn.peer];
+//     if (onPeerListUpdate)
+//       try {
+//         onPeerListUpdate([...peersList]);
+//       } catch (e) {
+//         console.warn(e);
+//       }
+//     try {
+//       addKnownPeer(conn.peer);
+//     } catch (e) {}
+//     startReconnectLoop(
+//       onMessageGlobal,
+//       onPeerListUpdateGlobal,
+//       peerNames[peer.id]
+//     );
+//   });
+
+//   conn.on("error", (err) => {
+//     console.warn("Connection error with", conn.peer, err);
+//     try {
+//       addKnownPeer(conn.peer);
+//     } catch (e) {}
+//     startReconnectLoop(
+//       onMessageGlobal,
+//       onPeerListUpdateGlobal,
+//       peerNames[peer.id]
+//     );
+//   });
+// };
+
+// const startReconnectLoop = (onMessage, onPeerListUpdate, localName) => {
+//   const leftAt = parseInt(localStorage.getItem(LS_LEFT_AT) || "0", 10);
+//   if (leftAt && !isNaN(leftAt)) {
+//     console.log(
+//       "PH: startReconnectLoop blocked because ph_left_at present:",
+//       leftAt
+//     );
+//     return;
+//   }
+//   const shouldAutoNow = localStorage.getItem(LS_SHOULD_AUTOJOIN) === "true";
+//   if (!shouldAutoNow) {
+//     console.log(
+//       "PH: startReconnectLoop skipped because autojoin flag is false"
+//     );
+//     return;
+//   }
+//   stopReconnectLoop();
+//   reconnectInterval = setInterval(() => {
+//     const shouldAuto = localStorage.getItem(LS_SHOULD_AUTOJOIN) === "true";
+//     const leftNow = localStorage.getItem(LS_LEFT_AT);
+//     if (!shouldAuto || leftNow) {
+//       stopReconnectLoop();
+//       return;
+//     }
+//     const bootstrap = localStorage.getItem(LS_HUB_BOOTSTRAP);
+//     if (
+//       bootstrap &&
+//       bootstrap !== getLocalPeerId() &&
+//       !connections[bootstrap]
+//     ) {
+//       try {
+//         connectToPeer(bootstrap, onMessage, onPeerListUpdate, localName);
+//       } catch (e) {
+//         console.warn("PH: reconnect loop bootstrap connect failed", e);
+//       }
+//     }
+//     const known = loadKnownPeers();
+//     known.forEach((p) => {
+//       if (!p || p === getLocalPeerId()) return;
+//       if (!connections[p]) {
+//         try {
+//           connectToPeer(p, onMessage, onPeerListUpdate, localName);
+//         } catch (e) {
+//           console.warn("PH: reconnect loop known peer connect failed", e);
+//         }
+//       }
+//     });
+//   }, RECONNECT_INTERVAL_MS);
+// };
+
+// const stopReconnectLoop = () => {
+//   if (reconnectInterval) {
+//     clearInterval(reconnectInterval);
+//     reconnectInterval = null;
+//   }
+// };
+
+// export const connectToPeer = (
+//   peerId,
+//   onMessage,
+//   onPeerListUpdate,
+//   localName = "Anonymous"
+// ) => {
+//   try {
+//     if (localStorage.getItem(LS_LEFT_AT)) {
+//       retryCounts[peerId] = MAX_RETRY_PER_PEER;
+//       LAST_ATTEMPT[peerId] = Date.now();
+//       return;
+//     }
+//   } catch (e) {}
+//   if (!peer) return;
+//   if (!peerId) return;
+//   if (peerId === peer.id) return;
+//   if (connections[peerId]) return;
+//   const now = Date.now();
+//   const last = LAST_ATTEMPT[peerId] || 0;
+//   const tries = retryCounts[peerId] || 0;
+//   if (tries >= MAX_RETRY_PER_PEER) {
+//     if (now - last < COOLDOWN_AFTER_MAX) return;
+//     else retryCounts[peerId] = 0;
+//   }
+//   const backoff = BACKOFF_BASE_MS * Math.pow(2, tries);
+//   if (now - last < backoff) return;
+//   try {
+//     LAST_ATTEMPT[peerId] = now;
+//     retryCounts[peerId] = (retryCounts[peerId] || 0) + 1;
+//     const conn = peer.connect(peerId, { reliable: true });
+//     setupConnection(conn, onMessage, onPeerListUpdate, localName);
+//   } catch (e) {
+//     console.warn("connectToPeer error", e);
+//   }
+// };
+
+// export const joinHub = (bootstrapPeerId) => {
+//   if (!bootstrapPeerId) return;
+//   localStorage.setItem(LS_HUB_BOOTSTRAP, bootstrapPeerId);
+//   localStorage.setItem(LS_SHOULD_AUTOJOIN, "true");
+//   localStorage.removeItem(LS_LEFT_AT);
+//   if (onBootstrapChangedGlobal) onBootstrapChangedGlobal(bootstrapPeerId);
+// };
+
+// export const leaveHub = () => {
+//   // stop reconnect loop immediately
+//   try {
+//     stopReconnectLoop();
+//   } catch (e) {
+//     console.warn("leaveHub: stopReconnectLoop failed", e);
+//   }
+
+//   // set left marker FIRST to prevent any reconnect racing
+//   try {
+//     localStorage.setItem(LS_LEFT_AT, Date.now().toString());
+//     // also proactively disable autojoin flag
+//     localStorage.setItem(LS_SHOULD_AUTOJOIN, "false");
+//   } catch (e) {
+//     console.warn("leaveHub: failed to set left marker / disable autojoin", e);
+//   }
+
+//   // close all active DataConnections
+//   Object.values(connections).forEach((conn) => {
+//     try {
+//       conn.close && conn.close();
+//     } catch (e) {
+//       console.warn("error closing conn on leaveHub", e);
+//     }
+//   });
+
+//   // try to broadcast a public leave notice so others can reduce attempts sooner
+//   try {
+//     const myId = getLocalPeerId();
+//     const myName =
+//       peerNames[myId] || localStorage.getItem(LS_LOCAL_NAME) || "Unknown";
+//     broadcastSystem(
+//       "system_leave",
+//       `${myName} left the hub`,
+//       `sys-leave-${myId || "unknown"}`
+//     );
+//   } catch (e) {
+//     console.warn("PH: failed to broadcast leave", e);
+//   }
+
+//   // clear in-memory connection state
+//   connections = {};
+//   peersList = [];
+//   peerNames = {};
+
+//   // clear persistence keys — do each call so one failure doesn't abort the rest
+//   try {
+//     localStorage.removeItem(LS_HUB_BOOTSTRAP);
+//   } catch (e) {
+//     console.warn("leaveHub: remove ph_hub_bootstrap failed", e);
+//   }
+//   try {
+//     localStorage.removeItem(LS_SHOULD_AUTOJOIN);
+//   } catch (e) {
+//     console.warn("leaveHub: remove ph_should_autojoin failed", e);
+//   }
+//   try {
+//     localStorage.removeItem(LS_KNOWN_PEERS);
+//   } catch (e) {
+//     console.warn("leaveHub: remove ph_known_peers failed", e);
+//   }
+//   // Note: we already set LS_LEFT_AT above; don't overwrite it here.
+
+//   // notify UI callbacks
+//   if (onPeerListUpdateGlobal) {
+//     try {
+//       onPeerListUpdateGlobal([...peersList]);
+//     } catch (e) {}
+//   }
+//   if (onBootstrapChangedGlobal) {
+//     try {
+//       onBootstrapChangedGlobal(null);
+//     } catch (e) {}
+//   }
+
+//   console.log(
+//     "PH: leaveHub() -> cleared bootstrap, autojoin, known peers and set left marker"
+//   );
+// };
+
+// export const initPeer = (
+//   onMessage,
+//   onPeerListUpdate,
+//   localName = "Anonymous",
+//   onBootstrapChange = null
+// ) => {
+//   onMessageGlobal = onMessage || null;
+//   onPeerListUpdateGlobal = onPeerListUpdate || null;
+//   onBootstrapChangedGlobal = onBootstrapChange || null;
+//   let storedId = localStorage.getItem(LS_PEER_ID);
+//   if (!storedId) {
+//     storedId = nanoid(6);
+//     localStorage.setItem(LS_PEER_ID, storedId);
+//   }
+//   const createPeerWithId = (id) => {
+//     try {
+//       peer = new Peer(id);
+//       peer.on("open", (idOpen) => {
+//         localStorage.setItem(LS_PEER_ID, idOpen);
+//         peerNames[idOpen] = localName;
+//         const shouldAuto = localStorage.getItem(LS_SHOULD_AUTOJOIN) === "true";
+//         if (shouldAuto) {
+//           const bootstrap = localStorage.getItem(LS_HUB_BOOTSTRAP);
+//           if (bootstrap && bootstrap !== idOpen)
+//             try {
+//               connectToPeer(
+//                 bootstrap,
+//                 onMessageGlobal,
+//                 onPeerListUpdateGlobal,
+//                 localName
+//               );
+//             } catch (e) {}
+//           const known = loadKnownPeers();
+//           known.forEach((p) => {
+//             if (!p || p === idOpen) return;
+//             if (!connections[p])
+//               try {
+//                 connectToPeer(
+//                   p,
+//                   onMessageGlobal,
+//                   onPeerListUpdateGlobal,
+//                   localName
+//                 );
+//               } catch (e) {}
+//           });
+//           startReconnectLoop(
+//             onMessageGlobal,
+//             onPeerListUpdateGlobal,
+//             localName
+//           );
+//         } else stopReconnectLoop();
+//       });
+//       peer.on("connection", (conn) => {
+//         try {
+//           const leftAt = localStorage.getItem(LS_LEFT_AT);
+//           if (leftAt) {
+//             conn.close && conn.close();
+//             return;
+//           }
+//         } catch (e) {}
+//         setupConnection(
+//           conn,
+//           onMessageGlobal,
+//           onPeerListUpdateGlobal,
+//           localName
+//         );
+//       });
+//       peer.on("error", (err) => {
+//         console.warn("Peer error", err);
+//         try {
+//           if (err && err.type === "unavailable-id") {
+//             const newId = nanoid(6);
+//             localStorage.setItem(LS_PEER_ID, newId);
+//             try {
+//               peer.destroy && peer.destroy();
+//             } catch (e) {}
+//             createPeerWithId(newId);
+//           }
+//         } catch (e) {}
+//       });
+//       return peer;
+//     } catch (e) {
+//       console.warn("createPeerWithId failed", e);
+//       const newId = nanoid(6);
+//       localStorage.setItem(LS_PEER_ID, newId);
+//       return createPeerWithId(newId);
+//     }
+//   };
+//   return createPeerWithId(storedId);
+// };
+
+// // expose a helper to request file save permission from outside if needed
+// export const supportsNativeFileSystem = () => {
+//   return (
+//     typeof window.showSaveFilePicker === "function" ||
+//     typeof window.chooseFileSystemEntries === "function"
+//   );
+// };
+
+// respondToFileOffer, offerFileToPeers, startSendingFile exported earlier
+
+// ---------- end of webrtc.js ----------
+
 import Peer from "peerjs";
 import { nanoid } from "nanoid";
 
@@ -982,19 +1852,29 @@ export const sendTyping = (fromName, isTyping, threadRootId = null) => {
   }
 };
 
-const sendAckDeliver = (toPeerId, msgId) => {
+const sendAckDeliver = (
+  toPeerId,
+  msgId,
+  isThread = false,
+  threadRootId = null
+) => {
   if (!msgId) return;
-  const conn = connections[toPeerId];
-  if (conn) {
-    sendToConn(conn, { type: "ack_deliver", id: msgId, from: peer.id });
-  } else {
-    broadcastRaw({
-      type: "ack_deliver",
-      id: msgId,
-      from: peer.id,
-      to: toPeerId,
-    });
+  const payload = {
+    type: "ack_deliver",
+    id: msgId,
+    from: peer ? peer.id : null,
+    isThread: !!isThread,
+    threadRootId: threadRootId || null,
+  };
+
+  if (toPeerId && connections[toPeerId]) {
+    // direct send to specific peer when possible
+    sendToConn(connections[toPeerId], payload);
+    return;
   }
+
+  // fallback: broadcast but include "to" so other peers can ignore if irrelevant
+  broadcastRaw({ ...payload, to: toPeerId || null });
 };
 
 // sendAckRead: now supports thread read acks
@@ -1349,13 +2229,22 @@ const setupConnection = (
       const origin = data.origin || data.from;
       if (origin && origin !== peer.id) {
         try {
-          sendAckDeliver(origin, data.id);
+          // pass through thread metadata so sender can map delivery to the right (chat | thread)
+          sendAckDeliver(
+            origin,
+            data.id,
+            !!data.isThread,
+            data.threadRootId || null
+          );
         } catch (e) {
+          // fallback: broadcast with metadata (older peers will ignore unknown fields)
           broadcastRaw({
             type: "ack_deliver",
             id: data.id,
             from: peer.id,
             to: origin,
+            isThread: !!data.isThread,
+            threadRootId: data.threadRootId || null,
           });
         }
       }
@@ -1367,13 +2256,22 @@ const setupConnection = (
         onMessage("__system_ack_deliver__", {
           fromPeer: data.from,
           id: data.id,
+          isThread: !!data.isThread,
+          threadRootId: data.threadRootId || null,
+          to: data.to || null,
         });
       return;
     }
 
     if (data.type === "ack_read") {
       if (onMessage)
-        onMessage("__system_ack_read__", { fromPeer: data.from, id: data.id });
+        onMessage("__system_ack_read__", {
+          fromPeer: data.from,
+          id: data.id,
+          isThread: !!data.isThread,
+          threadRootId: data.threadRootId || null,
+          to: data.to || null,
+        });
       return;
     }
 
@@ -1694,7 +2592,3 @@ export const supportsNativeFileSystem = () => {
     typeof window.chooseFileSystemEntries === "function"
   );
 };
-
-// respondToFileOffer, offerFileToPeers, startSendingFile exported earlier
-
-// ---------- end of webrtc.js ----------

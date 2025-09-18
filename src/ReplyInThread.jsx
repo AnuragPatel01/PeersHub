@@ -359,7 +359,7 @@ const ReplyInThread = ({
             {/* +N more indicator */}
             {m.imageGroup.length > 4 && (
               <div
-                className="mt-2 text-xs text-white font-bold text-center cursor-pointer"
+                className="mt-2 text-xs text-gray-500 font-bold text-center cursor-pointer"
                 onClick={(e) => {
                   e.stopPropagation();
                   openViewer(m.imageGroup, 4);

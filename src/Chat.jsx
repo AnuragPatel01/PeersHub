@@ -4319,7 +4319,7 @@ export default function Chat() {
             ))}
 
             {imageGroup.length > 4 && (
-              <div className="col-span-2 text-xs text-gray-500 mt-1">
+              <div className="col-span-2 text-xs text-gray-500  font-bold mt-1">
                 +{imageGroup.length - 4} more
               </div>
             )}
