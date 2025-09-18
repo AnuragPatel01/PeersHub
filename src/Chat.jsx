@@ -2382,7 +2382,6 @@ export default function Chat() {
     return [];
   });
 
-  // hydrate any messages that have imageRefs but no imageGroup (runs after mount & on new messages)
   // after messages state is defined
   useEffect(() => {
     let cancelled = false;
@@ -2393,78 +2392,9 @@ export default function Chat() {
         const parsed = JSON.parse(raw);
         if (!Array.isArray(parsed)) return;
 
-        // --- Normalize any messages that contain heavy inline imageGroup data URLs ---
-        // Save inline data: URLs into IndexedDB and replace with imageRefs in localStorage
-        let needPersist = false;
-        const normalized = await Promise.all(
-          parsed.map(async (m) => {
-            // shallow copy to avoid mutating parsed array directly
-            const copy = { ...m };
-
-            // handle imageGroup array containing data URLs
-            if (Array.isArray(copy.imageGroup) && copy.imageGroup.length) {
-              // find items that are data URLs
-              const dataItems = copy.imageGroup.filter(
-                (it) => typeof it === "string" && it.startsWith("data:")
-              );
-              if (dataItems.length) {
-                const refs = [];
-                await Promise.all(
-                  dataItems.map(async (dataUrl, i) => {
-                    try {
-                      const key = `img-${copy.id}-${i}`;
-                      await idbPut(key, dataUrl);
-                      refs.push(key);
-                    } catch (e) {
-                      console.warn("rehydrate idbPut failed for", copy.id, e);
-                    }
-                  })
-                );
-                if (refs.length) {
-                  copy.imageRefs = Array.isArray(copy.imageRefs)
-                    ? Array.from(new Set([...copy.imageRefs, ...refs]))
-                    : refs;
-                  // remove the heavy inline imageGroup so localStorage stays small.
-                  delete copy.imageGroup;
-                  needPersist = true;
-                }
-              }
-            }
-
-            // handle single imagePreview (data URL)
-            if (
-              copy.imagePreview &&
-              typeof copy.imagePreview === "string" &&
-              copy.imagePreview.startsWith("data:")
-            ) {
-              try {
-                const key = `img-${copy.id}-preview`;
-                await idbPut(key, copy.imagePreview);
-                copy.imageRef = key;
-                // remove heavy preview from persisted copy
-                delete copy.imagePreview;
-                needPersist = true;
-              } catch (e) {
-                console.warn("rehydrate idbPut for preview failed", copy.id, e);
-              }
-            }
-
-            return copy;
-          })
-        );
-
-        // If we converted inline data -> refs, persist the cleaned messages back to localStorage
-        if (needPersist) {
-          try {
-            localStorage.setItem(LS_MSGS, JSON.stringify(normalized));
-          } catch (e) {
-            console.warn("Failed to persist normalized messages", e);
-          }
-        }
-
-        // --- Now rehydrate messages for immediate UI render (same logic as before) ---
+        // For each message with imageRefs, fetch images from idb
         const rehydrated = await Promise.all(
-          normalized.map(async (m) => {
+          parsed.map(async (m) => {
             if (
               m.imageRefs &&
               Array.isArray(m.imageRefs) &&
@@ -2476,13 +2406,14 @@ export default function Chat() {
                   const dataUrl = await idbGet(key);
                   if (dataUrl) imgs.push(dataUrl);
                 } catch (e) {
-                  // ignore per-image errors
+                  // ignore
                 }
               }
               if (imgs.length) {
+                // for groups put imageGroup, for single pref use imagePreview
                 return {
                   ...m,
-                  imageGroup: imgs, // populate imageGroup for immediate rendering
+                  imageGroup: imgs /* keep imageRefs if you want */,
                 };
               }
             }
@@ -2506,6 +2437,59 @@ export default function Chat() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // hydrate any messages that have imageRefs but no imageGroup (runs after mount & on new messages)
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        // find messages needing hydration
+        const need = messages.filter(
+          (m) =>
+            Array.isArray(m.imageRefs) &&
+            m.imageRefs.length &&
+            !Array.isArray(m.imageGroup)
+        );
+        if (!need.length) return;
+
+        // fetch for all needed messages
+        const updatesMap = {};
+        await Promise.all(
+          need.map(async (m) => {
+            const imgs = [];
+            for (const key of m.imageRefs || []) {
+              try {
+                const dataUrl = await idbGet(key);
+                if (dataUrl) imgs.push(dataUrl);
+              } catch (e) {
+                // ignore errors per-image
+              }
+            }
+            if (imgs.length) updatesMap[m.id] = imgs;
+          })
+        );
+
+        if (cancelled) return;
+
+        if (Object.keys(updatesMap).length) {
+          setMessages((prev) =>
+            prev.map((m) =>
+              updatesMap[m.id]
+                ? { ...m, imageGroup: updatesMap[m.id] } // add imageGroup (data URLs) for rendering
+                : m
+            )
+          );
+        }
+      } catch (e) {
+        console.warn("hydrate imageRefs failed", e);
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+    // only re-run when messages array length or contents change
+  }, [messages]);
+
   // Threading state
   const [threadMessages, setThreadMessages] = useState(() => {
     try {
@@ -2515,103 +2499,70 @@ export default function Chat() {
     return {};
   });
 
-  // Normalize + hydrate thread messages with imageRefs
+  // hydrate thread messages that have imageRefs but no imageGroup
   useEffect(() => {
     let cancelled = false;
     (async () => {
       try {
-        const raw = localStorage.getItem(LS_THREADS);
-        if (!raw) return;
-        const parsed = JSON.parse(raw);
-        if (!parsed || typeof parsed !== "object") return;
+        const need = [];
+        Object.keys(threadMessages || {}).forEach((rootId) => {
+          (threadMessages[rootId] || []).forEach((m) => {
+            if (
+              Array.isArray(m.imageRefs) &&
+              m.imageRefs.length &&
+              !Array.isArray(m.imageGroup)
+            ) {
+              need.push({ rootId, m });
+            }
+          });
+        });
+        if (!need.length) return;
 
-        let needPersist = false;
-        const updatedThreads = { ...parsed };
-
-        // Iterate through each thread root
-        for (const rootId of Object.keys(updatedThreads)) {
-          const msgs = updatedThreads[rootId];
-          if (!Array.isArray(msgs)) continue;
-
-          const normalized = await Promise.all(
-            msgs.map(async (m) => {
-              // Normalize imageGroup → imageRefs
-              if (Array.isArray(m.imageGroup) && m.imageGroup.length) {
-                const refs = [];
-                const keep = [];
-                await Promise.all(
-                  m.imageGroup.map(async (it, i) => {
-                    if (typeof it === "string" && it.startsWith("data:")) {
-                      const key = `img-${m.id}-${i}`;
-                      try {
-                        await idbPut(key, it);
-                        refs.push(key);
-                      } catch (e) {
-                        console.warn("rehydrate thread idbPut failed", e);
-                      }
-                    } else {
-                      keep.push(it);
-                    }
-                  })
-                );
-                if (refs.length) {
-                  m.imageRefs = Array.isArray(m.imageRefs)
-                    ? Array.from(new Set([...m.imageRefs, ...refs]))
-                    : refs;
-                  delete m.imageGroup; // remove heavy inline base64
-                  needPersist = true;
-                }
+        const updates = {}; // { rootId: { msgId: [dataUrls...] } }
+        await Promise.all(
+          need.map(async ({ rootId, m }) => {
+            const imgs = [];
+            for (const key of m.imageRefs || []) {
+              try {
+                const dataUrl = await idbGet(key);
+                if (dataUrl) imgs.push(dataUrl);
+              } catch (e) {
+                // ignore individual failures
               }
-              return m;
-            })
-          );
+            }
+            if (imgs.length) {
+              updates[rootId] = updates[rootId] || {};
+              updates[rootId][m.id] = imgs;
+            }
+          })
+        );
 
-          updatedThreads[rootId] = normalized;
-        }
+        if (cancelled) return;
 
-        // persist normalized threads back to localStorage
-        if (needPersist) {
-          try {
-            localStorage.setItem(LS_THREADS, JSON.stringify(updatedThreads));
-          } catch (e) {
-            console.warn("Failed to persist normalized thread messages", e);
-          }
-        }
-
-        // hydrate: fetch from IndexedDB for rendering
-        const hydratedThreads = {};
-        for (const rootId of Object.keys(updatedThreads)) {
-          hydratedThreads[rootId] = await Promise.all(
-            updatedThreads[rootId].map(async (m) => {
-              if (Array.isArray(m.imageRefs) && m.imageRefs.length) {
-                const imgs = [];
-                for (const key of m.imageRefs) {
-                  try {
-                    const dataUrl = await idbGet(key);
-                    if (dataUrl) imgs.push(dataUrl);
-                  } catch (e) {}
-                }
-                if (imgs.length) {
-                  return { ...m, imageGroup: imgs };
-                }
-              }
-              return m;
-            })
-          );
-        }
-
-        if (!cancelled) {
-          setThreadMessages(hydratedThreads);
+        if (Object.keys(updates).length) {
+          setThreadMessages((prev) => {
+            const copy = { ...prev };
+            Object.keys(updates).forEach((rootId) => {
+              copy[rootId] = (copy[rootId] || []).map((msg) =>
+                updates[rootId][msg.id]
+                  ? { ...msg, imageGroup: updates[rootId][msg.id] }
+                  : msg
+              );
+            });
+            // persist after hydration so localStorage stays consistent
+            persistThreadMessages(copy);
+            return copy;
+          });
         }
       } catch (e) {
-        console.warn("hydrate threadMessages failed", e);
+        console.warn("hydrate thread imageRefs failed", e);
       }
     })();
 
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [threadMessages]);
 
   // UI: attach menu + file input refs
   const [attachMenuOpen, setAttachMenuOpen] = useState(false);
@@ -3156,75 +3107,6 @@ export default function Chat() {
             } else {
               // not a data url — keep as-is
               incomingCopy.imagePreview = previewRaw;
-            }
-
-            // inside handleIncoming: right after you build incomingCopy and saved images to idb...
-            // -> after you've created incomingCopy.imageRefs (if any)
-            // Make sure to persist the message state immediately so reload can hydrate
-
-            if (
-              payloadOrText &&
-              typeof payloadOrText === "object" &&
-              (payloadOrText.type === "chat" ||
-                payloadOrText.type === "thread") &&
-              payloadOrText.id
-            ) {
-              try {
-                const incomingCopy = { ...payloadOrText };
-                const isDataUrl = (s) =>
-                  typeof s === "string" && s.startsWith("data:");
-
-                // --- your existing logic to process incomingCopy.imageGroup / imagePreview ---
-                // (store inline data URLs into IndexedDB using idbPut, collect refs into `refs` or `saveKeys`)
-                // After that logic you should have incomingCopy.imageRefs possibly set.
-
-                // === NEW: If we created imageRefs, ensure the updated message is persisted now ===
-                if (
-                  Array.isArray(incomingCopy.imageRefs) &&
-                  incomingCopy.imageRefs.length
-                ) {
-                  // create a normalized message object for persistence (lightweight)
-                  const persistMsg = {
-                    id: incomingCopy.id,
-                    from: incomingCopy.fromName || incomingCopy.from || "peer",
-                    fromId: incomingCopy.from,
-                    text: incomingCopy.text || "",
-                    ts: incomingCopy.ts || Date.now(),
-                    type: incomingCopy.type || "chat",
-                    replyTo: incomingCopy.replyTo || null,
-                    deliveries: incomingCopy.deliveries || [],
-                    reads: incomingCopy.reads || [],
-                    // store refs (lightweight)
-                    imageRefs: incomingCopy.imageRefs,
-                    imageMeta: incomingCopy.imageMeta || undefined,
-                  };
-
-                  // Insert/update into messages so that persistMessages writes imageRefs into LS
-                  setMessages((prev) => {
-                    const exists = prev.find((x) => x.id === persistMsg.id);
-                    let next;
-                    if (exists) {
-                      next = prev.map((x) =>
-                        x.id === persistMsg.id ? { ...x, ...persistMsg } : x
-                      );
-                    } else {
-                      next = [...prev, persistMsg];
-                    }
-                    // persistMessages will take care of not storing large blobs
-                    persistMessages(next);
-                    return next;
-                  });
-
-                  // Also replace payloadOrText with incomingCopy so downstream logic sees refs/preview
-                  payloadOrText = incomingCopy;
-                  // continue — we will still hit the normal chat handling branch below and upsertIncomingChat
-                }
-              } catch (err) {
-                console.warn(
-                  "handleIncoming: preprocessing (persist refs) failed",
-                  err
-                );
-              }
             }
           }
 
