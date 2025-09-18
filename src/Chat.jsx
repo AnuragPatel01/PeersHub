@@ -2382,131 +2382,129 @@ export default function Chat() {
     return [];
   });
 
-
   // hydrate any messages that have imageRefs but no imageGroup (runs after mount & on new messages)
   // after messages state is defined
-useEffect(() => {
-  let cancelled = false;
-  (async () => {
-    try {
-      const raw = localStorage.getItem(LS_MSGS);
-      if (!raw) return;
-      const parsed = JSON.parse(raw);
-      if (!Array.isArray(parsed)) return;
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const raw = localStorage.getItem(LS_MSGS);
+        if (!raw) return;
+        const parsed = JSON.parse(raw);
+        if (!Array.isArray(parsed)) return;
 
-      // --- Normalize any messages that contain heavy inline imageGroup data URLs ---
-      // Save inline data: URLs into IndexedDB and replace with imageRefs in localStorage
-      let needPersist = false;
-      const normalized = await Promise.all(
-        parsed.map(async (m) => {
-          // shallow copy to avoid mutating parsed array directly
-          const copy = { ...m };
+        // --- Normalize any messages that contain heavy inline imageGroup data URLs ---
+        // Save inline data: URLs into IndexedDB and replace with imageRefs in localStorage
+        let needPersist = false;
+        const normalized = await Promise.all(
+          parsed.map(async (m) => {
+            // shallow copy to avoid mutating parsed array directly
+            const copy = { ...m };
 
-          // handle imageGroup array containing data URLs
-          if (Array.isArray(copy.imageGroup) && copy.imageGroup.length) {
-            // find items that are data URLs
-            const dataItems = copy.imageGroup.filter(
-              (it) => typeof it === "string" && it.startsWith("data:")
-            );
-            if (dataItems.length) {
-              const refs = [];
-              await Promise.all(
-                dataItems.map(async (dataUrl, i) => {
-                  try {
-                    const key = `img-${copy.id}-${i}`;
-                    await idbPut(key, dataUrl);
-                    refs.push(key);
-                  } catch (e) {
-                    console.warn("rehydrate idbPut failed for", copy.id, e);
-                  }
-                })
+            // handle imageGroup array containing data URLs
+            if (Array.isArray(copy.imageGroup) && copy.imageGroup.length) {
+              // find items that are data URLs
+              const dataItems = copy.imageGroup.filter(
+                (it) => typeof it === "string" && it.startsWith("data:")
               );
-              if (refs.length) {
-                copy.imageRefs = Array.isArray(copy.imageRefs)
-                  ? Array.from(new Set([...copy.imageRefs, ...refs]))
-                  : refs;
-                // remove the heavy inline imageGroup so localStorage stays small.
-                delete copy.imageGroup;
-                needPersist = true;
+              if (dataItems.length) {
+                const refs = [];
+                await Promise.all(
+                  dataItems.map(async (dataUrl, i) => {
+                    try {
+                      const key = `img-${copy.id}-${i}`;
+                      await idbPut(key, dataUrl);
+                      refs.push(key);
+                    } catch (e) {
+                      console.warn("rehydrate idbPut failed for", copy.id, e);
+                    }
+                  })
+                );
+                if (refs.length) {
+                  copy.imageRefs = Array.isArray(copy.imageRefs)
+                    ? Array.from(new Set([...copy.imageRefs, ...refs]))
+                    : refs;
+                  // remove the heavy inline imageGroup so localStorage stays small.
+                  delete copy.imageGroup;
+                  needPersist = true;
+                }
               }
             }
-          }
 
-          // handle single imagePreview (data URL)
-          if (
-            copy.imagePreview &&
-            typeof copy.imagePreview === "string" &&
-            copy.imagePreview.startsWith("data:")
-          ) {
-            try {
-              const key = `img-${copy.id}-preview`;
-              await idbPut(key, copy.imagePreview);
-              copy.imageRef = key;
-              // remove heavy preview from persisted copy
-              delete copy.imagePreview;
-              needPersist = true;
-            } catch (e) {
-              console.warn("rehydrate idbPut for preview failed", copy.id, e);
-            }
-          }
-
-          return copy;
-        })
-      );
-
-      // If we converted inline data -> refs, persist the cleaned messages back to localStorage
-      if (needPersist) {
-        try {
-          localStorage.setItem(LS_MSGS, JSON.stringify(normalized));
-        } catch (e) {
-          console.warn("Failed to persist normalized messages", e);
-        }
-      }
-
-      // --- Now rehydrate messages for immediate UI render (same logic as before) ---
-      const rehydrated = await Promise.all(
-        normalized.map(async (m) => {
-          if (
-            m.imageRefs &&
-            Array.isArray(m.imageRefs) &&
-            m.imageRefs.length
-          ) {
-            const imgs = [];
-            for (const key of m.imageRefs) {
+            // handle single imagePreview (data URL)
+            if (
+              copy.imagePreview &&
+              typeof copy.imagePreview === "string" &&
+              copy.imagePreview.startsWith("data:")
+            ) {
               try {
-                const dataUrl = await idbGet(key);
-                if (dataUrl) imgs.push(dataUrl);
+                const key = `img-${copy.id}-preview`;
+                await idbPut(key, copy.imagePreview);
+                copy.imageRef = key;
+                // remove heavy preview from persisted copy
+                delete copy.imagePreview;
+                needPersist = true;
               } catch (e) {
-                // ignore per-image errors
+                console.warn("rehydrate idbPut for preview failed", copy.id, e);
               }
             }
-            if (imgs.length) {
-              return {
-                ...m,
-                imageGroup: imgs, // populate imageGroup for immediate rendering
-              };
-            }
+
+            return copy;
+          })
+        );
+
+        // If we converted inline data -> refs, persist the cleaned messages back to localStorage
+        if (needPersist) {
+          try {
+            localStorage.setItem(LS_MSGS, JSON.stringify(normalized));
+          } catch (e) {
+            console.warn("Failed to persist normalized messages", e);
           }
-          // fallback: if message already had inline imageGroup as strings, keep them
-          return m;
-        })
-      );
+        }
 
-      if (!cancelled) {
-        setMessages(rehydrated);
+        // --- Now rehydrate messages for immediate UI render (same logic as before) ---
+        const rehydrated = await Promise.all(
+          normalized.map(async (m) => {
+            if (
+              m.imageRefs &&
+              Array.isArray(m.imageRefs) &&
+              m.imageRefs.length
+            ) {
+              const imgs = [];
+              for (const key of m.imageRefs) {
+                try {
+                  const dataUrl = await idbGet(key);
+                  if (dataUrl) imgs.push(dataUrl);
+                } catch (e) {
+                  // ignore per-image errors
+                }
+              }
+              if (imgs.length) {
+                return {
+                  ...m,
+                  imageGroup: imgs, // populate imageGroup for immediate rendering
+                };
+              }
+            }
+            // fallback: if message already had inline imageGroup as strings, keep them
+            return m;
+          })
+        );
+
+        if (!cancelled) {
+          setMessages(rehydrated);
+        }
+      } catch (e) {
+        console.warn("rehydrate images failed", e);
       }
-    } catch (e) {
-      console.warn("rehydrate images failed", e);
-    }
-  })();
+    })();
 
-  return () => {
-    cancelled = true;
-  };
-  // run only on mount
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-}, []);
-
+    return () => {
+      cancelled = true;
+    };
+    // run only on mount
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // Threading state
   const [threadMessages, setThreadMessages] = useState(() => {
@@ -2517,70 +2515,103 @@ useEffect(() => {
     return {};
   });
 
-  // hydrate thread messages that have imageRefs but no imageGroup
+  // Normalize + hydrate thread messages with imageRefs
   useEffect(() => {
     let cancelled = false;
     (async () => {
       try {
-        const need = [];
-        Object.keys(threadMessages || {}).forEach((rootId) => {
-          (threadMessages[rootId] || []).forEach((m) => {
-            if (
-              Array.isArray(m.imageRefs) &&
-              m.imageRefs.length &&
-              !Array.isArray(m.imageGroup)
-            ) {
-              need.push({ rootId, m });
-            }
-          });
-        });
-        if (!need.length) return;
+        const raw = localStorage.getItem(LS_THREADS);
+        if (!raw) return;
+        const parsed = JSON.parse(raw);
+        if (!parsed || typeof parsed !== "object") return;
 
-        const updates = {}; // { rootId: { msgId: [dataUrls...] } }
-        await Promise.all(
-          need.map(async ({ rootId, m }) => {
-            const imgs = [];
-            for (const key of m.imageRefs || []) {
-              try {
-                const dataUrl = await idbGet(key);
-                if (dataUrl) imgs.push(dataUrl);
-              } catch (e) {
-                // ignore individual failures
+        let needPersist = false;
+        const updatedThreads = { ...parsed };
+
+        // Iterate through each thread root
+        for (const rootId of Object.keys(updatedThreads)) {
+          const msgs = updatedThreads[rootId];
+          if (!Array.isArray(msgs)) continue;
+
+          const normalized = await Promise.all(
+            msgs.map(async (m) => {
+              // Normalize imageGroup → imageRefs
+              if (Array.isArray(m.imageGroup) && m.imageGroup.length) {
+                const refs = [];
+                const keep = [];
+                await Promise.all(
+                  m.imageGroup.map(async (it, i) => {
+                    if (typeof it === "string" && it.startsWith("data:")) {
+                      const key = `img-${m.id}-${i}`;
+                      try {
+                        await idbPut(key, it);
+                        refs.push(key);
+                      } catch (e) {
+                        console.warn("rehydrate thread idbPut failed", e);
+                      }
+                    } else {
+                      keep.push(it);
+                    }
+                  })
+                );
+                if (refs.length) {
+                  m.imageRefs = Array.isArray(m.imageRefs)
+                    ? Array.from(new Set([...m.imageRefs, ...refs]))
+                    : refs;
+                  delete m.imageGroup; // remove heavy inline base64
+                  needPersist = true;
+                }
               }
-            }
-            if (imgs.length) {
-              updates[rootId] = updates[rootId] || {};
-              updates[rootId][m.id] = imgs;
-            }
-          })
-        );
+              return m;
+            })
+          );
 
-        if (cancelled) return;
+          updatedThreads[rootId] = normalized;
+        }
 
-        if (Object.keys(updates).length) {
-          setThreadMessages((prev) => {
-            const copy = { ...prev };
-            Object.keys(updates).forEach((rootId) => {
-              copy[rootId] = (copy[rootId] || []).map((msg) =>
-                updates[rootId][msg.id]
-                  ? { ...msg, imageGroup: updates[rootId][msg.id] }
-                  : msg
-              );
-            });
-            // persist after hydration so localStorage stays consistent
-            persistThreadMessages(copy);
-            return copy;
-          });
+        // persist normalized threads back to localStorage
+        if (needPersist) {
+          try {
+            localStorage.setItem(LS_THREADS, JSON.stringify(updatedThreads));
+          } catch (e) {
+            console.warn("Failed to persist normalized thread messages", e);
+          }
+        }
+
+        // hydrate: fetch from IndexedDB for rendering
+        const hydratedThreads = {};
+        for (const rootId of Object.keys(updatedThreads)) {
+          hydratedThreads[rootId] = await Promise.all(
+            updatedThreads[rootId].map(async (m) => {
+              if (Array.isArray(m.imageRefs) && m.imageRefs.length) {
+                const imgs = [];
+                for (const key of m.imageRefs) {
+                  try {
+                    const dataUrl = await idbGet(key);
+                    if (dataUrl) imgs.push(dataUrl);
+                  } catch (e) {}
+                }
+                if (imgs.length) {
+                  return { ...m, imageGroup: imgs };
+                }
+              }
+              return m;
+            })
+          );
+        }
+
+        if (!cancelled) {
+          setThreadMessages(hydratedThreads);
         }
       } catch (e) {
-        console.warn("hydrate thread imageRefs failed", e);
+        console.warn("hydrate threadMessages failed", e);
       }
     })();
 
     return () => {
       cancelled = true;
     };
-  }, [threadMessages]);
+  }, []);
 
   // UI: attach menu + file input refs
   const [attachMenuOpen, setAttachMenuOpen] = useState(false);
