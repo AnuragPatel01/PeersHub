@@ -3121,6 +3121,66 @@ export default function Chat() {
 
       // --- Handle different message types (existing logic) ---
 
+      const handleAutoAcknowledgment = async (payloadOrText) => {
+        try {
+          const origin = payloadOrText.from || payloadOrText.origin;
+          const localId = getLocalPeerId() || myId;
+
+          if (!origin || origin === localId) return;
+
+          // Always send delivery acknowledgment immediately
+          if (payloadOrText.type === "thread") {
+            sendAckDeliver(
+              origin,
+              payloadOrText.id,
+              true,
+              payloadOrText.threadRootId
+            );
+            addUniqueToMsgArray(
+              payloadOrText.id,
+              "deliveries",
+              localId,
+              true,
+              payloadOrText.threadRootId
+            );
+          } else {
+            sendAckDeliver(origin, payloadOrText.id);
+            addUniqueToMsgArray(payloadOrText.id, "deliveries", localId);
+          }
+
+          // Send read acknowledgment based on visibility and focus
+          const shouldAutoRead =
+            document.visibilityState === "visible" &&
+            (document.hasFocus() || !document.hidden);
+
+          if (shouldAutoRead) {
+            // Small delay to ensure delivery ack is processed first
+            setTimeout(() => {
+              if (payloadOrText.type === "thread") {
+                sendAckRead(
+                  payloadOrText.id,
+                  origin,
+                  true,
+                  payloadOrText.threadRootId
+                );
+                addUniqueToMsgArray(
+                  payloadOrText.id,
+                  "reads",
+                  localId,
+                  true,
+                  payloadOrText.threadRootId
+                );
+              } else {
+                sendAckRead(payloadOrText.id, origin);
+                addUniqueToMsgArray(payloadOrText.id, "reads", localId);
+              }
+            }, 100);
+          }
+        } catch (e) {
+          console.warn("Auto-acknowledgment failed:", e);
+        }
+      };
+
       // 1) Typing indicators
       if (from === "__system_typing__" && payloadOrText) {
         try {
@@ -3445,10 +3505,29 @@ export default function Chat() {
             const localId = getLocalPeerId() || myId;
 
             if (
-              origin &&
-              origin !== localId &&
-              document.visibilityState === "visible"
+              payloadOrText &&
+              typeof payloadOrText === "object" &&
+              (payloadOrText.type === "chat" ||
+                payloadOrText.type === "thread") &&
+              payloadOrText.id
             ) {
+              try {
+                // Store the message with images intact
+                upsertIncomingChat(payloadOrText);
+                maybeNotify(
+                  payloadOrText.fromName || payloadOrText.from,
+                  payloadOrText.text
+                );
+
+                // Handle acknowledgments
+                await handleAutoAcknowledgment(payloadOrText);
+              } catch (e) {
+                console.warn("Chat message handler failed:", e, payloadOrText);
+              }
+              return;
+            }
+
+            {
               if (payloadOrText.type === "thread") {
                 sendAckRead(
                   payloadOrText.id,
@@ -3557,51 +3636,65 @@ export default function Chat() {
   }, [messages]);
 
   // visibility ack_read — mark both chat and thread messages as read when tab becomes visible
+  // Enhanced visibility change handler - replace the existing useEffect
   useEffect(() => {
     const onVisibility = () => {
       if (document.visibilityState === "visible") {
         const localId = getLocalPeerId() || myId;
-        // chat messages
+
+        // Mark chat messages as read
         messages.forEach((m) => {
           if (!m || m.type !== "chat") return;
           const origin = m.fromId || m.from;
           if (!origin || origin === localId) return;
+
           const alreadyRead =
             Array.isArray(m.reads) && m.reads.includes(localId);
           if (!alreadyRead) {
-            try {
-              sendAckRead(m.id, origin);
-            } catch (e) {
-              console.warn("sendAckRead error (on visibility):", e);
-            }
-            addUniqueToMsgArray(m.id, "reads", localId);
+            // Add a small delay to batch read acknowledgments
+            setTimeout(() => {
+              try {
+                sendAckRead(m.id, origin);
+                addUniqueToMsgArray(m.id, "reads", localId);
+              } catch (e) {
+                console.warn("sendAckRead error (on visibility):", e);
+              }
+            }, Math.random() * 500 + 100); // Random delay between 100-600ms
           }
         });
 
-        // thread messages
+        // Mark thread messages as read
         Object.keys(threadMessages || {}).forEach((rootId) => {
           (threadMessages[rootId] || []).forEach((m) => {
             if (!m || m.type !== "thread") return;
             const origin = m.fromId || m.from;
             if (!origin || origin === localId) return;
+
             const alreadyRead =
               Array.isArray(m.reads) && m.reads.includes(localId);
             if (!alreadyRead) {
-              try {
-                sendAckRead(m.id, origin, true, rootId);
-              } catch (e) {
-                console.warn("sendAckRead (thread) failed:", e);
-              }
-              addUniqueToMsgArray(m.id, "reads", localId, true, rootId);
+              setTimeout(() => {
+                try {
+                  sendAckRead(m.id, origin, true, rootId);
+                  addUniqueToMsgArray(m.id, "reads", localId, true, rootId);
+                } catch (e) {
+                  console.warn("sendAckRead (thread) failed:", e);
+                }
+              }, Math.random() * 500 + 200); // Slightly different delay range
             }
           });
         });
       }
     };
+
     document.addEventListener("visibilitychange", onVisibility);
-    if (document.visibilityState === "visible") onVisibility();
+
+    // Also run immediately if already visible
+    if (document.visibilityState === "visible") {
+      onVisibility();
+    }
+
     return () => document.removeEventListener("visibilitychange", onVisibility);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [messages, threadMessages, myId]);
 
   // outside click for menu
@@ -4194,9 +4287,18 @@ export default function Chat() {
     }
   };
 
-  // render status dot
+  // Fixed render status dot function
   const renderStatusDot = (m) => {
-    const totalPeers = peers?.length || 0;
+    const localId = getLocalPeerId() || myId;
+    const isMyMessage = (m.fromId || m.from) === localId;
+
+    // Only show status for messages I sent
+    if (!isMyMessage) return null;
+
+    // Count peers who should receive this message (exclude sender)
+    const relevantPeers = peers.filter((id) => id !== localId);
+    const totalPeers = relevantPeers.length;
+
     if (totalPeers === 0) {
       return (
         <span
@@ -4206,18 +4308,21 @@ export default function Chat() {
       );
     }
 
-    const deliveries = (m.deliveries || []).filter(
-      (id) => id !== (getLocalPeerId() || myId)
-    ).length;
-    const reads = (m.reads || []).filter(
-      (id) => id !== (getLocalPeerId() || myId)
+    // Count deliveries and reads from relevant peers only
+    const deliveries = (m.deliveries || []).filter((id) =>
+      relevantPeers.includes(id)
     ).length;
 
+    const reads = (m.reads || []).filter((id) =>
+      relevantPeers.includes(id)
+    ).length;
+
+    // Status logic
     if (deliveries < totalPeers) {
       return (
         <span
           className="inline-block w-2 h-2 rounded-full bg-red-500 ml-2"
-          title={`Single tick — delivered to ${deliveries}/${totalPeers}`}
+          title={`Sending — delivered to ${deliveries}/${totalPeers}`}
         />
       );
     }
@@ -4226,7 +4331,7 @@ export default function Chat() {
       return (
         <span
           className="inline-block w-2 h-2 rounded-full bg-yellow-400 ml-2"
-          title={`Double tick — delivered to all (${totalPeers}), reads ${reads}/${totalPeers}`}
+          title={`Delivered to all (${totalPeers}), read by ${reads}/${totalPeers}`}
         />
       );
     }
@@ -4235,13 +4340,16 @@ export default function Chat() {
       return (
         <span
           className="inline-block w-2 h-2 rounded-full bg-green-500 ml-2"
-          title="Double-blue — read by everyone"
+          title="Read by everyone"
         />
       );
     }
 
     return (
-      <span className="inline-block w-2 h-2 rounded-full bg-gray-400 ml-2" />
+      <span
+        className="inline-block w-2 h-2 rounded-full bg-gray-400 ml-2"
+        title={`Status unclear: ${deliveries}/${totalPeers} delivered, ${reads}/${totalPeers} read`}
+      />
     );
   };
 
