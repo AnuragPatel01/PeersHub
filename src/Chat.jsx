@@ -4402,7 +4402,7 @@ export default function Chat() {
     if (deliveries < totalPeers) {
       return (
         <span
-          className="inline-block w-2 h-2 rounded-full bg-red-500 ml-2"
+          className="inline-block w-2 h-2 rounded-full bg-green-500 ml-2"
           title={`Sending — delivered to ${deliveries}/${totalPeers}`}
         />
       );
@@ -4420,7 +4420,7 @@ export default function Chat() {
     if (reads === totalPeers) {
       return (
         <span
-          className="inline-block w-2 h-2 rounded-full bg-green-500 ml-2"
+          className="inline-block w-2 h-2 rounded-full bg-purple-500 ml-2"
           title="Read by everyone"
         />
       );
@@ -4428,7 +4428,7 @@ export default function Chat() {
 
     return (
       <span
-        className="inline-block w-2 h-2 rounded-full bg-gray-400 ml-2"
+        className="inline-block w-2 h-2 rounded-full bg-red-500 ml-2"
         title={`Status unclear: ${deliveries}/${totalPeers} delivered, ${reads}/${totalPeers} read`}
       />
     );
