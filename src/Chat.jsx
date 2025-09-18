@@ -5257,7 +5257,7 @@ export default function Chat() {
                 </div>
               </button>
 
-              <button
+              {/* <button
                 onClick={handleSetName}
                 className="w-full text-left px-4 py-3 hover:bg-white/20 border-b border-white/5 text-purple-500"
               >
@@ -5265,7 +5265,7 @@ export default function Chat() {
                 <div className="text-xs text-gray-400">
                   Update your display name
                 </div>
-              </button>
+              </button> */}
 
               <button
                 onClick={handleToggleNotifications}
