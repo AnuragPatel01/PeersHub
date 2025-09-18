@@ -3126,11 +3126,12 @@ export default function Chat() {
         try {
           const fromName =
             payloadOrText.fromName || payloadOrText.from || payloadOrText.name;
-          const isTyping =
+          const isTyping = Boolean(
             payloadOrText.isTyping ??
-            payloadOrText.typing ??
-            payloadOrText.is_typing ??
-            false;
+              payloadOrText.typing ??
+              payloadOrText.is_typing ??
+              false
+          );
           const threadRootId =
             payloadOrText.threadRootId ||
             payloadOrText.rootId ||
@@ -3171,16 +3172,48 @@ export default function Chat() {
         payloadOrText.id
       ) {
         try {
-          const fromPeer =
-            payloadOrText.fromPeer || payloadOrText.from || payloadOrText.peer;
+          // debug so you can inspect incoming ack payload shape
+          console.debug("Incoming delivery ack payload:", payloadOrText);
+
           const id = payloadOrText.id;
+          // try all possible sender fields; fallback to 'from' envelope if present
+          const fromPeer =
+            payloadOrText.fromPeer ||
+            payloadOrText.from ||
+            payloadOrText.peer ||
+            null;
+
+          // normalize thread flags (support both naming variants)
           const isThread =
-            payloadOrText.isThread || payloadOrText.thread || false;
+            !!payloadOrText.isThread || !!payloadOrText.thread || false;
           const threadRootId =
             payloadOrText.threadRootId ||
             payloadOrText.rootId ||
             payloadOrText.threadId ||
             null;
+
+          if (!id) {
+            console.warn("Ack deliver missing id:", payloadOrText);
+            return;
+          }
+
+          // If ack carries a 'to' field we can optionally use it to target updates,
+          // but addUniqueToMsgArray expects the peerId who acked, so prefer fromPeer.
+          if (!fromPeer) {
+            console.warn(
+              "Ack deliver missing fromPeer; payload:",
+              payloadOrText
+            );
+            // still attempt to add with null peer to avoid silent failure
+            addUniqueToMsgArray(
+              id,
+              "deliveries",
+              null,
+              !!isThread,
+              threadRootId
+            );
+            return;
+          }
 
           addUniqueToMsgArray(
             id,
@@ -3198,16 +3231,33 @@ export default function Chat() {
       // 3) Read acknowledgments
       if (from === "__system_ack_read__" && payloadOrText && payloadOrText.id) {
         try {
-          const fromPeer =
-            payloadOrText.fromPeer || payloadOrText.from || payloadOrText.peer;
+          // debug so you can inspect incoming ack shape
+          console.debug("Incoming read ack payload:", payloadOrText);
+
           const id = payloadOrText.id;
+          const fromPeer =
+            payloadOrText.fromPeer ||
+            payloadOrText.from ||
+            payloadOrText.peer ||
+            null;
           const isThread =
-            payloadOrText.isThread || payloadOrText.thread || false;
+            !!payloadOrText.isThread || !!payloadOrText.thread || false;
           const threadRootId =
             payloadOrText.threadRootId ||
             payloadOrText.rootId ||
             payloadOrText.threadId ||
             null;
+
+          if (!id) {
+            console.warn("Ack read missing id:", payloadOrText);
+            return;
+          }
+
+          if (!fromPeer) {
+            console.warn("Ack read missing fromPeer; payload:", payloadOrText);
+            addUniqueToMsgArray(id, "reads", null, !!isThread, threadRootId);
+            return;
+          }
 
           addUniqueToMsgArray(id, "reads", fromPeer, !!isThread, threadRootId);
         } catch (e) {
