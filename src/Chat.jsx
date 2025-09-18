@@ -2883,7 +2883,8 @@ export default function Chat() {
         const alreadyRead = Array.isArray(m.reads) && m.reads.includes(localId);
         if (!alreadyRead) {
           try {
-            sendAckRead(m.id, origin, true, rootId);
+            sendAckRead(origin, m.id, true, rootId);
+
           } catch (e) {}
           addUniqueToMsgArray(m.id, "reads", localId, true, rootId);
         }
@@ -3156,11 +3157,13 @@ export default function Chat() {
 
           if (shouldAutoRead) {
             // Small delay to ensure delivery ack is processed first
+            // Small delay to ensure delivery ack is processed first
             setTimeout(() => {
               if (payloadOrText.type === "thread") {
+                // sendAckRead(toPeerId, messageId, isThread, threadRootId)
                 sendAckRead(
-                  payloadOrText.id,
                   origin,
+                  payloadOrText.id,
                   true,
                   payloadOrText.threadRootId
                 );
@@ -3172,7 +3175,8 @@ export default function Chat() {
                   payloadOrText.threadRootId
                 );
               } else {
-                sendAckRead(payloadOrText.id, origin);
+                // sendAckRead(toPeerId, messageId)
+                sendAckRead(origin, payloadOrText.id);
                 addUniqueToMsgArray(payloadOrText.id, "reads", localId);
               }
             }, 100);
@@ -3527,27 +3531,6 @@ export default function Chat() {
               }
               return;
             }
-
-            {
-              if (payloadOrText.type === "thread") {
-                sendAckRead(
-                  payloadOrText.id,
-                  origin,
-                  true,
-                  payloadOrText.threadRootId
-                );
-                addUniqueToMsgArray(
-                  payloadOrText.id,
-                  "reads",
-                  localId,
-                  true,
-                  payloadOrText.threadRootId
-                );
-              } else {
-                sendAckRead(payloadOrText.id, origin);
-                addUniqueToMsgArray(payloadOrText.id, "reads", localId);
-              }
-            }
           } catch (e) {
             console.warn("Auto-read failed:", e);
           }
@@ -3604,26 +3587,27 @@ export default function Chat() {
     setJoinedBootstrap(newBootstrapId || "");
   };
 
-  // init peer
-  useEffect(() => {
-    if (!username) return;
-    const p = initPeer(
-      handleIncoming,
-      handlePeerListUpdate,
-      username,
-      handleBootstrapChange
-    );
-    peerRef.current = p;
-    p.on && p.on("open", (id) => setMyId(id));
-    const bootstrap = localStorage.getItem("ph_hub_bootstrap");
-    setJoinedBootstrap(bootstrap || "");
-    return () => {
-      try {
-        p && p.destroy && p.destroy();
-      } catch (e) {}
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [username]);
+  // init peer — always init even if username is not yet set
+useEffect(() => {
+  // don't block peer creation on username — pass username or null
+  const p = initPeer(
+    handleIncoming,
+    handlePeerListUpdate,
+    username || "", // allow empty display name
+    handleBootstrapChange
+  );
+  peerRef.current = p;
+  p.on && p.on("open", (id) => setMyId(id));
+  const bootstrap = localStorage.getItem("ph_hub_bootstrap");
+  setJoinedBootstrap(bootstrap || "");
+  return () => {
+    try {
+      p && p.destroy && p.destroy();
+    } catch (e) {}
+  };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+}, []); // run once on mount
+
 
   // autoscroll
   useEffect(() => {
@@ -3655,7 +3639,7 @@ export default function Chat() {
             // Add a small delay to batch read acknowledgments
             setTimeout(() => {
               try {
-                sendAckRead(m.id, origin);
+                sendAckRead(origin, m.id);
                 addUniqueToMsgArray(m.id, "reads", localId);
               } catch (e) {
                 console.warn("sendAckRead error (on visibility):", e);
@@ -3676,7 +3660,8 @@ export default function Chat() {
             if (!alreadyRead) {
               setTimeout(() => {
                 try {
-                  sendAckRead(m.id, origin, true, rootId);
+                  sendAckRead(origin, m.id, true, rootId);
+
                   addUniqueToMsgArray(m.id, "reads", localId, true, rootId);
                 } catch (e) {
                   console.warn("sendAckRead (thread) failed:", e);
