@@ -2268,6 +2268,7 @@ import {
   sendChat,
   sendTyping,
   sendAckRead,
+  sendAckDeliver,
   getPeerNames,
   joinHub,
   leaveHub,

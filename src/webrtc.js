@@ -1852,7 +1852,7 @@ export const sendTyping = (fromName, isTyping, threadRootId = null) => {
   }
 };
 
-const sendAckDeliver = (
+export const sendAckDeliver = (
   toPeerId,
   msgId,
   isThread = false,
