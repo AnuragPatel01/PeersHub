@@ -2411,7 +2411,8 @@ export default function Chat() {
               for (const key of copy.imageRefs) {
                 try {
                   const dataUrl = await idbGet(key);
-                  if (dataUrl && typeof dataUrl === "string") imgs.push(dataUrl);
+                  if (dataUrl && typeof dataUrl === "string")
+                    imgs.push(dataUrl);
                 } catch (e) {
                   // ignore individual failures
                 }
@@ -2460,7 +2461,11 @@ export default function Chat() {
                   let imageGroup = null;
                   let imagePreview = null;
 
-                  if (Array.isArray(m.imageRefs) && m.imageRefs.length && !Array.isArray(m.imageGroup)) {
+                  if (
+                    Array.isArray(m.imageRefs) &&
+                    m.imageRefs.length &&
+                    !Array.isArray(m.imageGroup)
+                  ) {
                     const imgs = [];
                     for (const key of m.imageRefs) {
                       try {
@@ -2619,7 +2624,9 @@ export default function Chat() {
           } else {
             // fallback: keep only short strings (rare)
             m.imageGroup = m.imageGroup
-              .map((it) => (typeof it === "string" && it.length < 200 ? it : null))
+              .map((it) =>
+                typeof it === "string" && it.length < 200 ? it : null
+              )
               .filter(Boolean);
           }
         }
@@ -2642,7 +2649,11 @@ export default function Chat() {
       } catch (e) {
         // fallback: aggressive cleanup if quota exceeded
         console.warn("persistMessages failed", e);
-        if (e && (e.name === "QuotaExceededError" || (e.message || "").includes("quota"))) {
+        if (
+          e &&
+          (e.name === "QuotaExceededError" ||
+            (e.message || "").includes("quota"))
+        ) {
           try {
             const aggressiveTail = arr
               .slice(-Math.min(50, MAX_MSGS))
@@ -2651,11 +2662,17 @@ export default function Chat() {
                 if (Array.isArray(m.imageGroup)) {
                   // remove all but tiny placeholders
                   m.imageGroup = m.imageGroup
-                    .map((it) => (typeof it === "string" && it.length < 500 ? it : null))
+                    .map((it) =>
+                      typeof it === "string" && it.length < 500 ? it : null
+                    )
                     .filter(Boolean);
                   if (!m.imageGroup.length) delete m.imageGroup;
                 }
-                if (m.imagePreview && typeof m.imagePreview === "string" && m.imagePreview.length > 500) {
+                if (
+                  m.imagePreview &&
+                  typeof m.imagePreview === "string" &&
+                  m.imagePreview.length > 500
+                ) {
                   delete m.imagePreview;
                 }
                 return m;
@@ -2671,36 +2688,54 @@ export default function Chat() {
     }
   };
 
-  // persist thread messages helper
+  // persist thread messages helper — keep imageGroup alongside imageRefs where possible
   const persistThreadMessages = (threads) => {
     try {
       const safe = {};
       Object.keys(threads).forEach((rootId) => {
         safe[rootId] = (threads[rootId] || []).map((msg) => {
           const m = { ...msg };
-          if (Array.isArray(m.imageGroup)) {
-            if (Array.isArray(m.imageRefs) && m.imageRefs.length) {
-              delete m.imageGroup;
-            } else {
+
+          // If imageGroup exists, preserve it for immediate display.
+          // If we have imageRefs, we may drop very large inline data URLs to avoid LS bloat,
+          // but we DO NOT unconditionally delete imageGroup.
+          if (Array.isArray(m.imageGroup) && m.imageGroup.length) {
+            if (!Array.isArray(m.imageRefs)) {
+              // no refs — keep only small inline items
               m.imageGroup = m.imageGroup
-                .map((it) => (typeof it === "string" && it.length < 200 ? it : null))
+                .map((it) =>
+                  typeof it === "string" && it.length < 1000 ? it : null
+                )
                 .filter(Boolean);
+              if (!m.imageGroup.length) delete m.imageGroup;
+            } else {
+              // we have refs — keep imageGroup but strip extremely large data URLs
+              m.imageGroup = m.imageGroup.filter((it, i) => {
+                if (typeof it !== "string") return false;
+                // if there is a corresponding ref and the data is huge, drop it
+                if (m.imageRefs[i] && it.length > 100000) return false;
+                return true;
+              });
+              if (!m.imageGroup.length) delete m.imageGroup;
             }
           }
-          if (m.imagePreview && typeof m.imagePreview === "string" && m.imagePreview.length > 500) {
-            if (m.imageRef) delete m.imagePreview;
-            else delete m.imagePreview;
+
+          // single preview handling: same idea
+          if (m.imagePreview && typeof m.imagePreview === "string") {
+            if (m.imageRef && m.imagePreview.length > 100000) {
+              delete m.imagePreview;
+            } else if (m.imagePreview.length > 200000) {
+              // extremely large - drop it
+              delete m.imagePreview;
+            }
           }
+
           return m;
         });
       });
-      try {
-        localStorage.setItem(LS_THREADS, JSON.stringify(safe));
-      } catch (e) {
-        console.warn("persistThreadMessages failed", e);
-      }
+      localStorage.setItem(LS_THREADS, JSON.stringify(safe));
     } catch (e) {
-      console.warn("persistThreadMessages top-level failed", e);
+      console.warn("persistThreadMessages failed", e);
     }
   };
 
@@ -2713,38 +2748,50 @@ export default function Chat() {
         const existing = threads[rootId] || [];
         const existingMsg = existing.find((x) => x.id === incoming.id);
 
+        // Build normalized stored object that preserves imageGroup for immediate render,
+        // while keeping imageRefs if present for persistence.
+        const makeMsgObj = (src) => {
+          return {
+            id: src.id,
+            from: src.fromName || src.from || "peer",
+            fromId: src.from,
+            text: src.text || "",
+            ts: src.ts || Date.now(),
+            type: "thread",
+            threadRootId: src.threadRootId,
+            deliveries: src.deliveries || [],
+            reads: src.reads || [],
+            replyTo: src.replyTo || null,
+            // Keep inline group if present (for immediate display). Persisting will trim if needed.
+            imageGroup: Array.isArray(src.imageGroup)
+              ? src.imageGroup
+              : undefined,
+            // single preview (if present)
+            imagePreview: src.imagePreview || undefined,
+            // keep metadata
+            imageMeta: src.imageMeta || undefined,
+            // merge any refs if sender provided them
+            imageRefs: Array.isArray(src.imageRefs) ? src.imageRefs : undefined,
+          };
+        };
+
         let updated;
         if (existingMsg) {
           updated = {
             ...threads,
             [rootId]: existing.map((x) =>
-              x.id === incoming.id ? { ...x, ...incoming } : x
+              x.id === incoming.id ? { ...x, ...makeMsgObj(incoming) } : x
             ),
           };
         } else {
-          const msgObj = {
-            id: incoming.id,
-            from: incoming.fromName || incoming.from || "peer",
-            fromId: incoming.from,
-            text: incoming.text || "",
-            ts: incoming.ts || Date.now(),
-            type: "thread",
-            threadRootId: incoming.threadRootId,
-            deliveries: incoming.deliveries || [],
-            reads: incoming.reads || [],
-            replyTo: incoming.replyTo || null,
-            imageGroup: Array.isArray(incoming.imageGroup) ? incoming.imageGroup : undefined,
-            imagePreview: incoming.imagePreview || undefined,
-            imageMeta: incoming.imageMeta || undefined,
-            imageRefs: Array.isArray(incoming.imageRefs) ? incoming.imageRefs : undefined,
-            imageRef: incoming.imageRef || undefined,
-          };
+          const msgObj = makeMsgObj(incoming);
           updated = {
             ...threads,
             [rootId]: [...existing, msgObj],
           };
         }
 
+        // persist the thread messages (persistThreadMessages will trim very large inline data but won't drop imageGroup)
         persistThreadMessages(updated);
         return updated;
       });
@@ -2772,10 +2819,14 @@ export default function Chat() {
         replyTo: incoming.replyTo || null,
         deliveries: incoming.deliveries || [],
         reads: incoming.reads || [],
-        imageGroup: Array.isArray(incoming.imageGroup) ? incoming.imageGroup : undefined,
+        imageGroup: Array.isArray(incoming.imageGroup)
+          ? incoming.imageGroup
+          : undefined,
         imagePreview: incoming.imagePreview || undefined,
         imageMeta: incoming.imageMeta || undefined,
-        imageRefs: Array.isArray(incoming.imageRefs) ? incoming.imageRefs : undefined,
+        imageRefs: Array.isArray(incoming.imageRefs)
+          ? incoming.imageRefs
+          : undefined,
         imageRef: incoming.imageRef || undefined,
       };
 
@@ -3013,7 +3064,9 @@ export default function Chat() {
                       await idbPut(key, item);
                       imageRefs.push(key);
                       validImages.push(item); // Keep for immediate display
-                      console.debug(`Stored incoming image to IndexedDB: ${key}`);
+                      console.debug(
+                        `Stored incoming image to IndexedDB: ${key}`
+                      );
                     } catch (e) {
                       console.warn(`Failed to store incoming image ${key}:`, e);
                       // Still keep the data URL for immediate display
@@ -3519,14 +3572,16 @@ export default function Chat() {
 
     // If there's an active thread open, include the threadRootId as the third param.
     try {
-      if (typeof sendTyping === "function") sendTyping(username, true, activeThread?.id || null);
+      if (typeof sendTyping === "function")
+        sendTyping(username, true, activeThread?.id || null);
     } catch (e) {
       // best-effort, ignore
     }
 
     typingTimeoutRef.current = setTimeout(() => {
       try {
-        if (typeof sendTyping === "function") sendTyping(username, false, activeThread?.id || null);
+        if (typeof sendTyping === "function")
+          sendTyping(username, false, activeThread?.id || null);
       } catch (e) {}
     }, 1200);
     return () => {
@@ -3583,7 +3638,6 @@ export default function Chat() {
     setActiveThread(null);
     setLongPressMessage(null);
   };
-
   const handleSendThreadReply = async (threadMessage) => {
     try {
       const id =
@@ -3610,11 +3664,16 @@ export default function Chat() {
 
       // If threadMessage contains inline images (data URLs), persist them to idb
       const imageRefs = [];
-      if (Array.isArray(threadMessage.imageGroup) && threadMessage.imageGroup.length) {
+      if (
+        Array.isArray(threadMessage.imageGroup) &&
+        threadMessage.imageGroup.length
+      ) {
         await Promise.all(
           threadMessage.imageGroup.map(async (it, i) => {
             try {
-              const key = `img-thread-${msgObjBase.threadRootId || "root"}-${msgObjBase.id}-${i}`;
+              const key = `img-thread-${msgObjBase.threadRootId || "root"}-${
+                msgObjBase.id
+              }-${i}`;
               await idbPut(key, it);
               imageRefs.push(key);
             } catch (e) {
@@ -3622,9 +3681,14 @@ export default function Chat() {
             }
           })
         );
-      } else if (threadMessage.imagePreview && typeof threadMessage.imagePreview === "string") {
+      } else if (
+        threadMessage.imagePreview &&
+        typeof threadMessage.imagePreview === "string"
+      ) {
         try {
-          const key = `img-thread-${msgObjBase.threadRootId || "root"}-${msgObjBase.id}-0`;
+          const key = `img-thread-${msgObjBase.threadRootId || "root"}-${
+            msgObjBase.id
+          }-0`;
           await idbPut(key, threadMessage.imagePreview);
           imageRefs.push(key);
         } catch (e) {
@@ -3634,13 +3698,17 @@ export default function Chat() {
 
       const msgObj = {
         ...msgObjBase,
+        // store imageRefs (if any) rather than heavy inline data
         imageRefs: imageRefs.length ? imageRefs : undefined,
+        // keep inline imageGroup for immediate display (sender) and for sending to peers
         imageGroup:
-          !imageRefs.length && Array.isArray(threadMessage.imageGroup)
+          Array.isArray(threadMessage.imageGroup) &&
+          threadMessage.imageGroup.length
             ? threadMessage.imageGroup
             : undefined,
         imagePreview:
-          !imageRefs.length && threadMessage.imagePreview
+          threadMessage.imagePreview &&
+          typeof threadMessage.imagePreview === "string"
             ? threadMessage.imagePreview
             : undefined,
       };
@@ -3653,11 +3721,12 @@ export default function Chat() {
           ...threads,
           [rootId]: [...existing, msgObj],
         };
+        // persistThreadMessages will trim very large inline data but keep imageGroup where possible
         persistThreadMessages(updated);
         return updated;
       });
 
-      // 2) broadcast to peers using the same object (include inline if present)
+      // 2) broadcast to peers using the same object INCLUDING inline imageGroup
       try {
         sendChat(msgObj);
       } catch (e) {
@@ -4058,7 +4127,13 @@ export default function Chat() {
       try {
         if (m.type === "thread" && m.threadRootId) {
           sendAckRead(m.id, originPeerId, true, m.threadRootId);
-          addUniqueToMsgArray(m.id, "reads", getLocalPeerId() || myId, true, m.threadRootId);
+          addUniqueToMsgArray(
+            m.id,
+            "reads",
+            getLocalPeerId() || myId,
+            true,
+            m.threadRootId
+          );
         } else {
           sendAckRead(m.id, originPeerId);
           addUniqueToMsgArray(m.id, "reads", getLocalPeerId() || myId);
@@ -5159,7 +5234,6 @@ export default function Chat() {
     </>
   );
 }
-
 
 // Round Video Streaming
 // src/components/Chat.jsx// Chat.jsx
