@@ -2874,7 +2874,6 @@ export default function Chat() {
     }
   };
 
-  // mark all messages in a thread as read (and send ack)
   const markThreadAsRead = (rootId) => {
     try {
       const localId = getLocalPeerId() || myId;
@@ -2882,12 +2881,14 @@ export default function Chat() {
       msgs.forEach((m) => {
         const origin = m.fromId || m.from;
         const alreadyRead = Array.isArray(m.reads) && m.reads.includes(localId);
-        if (!alreadyRead) {
-          try {
-            sendAckRead(origin, m.id, true, rootId);
+        if (!origin || origin === localId || alreadyRead) return;
 
-          } catch (e) {}
+        try {
+          // messageId, peerId, isThread, threadRootId
+          sendAckRead(m.id, origin, true, m.threadRootId);
           addUniqueToMsgArray(m.id, "reads", localId, true, rootId);
+        } catch (e) {
+          console.warn("markThreadAsRead: sendAckRead failed", e);
         }
       });
     } catch (e) {
@@ -3159,26 +3160,49 @@ export default function Chat() {
           if (shouldAutoRead) {
             // Small delay to ensure delivery ack is processed first
             // Small delay to ensure delivery ack is processed first
+            // Small delay to ensure delivery ack is processed first
             setTimeout(() => {
-              if (payloadOrText.type === "thread") {
-                // sendAckRead(toPeerId, messageId, isThread, threadRootId)
-                sendAckRead(
-                  origin,
+              try {
+                const toPeer =
+                  payloadOrText.fromId ||
+                  payloadOrText.from ||
+                  payloadOrText.origin ||
+                  null;
+                const localId = getLocalPeerId() || myId;
+
+                console.debug(
+                  "auto-ack: will send read -> to:",
+                  toPeer,
+                  "msg:",
                   payloadOrText.id,
-                  true,
+                  "isThread:",
+                  payloadOrText.type === "thread",
+                  "threadRootId:",
                   payloadOrText.threadRootId
                 );
-                addUniqueToMsgArray(
-                  payloadOrText.id,
-                  "reads",
-                  localId,
-                  true,
-                  payloadOrText.threadRootId
-                );
-              } else {
-                // sendAckRead(toPeerId, messageId)
-                sendAckRead(origin, payloadOrText.id);
-                addUniqueToMsgArray(payloadOrText.id, "reads", localId);
+
+                if (!toPeer) return;
+
+                if (payloadOrText.type === "thread") {
+                  sendAckRead(
+                    payloadOrText.id,
+                    toPeer,
+                    true,
+                    payloadOrText.threadRootId
+                  );
+                  addUniqueToMsgArray(
+                    payloadOrText.id,
+                    "reads",
+                    localId,
+                    true,
+                    payloadOrText.threadRootId
+                  );
+                } else {
+                  // sendAckRead(toPeerId, messageId)
+                  addUniqueToMsgArray(payloadOrText.id, "reads", localId);
+                }
+              } catch (e) {
+                console.warn("auto-ack timeout block error", e);
               }
             }, 100);
           }
@@ -3498,47 +3522,61 @@ export default function Chat() {
         payloadOrText.id
       ) {
         try {
-          // Store the message with images intact
+          // Normalize sender fields so we always have payloadOrText.fromId and payloadOrText.from
+          const canonicalFromId =
+            payloadOrText.fromId ||
+            payloadOrText.from ||
+            payloadOrText.origin ||
+            payloadOrText.peer ||
+            payloadOrText.sender ||
+            null;
+          const canonicalFromName =
+            payloadOrText.fromName || payloadOrText.name || null;
+
+          if (!payloadOrText.fromId && canonicalFromId)
+            payloadOrText.fromId = canonicalFromId;
+          if (!payloadOrText.from && (canonicalFromName || canonicalFromId)) {
+            payloadOrText.from = canonicalFromName || canonicalFromId;
+          }
+
+          console.debug("Chat/thread incoming normalized:", {
+            id: payloadOrText.id,
+            raw: {
+              from: payloadOrText.from,
+              fromId: payloadOrText.fromId,
+              fromName: payloadOrText.fromName,
+            },
+            envelopeFrom: from,
+          });
+
+          // store message and UI update
           upsertIncomingChat(payloadOrText);
           maybeNotify(
             payloadOrText.fromName || payloadOrText.from,
             payloadOrText.text
           );
 
-          // Auto-read if tab is visible
+          // acknowledgments: always send delivery first, then read (if visible)
           try {
-            const origin = payloadOrText.from || payloadOrText.origin;
-            const localId = getLocalPeerId() || myId;
-
-            if (
-              payloadOrText &&
-              typeof payloadOrText === "object" &&
-              (payloadOrText.type === "chat" ||
-                payloadOrText.type === "thread") &&
-              payloadOrText.id
-            ) {
-              try {
-                // Store the message with images intact
-                upsertIncomingChat(payloadOrText);
-                maybeNotify(
-                  payloadOrText.fromName || payloadOrText.from,
-                  payloadOrText.text
-                );
-
-                // Handle acknowledgments
-                await handleAutoAcknowledgment(payloadOrText);
-              } catch (e) {
-                console.warn("Chat message handler failed:", e, payloadOrText);
-              }
-              return;
-            }
+            await handleAutoAcknowledgment(payloadOrText);
           } catch (e) {
-            console.warn("Auto-read failed:", e);
+            console.warn(
+              "handleAutoAcknowledgment failed for chat/thread:",
+              e,
+              payloadOrText
+            );
           }
-        } catch (e) {
-          console.warn("Chat message handler failed:", e, payloadOrText);
+
+          // done handling this chat/thread object
+          return;
+        } catch (err) {
+          console.warn(
+            "Chat/thread message handler failed:",
+            err,
+            payloadOrText
+          );
+          return;
         }
-        return;
       }
 
       // 10) String fallback
@@ -3589,26 +3627,25 @@ export default function Chat() {
   };
 
   // init peer — always init even if username is not yet set
-useEffect(() => {
-  // don't block peer creation on username — pass username or null
-  const p = initPeer(
-    handleIncoming,
-    handlePeerListUpdate,
-    username || "", // allow empty display name
-    handleBootstrapChange
-  );
-  peerRef.current = p;
-  p.on && p.on("open", (id) => setMyId(id));
-  const bootstrap = localStorage.getItem("ph_hub_bootstrap");
-  setJoinedBootstrap(bootstrap || "");
-  return () => {
-    try {
-      p && p.destroy && p.destroy();
-    } catch (e) {}
-  };
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-}, []); // run once on mount
-
+  useEffect(() => {
+    // don't block peer creation on username — pass username or null
+    const p = initPeer(
+      handleIncoming,
+      handlePeerListUpdate,
+      username || "", // allow empty display name
+      handleBootstrapChange
+    );
+    peerRef.current = p;
+    p.on && p.on("open", (id) => setMyId(id));
+    const bootstrap = localStorage.getItem("ph_hub_bootstrap");
+    setJoinedBootstrap(bootstrap || "");
+    return () => {
+      try {
+        p && p.destroy && p.destroy();
+      } catch (e) {}
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []); // run once on mount
 
   // autoscroll
   useEffect(() => {
@@ -3621,65 +3658,72 @@ useEffect(() => {
     } catch (e) {}
   }, [messages]);
 
-  // visibility ack_read — mark both chat and thread messages as read when tab becomes visible
-  // Enhanced visibility change handler - replace the existing useEffect
   useEffect(() => {
     const onVisibility = () => {
-      if (document.visibilityState === "visible") {
-        const localId = getLocalPeerId() || myId;
+      if (document.visibilityState !== "visible") return;
+      const localId = getLocalPeerId() || myId;
 
-        // Mark chat messages as read
-        messages.forEach((m) => {
-          if (!m || m.type !== "chat") return;
+      // chat messages
+      messages.forEach((m) => {
+        if (!m || m.type !== "chat") return;
+        const origin = m.fromId || m.from;
+        if (!origin || origin === localId) return;
+
+        const alreadyRead = Array.isArray(m.reads) && m.reads.includes(localId);
+        if (!alreadyRead) {
+          setTimeout(() => {
+            try {
+              console.debug(
+                "visibility -> send read (chat) to:",
+                origin,
+                "msg:",
+                m.id
+              );
+              // messageId, peerId
+              sendAckRead(m.id, origin);
+              addUniqueToMsgArray(m.id, "reads", localId);
+            } catch (e) {
+              console.warn("sendAckRead error (on visibility):", e);
+            }
+          }, Math.random() * 500 + 100);
+        }
+      });
+
+      // thread messages — IMPORTANT: rootId is declared here
+      Object.keys(threadMessages || {}).forEach((rootId) => {
+        (threadMessages[rootId] || []).forEach((m) => {
+          if (!m || m.type !== "thread") return;
           const origin = m.fromId || m.from;
           if (!origin || origin === localId) return;
 
           const alreadyRead =
             Array.isArray(m.reads) && m.reads.includes(localId);
           if (!alreadyRead) {
-            // Add a small delay to batch read acknowledgments
             setTimeout(() => {
               try {
-                sendAckRead(origin, m.id);
-                addUniqueToMsgArray(m.id, "reads", localId);
+                console.debug(
+                  "visibility -> send read (thread) to:",
+                  origin,
+                  "msg:",
+                  m.id,
+                  "rootId:",
+                  rootId
+                );
+                // messageId, peerId, isThread, threadRootId
+                sendAckRead(m.id, origin, true, rootId);
+                addUniqueToMsgArray(m.id, "reads", localId, true, rootId);
               } catch (e) {
-                console.warn("sendAckRead error (on visibility):", e);
+                console.warn("sendAckRead (thread) failed:", e);
               }
-            }, Math.random() * 500 + 100); // Random delay between 100-600ms
+            }, Math.random() * 500 + 200);
           }
         });
-
-        // Mark thread messages as read
-        Object.keys(threadMessages || {}).forEach((rootId) => {
-          (threadMessages[rootId] || []).forEach((m) => {
-            if (!m || m.type !== "thread") return;
-            const origin = m.fromId || m.from;
-            if (!origin || origin === localId) return;
-
-            const alreadyRead =
-              Array.isArray(m.reads) && m.reads.includes(localId);
-            if (!alreadyRead) {
-              setTimeout(() => {
-                try {
-                  sendAckRead(origin, m.id, true, rootId);
-
-                  addUniqueToMsgArray(m.id, "reads", localId, true, rootId);
-                } catch (e) {
-                  console.warn("sendAckRead (thread) failed:", e);
-                }
-              }, Math.random() * 500 + 200); // Slightly different delay range
-            }
-          });
-        });
-      }
+      });
     };
 
     document.addEventListener("visibilitychange", onVisibility);
-
-    // Also run immediately if already visible
-    if (document.visibilityState === "visible") {
-      onVisibility();
-    }
+    // run immediately if visible now
+    if (document.visibilityState === "visible") onVisibility();
 
     return () => document.removeEventListener("visibilitychange", onVisibility);
   }, [messages, threadMessages, myId]);
@@ -4252,21 +4296,26 @@ useEffect(() => {
     );
     if (input) input.focus();
 
-    const originPeerId = m.fromId || m.from;
+    const originPeerId = m.fromId || m.from || null;
     if (m.id && originPeerId) {
       try {
+        const localId = getLocalPeerId() || myId;
+        console.debug(
+          "tapMessage -> send read to:",
+          originPeerId,
+          "msg:",
+          m.id,
+          "isThread:",
+          m.type === "thread",
+          "root:",
+          m.threadRootId
+        );
         if (m.type === "thread" && m.threadRootId) {
           sendAckRead(m.id, originPeerId, true, m.threadRootId);
-          addUniqueToMsgArray(
-            m.id,
-            "reads",
-            getLocalPeerId() || myId,
-            true,
-            m.threadRootId
-          );
+          addUniqueToMsgArray(m.id, "reads", localId, true, m.threadRootId);
         } else {
           sendAckRead(m.id, originPeerId);
-          addUniqueToMsgArray(m.id, "reads", getLocalPeerId() || myId);
+          addUniqueToMsgArray(m.id, "reads", localId);
         }
       } catch (e) {
         console.warn("sendAckRead error", e);
