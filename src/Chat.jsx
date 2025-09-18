@@ -4383,7 +4383,7 @@ export default function Chat() {
     if (totalPeers === 0) {
       return (
         <span
-          className="inline-block w-2 h-2 rounded-full bg-gray-400 ml-2"
+          className="inline-block w-2 h-2 rounded-full bg-red-500 ml-2"
           title="No recipients (offline)"
         />
       );
