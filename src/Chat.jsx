@@ -2383,6 +2383,10 @@ export default function Chat() {
     return [];
   });
 
+  const [notificationsEnabled, setNotificationsEnabled] = useState(
+    Notification.permission === "granted"
+  );
+
   // Threading state
   const [threadMessages, setThreadMessages] = useState(() => {
     try {
@@ -2688,6 +2692,47 @@ export default function Chat() {
     } catch (e) {
       console.warn("persistMessages top-level failed", e);
     }
+  };
+
+  const handleToggleNotifications = async () => {
+    try {
+      if (Notification.permission === "granted") {
+        // can't programmatically revoke; just reflect state
+        alert("Notifications already granted in browser settings.");
+        setNotificationsEnabled(true);
+        return;
+      }
+
+      const result = await requestNotificationPermission();
+      setNotificationsEnabled(result === "granted");
+      if (result !== "granted") {
+        alert(
+          "You blocked notifications. To enable, allow them in your browser settings."
+        );
+      }
+    } catch (e) {
+      console.warn("handleToggleNotifications failed:", e);
+    }
+  };
+
+  const handleSetName = () => {
+    const newName = prompt("Enter your new display name:", username);
+    if (!newName) return;
+    setUsername(newName);
+    localStorage.setItem("ph_name", newName);
+
+    const sys = {
+      id: `sys-namechange-${Date.now()}`,
+      from: "System",
+      text: `You are now known as ${newName}`,
+      ts: Date.now(),
+      type: "system",
+    };
+    setMessages((m) => {
+      const next = [...m, sys];
+      persistMessages(next);
+      return next;
+    });
   };
 
   // persist thread messages helper — keep imageGroup alongside imageRefs where possible
@@ -5209,6 +5254,26 @@ export default function Chat() {
                 <span className="font-semibold">Clear all images</span>
                 <div className="text-xs text-gray-400">
                   Remove cached images (local)
+                </div>
+              </button>
+
+              <button
+                onClick={handleSetName}
+                className="w-full text-left px-4 py-3 hover:bg-white/20 border-b border-white/5 text-purple-500"
+              >
+                <span className="font-semibold">Set Name</span>
+                <div className="text-xs text-gray-400">
+                  Update your display name
+                </div>
+              </button>
+
+              <button
+                onClick={handleToggleNotifications}
+                className="w-full text-left px-4 py-3 hover:bg-white/20 border-b border-white/5 text-blue-500"
+              >
+                <span className="font-semibold">Toggle Notifications</span>
+                <div className="text-xs text-gray-400">
+                  {notificationsEnabled ? "Enabled" : "Try enabling again"}
                 </div>
               </button>
 
