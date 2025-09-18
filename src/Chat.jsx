@@ -2382,60 +2382,6 @@ export default function Chat() {
     return [];
   });
 
-  // after messages state is defined
-  useEffect(() => {
-    let cancelled = false;
-    (async () => {
-      try {
-        const raw = localStorage.getItem(LS_MSGS);
-        if (!raw) return;
-        const parsed = JSON.parse(raw);
-        if (!Array.isArray(parsed)) return;
-
-        // For each message with imageRefs, fetch images from idb
-        const rehydrated = await Promise.all(
-          parsed.map(async (m) => {
-            if (
-              m.imageRefs &&
-              Array.isArray(m.imageRefs) &&
-              m.imageRefs.length
-            ) {
-              const imgs = [];
-              for (const key of m.imageRefs) {
-                try {
-                  const dataUrl = await idbGet(key);
-                  if (dataUrl) imgs.push(dataUrl);
-                } catch (e) {
-                  // ignore
-                }
-              }
-              if (imgs.length) {
-                // for groups put imageGroup, for single pref use imagePreview
-                return {
-                  ...m,
-                  imageGroup: imgs /* keep imageRefs if you want */,
-                };
-              }
-            }
-            // fallback: if message already had inline imageGroup as strings, keep them
-            return m;
-          })
-        );
-
-        if (!cancelled) {
-          setMessages(rehydrated);
-        }
-      } catch (e) {
-        console.warn("rehydrate images failed", e);
-      }
-    })();
-
-    return () => {
-      cancelled = true;
-    };
-    // run only on mount
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
 
   // hydrate any messages that have imageRefs but no imageGroup (runs after mount & on new messages)
   // after messages state is defined
