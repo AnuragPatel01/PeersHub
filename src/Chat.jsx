@@ -2884,7 +2884,6 @@ export default function Chat() {
         if (!alreadyRead) {
           try {
             sendAckRead(origin, m.id, true, rootId);
-
           } catch (e) {}
           addUniqueToMsgArray(m.id, "reads", localId, true, rootId);
         }
@@ -3588,26 +3587,25 @@ export default function Chat() {
   };
 
   // init peer — always init even if username is not yet set
-useEffect(() => {
-  // don't block peer creation on username — pass username or null
-  const p = initPeer(
-    handleIncoming,
-    handlePeerListUpdate,
-    username || "", // allow empty display name
-    handleBootstrapChange
-  );
-  peerRef.current = p;
-  p.on && p.on("open", (id) => setMyId(id));
-  const bootstrap = localStorage.getItem("ph_hub_bootstrap");
-  setJoinedBootstrap(bootstrap || "");
-  return () => {
-    try {
-      p && p.destroy && p.destroy();
-    } catch (e) {}
-  };
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-}, []); // run once on mount
-
+  useEffect(() => {
+    // don't block peer creation on username — pass username or null
+    const p = initPeer(
+      handleIncoming,
+      handlePeerListUpdate,
+      username || "", // allow empty display name
+      handleBootstrapChange
+    );
+    peerRef.current = p;
+    p.on && p.on("open", (id) => setMyId(id));
+    const bootstrap = localStorage.getItem("ph_hub_bootstrap");
+    setJoinedBootstrap(bootstrap || "");
+    return () => {
+      try {
+        p && p.destroy && p.destroy();
+      } catch (e) {}
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []); // run once on mount
 
   // autoscroll
   useEffect(() => {
@@ -4254,18 +4252,15 @@ useEffect(() => {
     const originPeerId = m.fromId || m.from;
     if (m.id && originPeerId) {
       try {
+        const localId = getLocalPeerId() || myId;
         if (m.type === "thread" && m.threadRootId) {
-          sendAckRead(m.id, originPeerId, true, m.threadRootId);
-          addUniqueToMsgArray(
-            m.id,
-            "reads",
-            getLocalPeerId() || myId,
-            true,
-            m.threadRootId
-          );
+          // correct arg order: sendAckRead(toPeerId, messageId, isThread, threadRootId)
+          sendAckRead(originPeerId, m.id, true, m.threadRootId);
+          addUniqueToMsgArray(m.id, "reads", localId, true, m.threadRootId);
         } else {
-          sendAckRead(m.id, originPeerId);
-          addUniqueToMsgArray(m.id, "reads", getLocalPeerId() || myId);
+          // correct arg order: sendAckRead(toPeerId, messageId)
+          sendAckRead(originPeerId, m.id);
+          addUniqueToMsgArray(m.id, "reads", localId);
         }
       } catch (e) {
         console.warn("sendAckRead error", e);
