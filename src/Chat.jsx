@@ -2411,60 +2411,31 @@ export default function Chat() {
       const tail = arr.slice(-MAX_MSGS).map((msg) => {
         const m = { ...msg };
 
-        // Keep imageGroup for display, imageRefs for deduplication
-        // Only remove extremely large inline data URLs (>100KB) when a ref exists
+        // Strip heavy inline data, keep only refs/meta
         if (Array.isArray(m.imageGroup) && m.imageGroup.length) {
-          // ensure imageRefs exists (may be undefined)
-          if (!Array.isArray(m.imageRefs)) m.imageRefs = m.imageRefs || [];
-
-          // filter logic: keep small inline items; if we have a ref for this index and the dataUrl is > threshold, drop it
-          const threshold = 100 * 1024; // 100KB
-          m.imageGroup = m.imageGroup
-            .map((it, idx) => {
-              if (typeof it !== "string") return null;
-              if (m.imageRefs[idx] && it.length > threshold) return null;
-              return it;
-            })
-            .filter(Boolean);
-
-          if (!m.imageGroup.length) delete m.imageGroup;
+          if (Array.isArray(m.imageRefs) && m.imageRefs.length) {
+            // Already have refs → drop heavy base64
+            delete m.imageGroup;
+          } else {
+            // No refs? Fallback: keep only tiny strings (<200 chars)
+            m.imageGroup = m.imageGroup
+              .map((s) => (typeof s === "string" && s.length < 200 ? s : null))
+              .filter(Boolean);
+          }
         }
 
-        // handle single preview similarly
         if (m.imagePreview && typeof m.imagePreview === "string") {
-          const threshold = 100 * 1024;
-          if (m.imageRef && m.imagePreview.length > threshold) {
+          if (m.imagePreview.length > 200 && m.imageRef) {
             delete m.imagePreview;
           }
         }
 
-        // leave imageRefs intact
         return m;
       });
 
       localStorage.setItem(LS_MSGS, JSON.stringify(tail));
     } catch (e) {
       console.warn("persistMessages failed", e);
-
-      // aggressive fallback on quota errors
-      try {
-        if (e && (e.name === "QuotaExceededError" || (e.message || "").toLowerCase().includes("quota"))) {
-          const aggressiveTail = arr.slice(-Math.min(50, MAX_MSGS)).map((msg) => {
-            const m = { ...msg };
-            if (Array.isArray(m.imageGroup)) {
-              m.imageGroup = m.imageGroup.filter((it) => typeof it === "string" && it.length < 1000);
-              if (!m.imageGroup.length) delete m.imageGroup;
-            }
-            if (m.imagePreview && typeof m.imagePreview === "string" && m.imagePreview.length > 1000) {
-              delete m.imagePreview;
-            }
-            return m;
-          });
-          localStorage.setItem(LS_MSGS, JSON.stringify(aggressiveTail));
-        }
-      } catch (e2) {
-        console.warn("Aggressive persist also failed", e2);
-      }
     }
   };
 
@@ -2490,7 +2461,8 @@ export default function Chat() {
 
           if (m.imagePreview && typeof m.imagePreview === "string") {
             const threshold = 100 * 1024;
-            if (m.imageRef && m.imagePreview.length > threshold) delete m.imagePreview;
+            if (m.imageRef && m.imagePreview.length > threshold)
+              delete m.imagePreview;
           }
 
           return m;
@@ -2526,12 +2498,21 @@ export default function Chat() {
             const copy = { ...m };
             let added = false;
 
-            if (Array.isArray(copy.imageRefs) && copy.imageRefs.length && !Array.isArray(copy.imageGroup)) {
+            if (
+              Array.isArray(copy.imageRefs) &&
+              copy.imageRefs.length &&
+              !Array.isArray(copy.imageGroup)
+            ) {
               const imgs = [];
               for (const key of copy.imageRefs) {
                 try {
                   const dataUrl = await idbGet(key);
-                  if (dataUrl && typeof dataUrl === "string" && dataUrl.startsWith("data:")) imgs.push(dataUrl);
+                  if (
+                    dataUrl &&
+                    typeof dataUrl === "string" &&
+                    dataUrl.startsWith("data:")
+                  )
+                    imgs.push(dataUrl);
                 } catch (e) {
                   // ignore per-image errors
                 }
@@ -2545,7 +2526,11 @@ export default function Chat() {
             if (copy.imageRef && !copy.imagePreview) {
               try {
                 const dataUrl = await idbGet(copy.imageRef);
-                if (dataUrl && typeof dataUrl === "string" && dataUrl.startsWith("data:")) {
+                if (
+                  dataUrl &&
+                  typeof dataUrl === "string" &&
+                  dataUrl.startsWith("data:")
+                ) {
                   copy.imagePreview = dataUrl;
                   added = true;
                 }
@@ -2564,7 +2549,9 @@ export default function Chat() {
         setMessages((current) => {
           if (!current || !current.length) {
             // no in-memory messages — adopt the rehydrated messages (but also keep any parsed ones)
-            const merged = parsed.map((m) => (rehydratedMap.has(m.id) ? { ...m, ...rehydratedMap.get(m.id) } : m));
+            const merged = parsed.map((m) =>
+              rehydratedMap.has(m.id) ? { ...m, ...rehydratedMap.get(m.id) } : m
+            );
             return merged;
           }
           // merge onto existing current array (prefer in-memory fields, but add imageGroup/imagePreview when available)
@@ -2574,8 +2561,13 @@ export default function Chat() {
             if (!updated) return m;
             // Only add imageGroup/imagePreview if missing
             const out = { ...m };
-            if (!Array.isArray(out.imageGroup) && Array.isArray(updated.imageGroup)) out.imageGroup = updated.imageGroup;
-            if (!out.imagePreview && updated.imagePreview) out.imagePreview = updated.imagePreview;
+            if (
+              !Array.isArray(out.imageGroup) &&
+              Array.isArray(updated.imageGroup)
+            )
+              out.imageGroup = updated.imageGroup;
+            if (!out.imagePreview && updated.imagePreview)
+              out.imagePreview = updated.imagePreview;
             return out;
           });
 
@@ -2583,7 +2575,11 @@ export default function Chat() {
           const currentIds = new Set(current.map((x) => x.id));
           parsed.forEach((m) => {
             if (!currentIds.has(m.id)) {
-              next.push(rehydratedMap.has(m.id) ? { ...m, ...rehydratedMap.get(m.id) } : m);
+              next.push(
+                rehydratedMap.has(m.id)
+                  ? { ...m, ...rehydratedMap.get(m.id) }
+                  : m
+              );
             }
           });
 
@@ -2621,7 +2617,10 @@ export default function Chat() {
           for (const m of msgs) {
             if (!m || !m.id) continue;
 
-            const needsGroup = Array.isArray(m.imageRefs) && m.imageRefs.length && !Array.isArray(m.imageGroup);
+            const needsGroup =
+              Array.isArray(m.imageRefs) &&
+              m.imageRefs.length &&
+              !Array.isArray(m.imageGroup);
             const needsPreview = m.imageRef && !m.imagePreview;
 
             if (!needsGroup && !needsPreview) continue;
@@ -2633,7 +2632,12 @@ export default function Chat() {
               for (const key of m.imageRefs) {
                 try {
                   const dataUrl = await idbGet(key);
-                  if (dataUrl && typeof dataUrl === "string" && dataUrl.startsWith("data:")) imageGroup.push(dataUrl);
+                  if (
+                    dataUrl &&
+                    typeof dataUrl === "string" &&
+                    dataUrl.startsWith("data:")
+                  )
+                    imageGroup.push(dataUrl);
                 } catch (e) {}
               }
             }
@@ -2641,7 +2645,11 @@ export default function Chat() {
             if (needsPreview) {
               try {
                 const dataUrl = await idbGet(m.imageRef);
-                if (dataUrl && typeof dataUrl === "string" && dataUrl.startsWith("data:")) {
+                if (
+                  dataUrl &&
+                  typeof dataUrl === "string" &&
+                  dataUrl.startsWith("data:")
+                ) {
                   imagePreview = dataUrl;
                 }
               } catch (e) {}
@@ -2666,7 +2674,11 @@ export default function Chat() {
               copy[rootId] = (copy[rootId] || []).map((msg) => {
                 const u = updates[rootId][msg.id];
                 if (!u) return msg;
-                return { ...msg, ...(u.imageGroup ? { imageGroup: u.imageGroup } : {}), ...(u.imagePreview ? { imagePreview: u.imagePreview } : {}) };
+                return {
+                  ...msg,
+                  ...(u.imageGroup ? { imageGroup: u.imageGroup } : {}),
+                  ...(u.imagePreview ? { imagePreview: u.imagePreview } : {}),
+                };
               });
             });
             persistThreadMessages(copy);
@@ -2789,11 +2801,13 @@ export default function Chat() {
       const threadRootId = activeThread?.id || null;
       try {
         // Try sending with (username, isTyping, threadRootId) — matches other system calls
-        if (typeof sendTyping === "function") sendTyping(username, true, threadRootId);
+        if (typeof sendTyping === "function")
+          sendTyping(username, true, threadRootId);
       } catch (e) {
         try {
           // fallback: older API variant sendTyping(username, { isTyping: true, threadRootId })
-          if (typeof sendTyping === "function") sendTyping(username, { isTyping: true, threadRootId });
+          if (typeof sendTyping === "function")
+            sendTyping(username, { isTyping: true, threadRootId });
         } catch (er) {}
       }
     } catch (e) {}
@@ -2801,10 +2815,15 @@ export default function Chat() {
     typingTimeoutRef.current = setTimeout(() => {
       try {
         const threadRootId = activeThread?.id || null;
-        if (typeof sendTyping === "function") sendTyping(username, false, threadRootId);
+        if (typeof sendTyping === "function")
+          sendTyping(username, false, threadRootId);
       } catch (e) {
         try {
-          if (typeof sendTyping === "function") sendTyping(username, { isTyping: false, threadRootId: activeThread?.id || null });
+          if (typeof sendTyping === "function")
+            sendTyping(username, {
+              isTyping: false,
+              threadRootId: activeThread?.id || null,
+            });
         } catch (er) {}
       }
     }, 1200);
@@ -3247,7 +3266,7 @@ export default function Chat() {
         })
       );
 
-      // CRITICAL CHANGE: Local message includes BOTH imageRefs AND imageGroup
+      // Local message object — light
       const localMsgObj = {
         id: msgId,
         from: username || "You",
@@ -3256,13 +3275,26 @@ export default function Chat() {
         ts: Date.now(),
         type: "chat",
         imageRefs,
-        imageGroup: previews.map((p) => p.dataUrl), // include for sender display and persistence
         imageMeta: previews.map((p) => ({ name: p.name })),
         text: caption || text || "",
         deliveries: [],
         reads: [localId],
         replyTo: replyTo ? { ...replyTo } : undefined,
       };
+
+      // Show locally (hydration will rebuild imageGroup later)
+      setMessages((m) => {
+        const next = [...m, localMsgObj];
+        persistMessages(next);
+        return next;
+      });
+
+      // Message to send to peers — send inline base64 so THEY can see immediately
+      const sendMsgObj = {
+        ...localMsgObj,
+        imageGroup: previews.map((p) => p.dataUrl),
+      };
+      sendChat(sendMsgObj);
 
       // Show + persist locally (persistMessages will only strip very large items if needed)
       setMessages((m) => {
@@ -3686,7 +3718,9 @@ export default function Chat() {
               incomingCopy.imageGroup = validImages;
               if (imageRefs.length > 0) {
                 incomingCopy.imageRefs = Array.isArray(incomingCopy.imageRefs)
-                  ? Array.from(new Set([...incomingCopy.imageRefs, ...imageRefs]))
+                  ? Array.from(
+                      new Set([...incomingCopy.imageRefs, ...imageRefs])
+                    )
                   : imageRefs;
               }
             }
@@ -5310,7 +5344,6 @@ export default function Chat() {
     </>
   );
 }
-
 
 // Round Video Streaming
 // src/components/Chat.jsx// Chat.jsx
