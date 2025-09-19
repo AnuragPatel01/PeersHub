@@ -3136,6 +3136,37 @@ export default function Chat() {
           return;
         }
 
+        if (msg.type && msg.type.toString().startsWith("system") && msg.text) {
+          let maybeObj = null;
+          try {
+            maybeObj = JSON.parse(msg.text);
+          } catch (e) {}
+
+          if (maybeObj && maybeObj.action === "force-leave") {
+            const target = maybeObj.target;
+            const local = getLocalPeerId() || myId;
+
+            if (target === local) {
+              // target peer: show removed + leave
+              const sys = {
+                id: `sys-forced-left-${Date.now()}`,
+                from: "System",
+                text: "You were removed from the hub by the host.",
+                ts: Date.now(),
+                type: "system",
+              };
+              setMessages((m) => [...m, sys]);
+              await deleteImgDB().catch(() => {});
+              leaveHub();
+              localStorage.removeItem("ph_hub_bootstrap");
+              localStorage.removeItem("ph_should_autojoin");
+            }
+
+            // ✅ skip pushing raw JSON to chat for others
+            return;
+          }
+        }
+
         // Case B: broadcast JSON inside system text or a special system type
         if (
           payloadOrText &&
@@ -3777,42 +3808,32 @@ export default function Chat() {
 
   // normalize various incoming list shapes into [{id, name, isHost}, ...]
   const handlePeerListUpdate = (list) => {
-    try {
-      if (!list) {
-        setPeers([]);
-        return;
-      }
+    const arr = Array.isArray(list) ? list : Object.values(list || {});
+    const norm = arr
+      .map((it) => {
+        if (!it) return null;
+        if (typeof it === "string") {
+          return { id: it, name: getPeerNames()[it] || it, isHost: false };
+        }
+        return {
+          id: it.id,
+          name: it.name || getPeerNames()[it.id] || it.id,
+          isHost: Boolean(it.isHost),
+        };
+      })
+      .filter(Boolean);
 
-      // If list is an object keyed by id, convert to array
-      let arr = Array.isArray(list)
-        ? list
-        : Object.keys(list).map((k) => list[k]);
-
-      // Normalize: if items are strings treat as id-only; if objects, read fields
-      const norm = arr
-        .map((it) => {
-          if (!it) return null;
-          if (typeof it === "string") {
-            const id = it;
-            return { id, name: getPeerNames()[id] || id, isHost: false };
-          }
-          // if it already is { id, name, isHost } but name might be missing:
-          const id = it.id || it.peer || it.from || JSON.stringify(it);
-          const name = it.name || it.fromName || getPeerNames()[id] || id;
-          const isHost = Boolean(it.isHost || it.host || it.role === "host");
-          return { id, name, isHost };
-        })
-        .filter(Boolean);
-
-      setPeers(norm);
-      // keep peerNamesMap in sync
-      try {
-        setPeerNamesMap(getPeerNames() || {});
-      } catch (e) {}
-    } catch (e) {
-      console.warn("handlePeerListUpdate normalization failed:", e, list);
-      setPeers([]);
-    }
+    // keep local host flag if we are the host
+    setPeers((prev) => {
+      return norm.map((p) => {
+        if (p.id === localId) {
+          // if you were already marked host, keep it
+          const wasHost = prev.find((x) => x.id === localId)?.isHost;
+          return { ...p, isHost: wasHost || p.isHost };
+        }
+        return p;
+      });
+    });
   };
 
   const handleBootstrapChange = (newBootstrapId) => {
@@ -4170,9 +4191,19 @@ export default function Chat() {
     setLocalId(id);
     setLocalIsHost(true);
 
-    // set peers list with yourself as host entry
     const hostEntry = { id, name: username || "Host", isHost: true };
     setPeers([hostEntry]);
+
+    // also broadcast to others with isHost: true
+    try {
+      broadcastSystem(
+        "system_peers_list",
+        JSON.stringify([hostEntry]),
+        `sys-peers-${id}`
+      );
+    } catch (e) {
+      console.warn("broadcastSystem failed (host list)", e);
+    }
 
     // optional: announce to UI messages
     const sysPlain = {
