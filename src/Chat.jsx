@@ -3136,18 +3136,35 @@ export default function Chat() {
           return;
         }
 
-        if (msg.type && msg.type.toString().startsWith("system") && msg.text) {
+        // Case B: broadcast JSON inside system text or a special system type
+        if (
+          payloadOrText &&
+          typeof payloadOrText === "object" &&
+          payloadOrText.type &&
+          payloadOrText.type.toString().startsWith("system")
+        ) {
+          // Attempt to extract JSON payload from .text (or payloadOrText itself may be the object)
           let maybeObj = null;
-          try {
-            maybeObj = JSON.parse(msg.text);
-          } catch (e) {}
+          if (typeof payloadOrText.text === "string") {
+            try {
+              maybeObj = JSON.parse(payloadOrText.text);
+            } catch (e) {
+              maybeObj = null;
+            }
+          }
+          // If the system payload itself carries action fields directly, use it
+          if (!maybeObj && typeof payloadOrText.action === "string") {
+            maybeObj = payloadOrText;
+          }
 
-          if (maybeObj && maybeObj.action === "force-leave") {
-            const target = maybeObj.target;
+          if (
+            maybeObj &&
+            (maybeObj.action === "force-leave" ||
+              maybeObj.action === "forceLeave")
+          ) {
+            const target = maybeObj.target || maybeObj.to || maybeObj.peer;
             const local = getLocalPeerId() || myId;
-
             if (target === local) {
-              // target peer: show removed + leave
               const sys = {
                 id: `sys-forced-left-${Date.now()}`,
                 from: "System",
@@ -3155,92 +3172,25 @@ export default function Chat() {
                 ts: Date.now(),
                 type: "system",
               };
-              setMessages((m) => [...m, sys]);
-              await deleteImgDB().catch(() => {});
-              leaveHub();
+              setMessages((m) => {
+                const next = [...m, sys];
+                persistMessages(next);
+                return next;
+              });
+
+              try {
+                await deleteImgDB().catch(() => {});
+              } catch (e) {}
+              try {
+                leaveHub();
+              } catch (e) {}
               localStorage.removeItem("ph_hub_bootstrap");
               localStorage.removeItem("ph_should_autojoin");
+              return;
             }
-
-            // ✅ skip pushing raw JSON to chat for others
-            return;
+            // If target doesn't match, ignore
           }
-        }
-
-        // Case B: broadcast JSON inside system text or a special system type
-        // Accept special system messages that carry JSON payloads
-        if (
-          payloadOrText &&
-          typeof payloadOrText === "object" &&
-          payloadOrText.type &&
-          payloadOrText.type.toString().startsWith("system")
-        ) {
-          try {
-            const t = payloadOrText.type;
-            const txt = payloadOrText.text;
-
-            // peers list broadcast (host -> everyone)
-            if (t === "system_peers_list" && typeof txt === "string") {
-              try {
-                const parsed = JSON.parse(txt);
-                // if the parsed payload is an array of peers, set them
-                if (Array.isArray(parsed)) {
-                  handlePeerListUpdate(parsed);
-                  // don't show the raw JSON in chat
-                  return;
-                }
-              } catch (e) {
-                // ignore parse errors
-              }
-            }
-
-            // force-leave broadcast shape (fallback)
-            if (
-              (t === "system_peers_force" ||
-                t === "system_force" ||
-                t === "system") &&
-              typeof txt === "string"
-            ) {
-              try {
-                const obj = JSON.parse(txt);
-                if (
-                  obj &&
-                  (obj.action === "force-leave" || obj.action === "forceLeave")
-                ) {
-                  const local = getLocalPeerId() || myId;
-                  if (obj.target === local) {
-                    // target: perform local cleanup + leave
-                    const sys = {
-                      id: `sys-forced-left-${Date.now()}`,
-                      from: "System",
-                      text: "You were removed from the hub by the host.",
-                      ts: Date.now(),
-                      type: "system",
-                    };
-                    setMessages((m) => {
-                      const next = [...m, sys];
-                      persistMessages(next);
-                      return next;
-                    });
-                    await deleteImgDB().catch(() => {});
-                    leaveHub();
-                    localStorage.removeItem("ph_hub_bootstrap");
-                    localStorage.removeItem("ph_should_autojoin");
-                  }
-                  // other peers ignore this JSON (we returned early)
-                  return;
-                }
-              } catch (e) {
-                // not JSON or parse failed, continue
-              }
-            }
-          } catch (err) {
-            console.warn(
-              "incoming system special-case handling failed:",
-              err,
-              payloadOrText
-            );
-          }
+          // continue - non-force system messages handled later down
         }
       } catch (sysErr) {
         console.warn("force-leave handler error:", sysErr, payloadOrText);
@@ -3410,7 +3360,7 @@ export default function Chat() {
                     payloadOrText.threadRootId
                   );
                 } else {
-                  sendAckRead(payloadOrText.id, toPeer);
+                  // sendAckRead(toPeerId, messageId)
                   addUniqueToMsgArray(payloadOrText.id, "reads", localId);
                 }
               } catch (e) {
@@ -3825,47 +3775,40 @@ export default function Chat() {
     }
   };
 
+  // normalize various incoming list shapes into [{id, name, isHost}, ...]
   const handlePeerListUpdate = (list) => {
     try {
       if (!list) {
         setPeers([]);
-        setPeerNamesMap(getPeerNames() || {});
         return;
       }
 
-      // Normalize: accept array or JSON-string-parsed arrays
-      let arr = Array.isArray(list) ? list : list;
-      // map to {id,name,isHost}
-      const names = getPeerNames ? getPeerNames() : {};
-      const normalized = (arr || [])
+      // If list is an object keyed by id, convert to array
+      let arr = Array.isArray(list)
+        ? list
+        : Object.keys(list).map((k) => list[k]);
+
+      // Normalize: if items are strings treat as id-only; if objects, read fields
+      const norm = arr
         .map((it) => {
           if (!it) return null;
-          // if item is a string id
-          if (typeof it === "string")
-            return { id: it, name: names[it] || it, isHost: false };
-          const id = it.id || it.peer || it.from || null;
-          const name = it.name || it.fromName || (id ? names[id] : id) || id;
+          if (typeof it === "string") {
+            const id = it;
+            return { id, name: getPeerNames()[id] || id, isHost: false };
+          }
+          // if it already is { id, name, isHost } but name might be missing:
+          const id = it.id || it.peer || it.from || JSON.stringify(it);
+          const name = it.name || it.fromName || getPeerNames()[id] || id;
           const isHost = Boolean(it.isHost || it.host || it.role === "host");
-          return id ? { id, name, isHost } : null;
+          return { id, name, isHost };
         })
         .filter(Boolean);
 
-      // Preserve local host flag if we previously had it
-      setPeers((prev) => {
-        const local = getLocalPeerId() || localId;
-        const prevLocal = (prev || []).find((p) => p && p.id === local);
-        const wasLocalHost = Boolean(prevLocal && prevLocal.isHost);
-
-        const merged = normalized.map((p) =>
-          p.id === local ? { ...p, isHost: wasLocalHost || p.isHost } : p
-        );
-        if (wasLocalHost && !merged.find((x) => x.id === local) && prevLocal) {
-          merged.unshift(prevLocal);
-        }
-        return merged;
-      });
-
-      setPeerNamesMap(getPeerNames() || {});
+      setPeers(norm);
+      // keep peerNamesMap in sync
+      try {
+        setPeerNamesMap(getPeerNames() || {});
+      } catch (e) {}
     } catch (e) {
       console.warn("handlePeerListUpdate normalization failed:", e, list);
       setPeers([]);
@@ -4210,25 +4153,28 @@ export default function Chat() {
     </div>
   );
 
+  // create hub (updated)
   const handleCreateHub = async () => {
     const id = getLocalPeerId() || myId;
     if (!id) return alert("Peer not ready yet. Wait a moment and try again.");
 
-    // Set local host state
-    setLocalId(id);
-    setLocalIsHost(true);
-
-    // Add yourself to peers with isHost:true
-    const hostEntry = { id, name: username || "Host", isHost: true };
-    setPeers([hostEntry]);
-
-    // join hub (existing behavior)
+    // join the hub (existing behavior)
     joinHub(id);
     setJoinedBootstrap(id);
+
+    // persist for auto-join
     localStorage.setItem("ph_hub_bootstrap", id);
     localStorage.setItem("ph_should_autojoin", "true");
 
-    // Persist a system message for UI
+    // set local host metadata
+    setLocalId(id);
+    setLocalIsHost(true);
+
+    // set peers list with yourself as host entry
+    const hostEntry = { id, name: username || "Host", isHost: true };
+    setPeers([hostEntry]);
+
+    // optional: announce to UI messages
     const sysPlain = {
       id: `sys-create-${Date.now()}`,
       from: "System",
@@ -4242,16 +4188,26 @@ export default function Chat() {
       return next;
     });
 
-    // Broadcast peers list including host flag so new joiners see who the host is
+    // broadcast public host info (your existing code)
     try {
-      // broadcast peers list including host flag so new joiners see who the host is
+      const publicText = `[${username || "Host"}] is the host`;
+      broadcastSystem("system_public", publicText, `sys-host-${id}`);
+    } catch (e) {
+      console.warn("broadcastSystem failed", e);
+    }
+
+    // If you have a mechanism to respond to peer list requests, you can broadcast current peers
+    // (useful if peers connect right after host creation).
+    try {
+      // broadcastSystemToAll is a placeholder - use whatever system broadcast you have
+      // so that new joiners may request or receive the peer list.
       broadcastSystem(
         "system_peers_list",
         JSON.stringify([hostEntry]),
         `sys-peers-${id}`
       );
     } catch (e) {
-      console.warn("broadcastSystem failed (host list)", e);
+      // ignore if not supported
     }
 
     setMenuOpen(false);
@@ -4259,60 +4215,41 @@ export default function Chat() {
 
   // Host removes a peer from hub
   const handleRemovePeer = async (peerId) => {
-    if (!localIsHost) {
-      console.warn("handleRemovePeer: not host");
-      return;
-    }
-    if (!peerId) {
-      console.warn("handleRemovePeer: missing peerId");
-      return;
-    }
-
+    if (!localIsHost) return;
     const peerMeta = peers.find((p) => p.id === peerId);
     const nameOrId = (peerMeta && (peerMeta.name || peerMeta.id)) || peerId;
     if (!window.confirm(`Remove ${nameOrId} from the hub?`)) return;
 
     try {
-      // Try direct send first if your webrtc module exposes it
-      let directOk = false;
+      // send a system broadcast containing the removal action and the target id
+      // other peers will ignore unless target matches their peer id
+      const payload = {
+        action: "force-leave",
+        target: peerId,
+        reason: "Removed by host",
+      };
       try {
-        if (typeof sendSystemToPeer === "function") {
-          // prefer direct targeted system message
-          sendSystemToPeer(peerId, {
-            type: "system",
-            action: "force-leave",
-            target: peerId,
-            reason: "Removed by host",
-          });
-          directOk = true;
-        }
+        broadcastSystem(
+          "system_force",
+          JSON.stringify(payload),
+          `sys-force-${peerId}`
+        );
       } catch (e) {
-        console.warn("sendSystemToPeer call failed:", e);
-        directOk = false;
-      }
-
-      // Fallback: broadcast a system message that contains JSON instructing the target to leave
-      // We use a unique type so handleIncoming can parse it specially.
-      if (!directOk) {
+        // fallback: broadcast plain text with JSON string if signature differs
         try {
           broadcastSystem(
-            "system_peers_force", // special system type
-            JSON.stringify({
-              action: "force-leave",
-              target: peerId,
-              reason: "Removed by host",
-            }),
+            "system_force",
+            JSON.stringify(payload),
             `sys-force-${peerId}`
           );
-        } catch (e) {
-          console.warn("broadcastSystem (force-leave fallback) failed:", e);
+        } catch (er) {
+          console.warn("broadcastSystem (force-leave) failed:", er);
         }
       }
 
-      // Remove from local peers list immediately for host UI responsiveness
-      setPeers((prev) => (prev || []).filter((p) => p.id !== peerId));
+      // remove them locally from the host's view
+      setPeers((prev) => prev.filter((p) => p.id !== peerId));
 
-      // Local system message so host sees it
       const sys = {
         id: `sys-remove-${Date.now()}`,
         from: "System",
@@ -4326,30 +4263,18 @@ export default function Chat() {
         return next;
       });
 
-      // Broadcast updated peers list so joiners / connected peers know current host flag
+      // broadcast an updated peers list to everyone (optional)
       try {
-        const toBroadcast = getPeersForBroadcast();
         broadcastSystem(
           "system_peers_list",
-          JSON.stringify(toBroadcast),
+          JSON.stringify(peers.filter((p) => p.id !== peerId)),
           `sys-peers-${localId}`
         );
-      } catch (e) {
-        console.warn("broadcastSystem (peers_list) failed:", e);
-      }
+      } catch (e) {}
     } catch (e) {
       console.warn("handleRemovePeer failed:", e);
     }
   };
-
-  // helper: produce a peers array suited for broadcasting (strip any heavy refs)
-  function getPeersForBroadcast() {
-    return (peers || []).map((p) => ({
-      id: p.id,
-      name: p.name,
-      isHost: Boolean(p.isHost),
-    }));
-  }
 
   // join hub
   const handleJoinHub = async () => {
@@ -5832,7 +5757,6 @@ export default function Chat() {
     </>
   );
 }
-
 // Round Video Streaming
 // src/components/Chat.jsx// Chat.jsx
 

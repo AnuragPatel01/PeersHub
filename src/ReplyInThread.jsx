@@ -241,7 +241,7 @@ const ReplyInThread = ({
     if (totalPeers === 0) {
       return (
         <span
-          className="inline-block w-2 h-2 rounded-full bg-gray-400 ml-2"
+          className="inline-block w-2 h-2 rounded-full bg-red-500 ml-2"
           title="No recipients (offline)"
         />
       );
@@ -249,7 +249,7 @@ const ReplyInThread = ({
     if (deliveries < totalPeers) {
       return (
         <span
-          className="inline-block w-2 h-2 rounded-full bg-red-500 ml-2"
+          className="inline-block w-2 h-2 rounded-full bg-green-500 ml-2"
           title={`Delivered to ${deliveries}/${totalPeers}`}
         />
       );
@@ -265,13 +265,13 @@ const ReplyInThread = ({
     if (reads === totalPeers && totalPeers > 0) {
       return (
         <span
-          className="inline-block w-2 h-2 rounded-full bg-green-500 ml-2"
+          className="inline-block w-2 h-2 rounded-full bg-purple-500 ml-2"
           title="Read by everyone"
         />
       );
     }
     return (
-      <span className="inline-block w-2 h-2 rounded-full bg-gray-400 ml-2" />
+      <span className="inline-block w-2 h-2 rounded-full bg-red-500 ml-2" />
     );
   };
 
