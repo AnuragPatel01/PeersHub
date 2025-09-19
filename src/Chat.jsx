@@ -3793,8 +3793,8 @@ export default function Chat() {
         .map((it) => {
           if (!it) return null;
           if (typeof it === "string") {
-            const id = it;
-            return { id, name: getPeerNames()[id] || id, isHost: false };
+            // const id = it;
+            // return { id, name: getPeerNames()[id] || id, isHost: false };
           }
           // if it already is { id, name, isHost } but name might be missing:
           const id = it.id || it.peer || it.from || JSON.stringify(it);
