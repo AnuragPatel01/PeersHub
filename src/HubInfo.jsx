@@ -66,7 +66,7 @@ export default function HubInfo({ peers = [], localId, localIsHost, onRemove, on
               ref={closeBtnRef}
               onClick={onClose}
               aria-label="Close Hub Info"
-              className="text-sm px-3 py-1 rounded-lg bg-white/8 hover:bg-white/12 text-white/90 transition"
+              className="text-sm px-3 py-1 rounded-lg bg-white/8 hover:bg-white/12 text-red-500 transition"
             >
               Close
             </button>
@@ -153,14 +153,12 @@ export default function HubInfo({ peers = [], localId, localIsHost, onRemove, on
         </section>
 
         <footer className="mt-4 flex justify-between items-center">
-          <div className="text-xs text-white/60">
-            Pro tip: Host can remove peers from this panel
-          </div>
+          
 
           <div className="flex gap-2">
             <button
               onClick={onClose}
-              className="px-4 py-2 rounded-lg bg-white/6 hover:bg-white/8 text-white transition"
+              className="px-4 py-2 rounded-lg bg-white/6 hover:bg-white/8 text-blue-500 transition"
             >
               Done
             </button>
