@@ -118,7 +118,7 @@ export default function HubInfo({
         aria-modal="true"
         aria-label="Hub info"
       >
-       <div className="relative rounded-2xl bg-white/90 dark:bg-slate-900/70 backdrop-blur-md border border-white/20 shadow-2xl p-4 md:p-6 overflow-hidden">
+       <div className="relative rounded-2xl bg-white/90 dark:bg-slate-900/90 backdrop-blur-md border border-white/20 shadow-2xl p-4 md:p-6 overflow-hidden">
 
           {/* decorative soft glow */}
           <div

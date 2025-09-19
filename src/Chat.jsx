@@ -3391,7 +3391,7 @@ export default function Chat() {
                     payloadOrText.threadRootId
                   );
                 } else {
-                  // sendAckRead(toPeerId, messageId)
+                   sendAckRead(payloadOrText.id, toPeer);
                   addUniqueToMsgArray(payloadOrText.id, "reads", localId);
                 }
               } catch (e) {
@@ -3806,34 +3806,58 @@ export default function Chat() {
     }
   };
 
-  // normalize various incoming list shapes into [{id, name, isHost}, ...]
   const handlePeerListUpdate = (list) => {
-    const arr = Array.isArray(list) ? list : Object.values(list || {});
-    const norm = arr
-      .map((it) => {
-        if (!it) return null;
-        if (typeof it === "string") {
-          return { id: it, name: getPeerNames()[it] || it, isHost: false };
-        }
-        return {
-          id: it.id,
-          name: it.name || getPeerNames()[it.id] || it.id,
-          isHost: Boolean(it.isHost),
-        };
-      })
-      .filter(Boolean);
+    try {
+      if (!list) {
+        setPeers([]);
+        setPeerNamesMap(getPeerNames() || {});
+        return;
+      }
 
-    // keep local host flag if we are the host
-    setPeers((prev) => {
-      return norm.map((p) => {
-        if (p.id === localId) {
-          // if you were already marked host, keep it
-          const wasHost = prev.find((x) => x.id === localId)?.isHost;
-          return { ...p, isHost: wasHost || p.isHost };
+      // convert keyed object or array/Set -> array
+      let arr = Array.isArray(list)
+        ? list
+        : Object.keys(list).map((k) => list[k]);
+      if (!Array.isArray(arr) && (list instanceof Set || list instanceof Map))
+        arr = Array.from(list);
+
+      const namesMap = getPeerNames ? getPeerNames() : {};
+      const norm = arr
+        .map((it) => {
+          if (!it) return null;
+          if (typeof it === "string")
+            return { id: it, name: namesMap[it] || it, isHost: false };
+          const id = it.id || it.peer || it.from || null;
+          const name =
+            it.name || it.fromName || (id ? namesMap[id] : undefined) || id;
+          const isHost = Boolean(it.isHost || it.host || it.role === "host");
+          return id ? { id, name, isHost } : null;
+        })
+        .filter(Boolean);
+
+      // preserve local host flag if we previously set it
+      setPeers((prev) => {
+        const local = getLocalPeerId ? getLocalPeerId() : localId;
+        const prevLocal = (prev || []).find((p) => p && p.id === local);
+        const wasLocalHost = Boolean(prevLocal && prevLocal.isHost);
+
+        const merged = norm.map((p) =>
+          p.id === local ? { ...p, isHost: wasLocalHost || p.isHost } : p
+        );
+
+        // If we previously had local host entry but it disappeared from incoming list, keep it visible
+        if (wasLocalHost && !merged.find((x) => x.id === local) && prevLocal) {
+          merged.unshift(prevLocal);
         }
-        return p;
+
+        return merged;
       });
-    });
+
+      setPeerNamesMap(getPeerNames() || {});
+    } catch (e) {
+      console.warn("handlePeerListUpdate normalization failed:", e, list);
+      setPeers([]);
+    }
   };
 
   const handleBootstrapChange = (newBootstrapId) => {
@@ -4174,38 +4198,25 @@ export default function Chat() {
     </div>
   );
 
-  // create hub (updated)
   const handleCreateHub = async () => {
     const id = getLocalPeerId() || myId;
     if (!id) return alert("Peer not ready yet. Wait a moment and try again.");
 
-    // join the hub (existing behavior)
-    joinHub(id);
-    setJoinedBootstrap(id);
-
-    // persist for auto-join
-    localStorage.setItem("ph_hub_bootstrap", id);
-    localStorage.setItem("ph_should_autojoin", "true");
-
-    // set local host metadata
+    // Set local host state
     setLocalId(id);
     setLocalIsHost(true);
 
+    // Add yourself to peers with isHost:true
     const hostEntry = { id, name: username || "Host", isHost: true };
     setPeers([hostEntry]);
 
-    // also broadcast to others with isHost: true
-    try {
-      broadcastSystem(
-        "system_peers_list",
-        JSON.stringify([hostEntry]),
-        `sys-peers-${id}`
-      );
-    } catch (e) {
-      console.warn("broadcastSystem failed (host list)", e);
-    }
+    // join hub (existing behavior)
+    joinHub(id);
+    setJoinedBootstrap(id);
+    localStorage.setItem("ph_hub_bootstrap", id);
+    localStorage.setItem("ph_should_autojoin", "true");
 
-    // optional: announce to UI messages
+    // Persist a system message for UI
     const sysPlain = {
       id: `sys-create-${Date.now()}`,
       from: "System",
@@ -4219,93 +4230,77 @@ export default function Chat() {
       return next;
     });
 
-    // broadcast public host info (your existing code)
+    // Broadcast peers list including host flag so new joiners see who the host is
     try {
-      const publicText = `[${username || "Host"}] is the host`;
-      broadcastSystem("system_public", publicText, `sys-host-${id}`);
-    } catch (e) {
-      console.warn("broadcastSystem failed", e);
-    }
-
-    // If you have a mechanism to respond to peer list requests, you can broadcast current peers
-    // (useful if peers connect right after host creation).
-    try {
-      // broadcastSystemToAll is a placeholder - use whatever system broadcast you have
-      // so that new joiners may request or receive the peer list.
       broadcastSystem(
         "system_peers_list",
         JSON.stringify([hostEntry]),
         `sys-peers-${id}`
       );
     } catch (e) {
-      // ignore if not supported
+      console.warn("broadcastSystem failed (host list)", e);
     }
 
     setMenuOpen(false);
   };
 
-  // Host removes a peer from hub
   const handleRemovePeer = async (peerId) => {
-    if (!localIsHost) return;
-    const peerMeta = peers.find((p) => p.id === peerId);
-    const nameOrId = (peerMeta && (peerMeta.name || peerMeta.id)) || peerId;
-    if (!window.confirm(`Remove ${nameOrId} from the hub?`)) return;
+  if (!localIsHost) return;
+  if (!peerId) return console.warn("handleRemovePeer: no peerId");
 
-    try {
-      // send a system broadcast containing the removal action and the target id
-      // other peers will ignore unless target matches their peer id
-      const payload = {
-        action: "force-leave",
-        target: peerId,
-        reason: "Removed by host",
-      };
+  const peerMeta = peers.find((p) => p.id === peerId);
+  const nameOrId = (peerMeta && (peerMeta.name || peerMeta.id)) || peerId;
+  const ok = window.confirm(`Remove ${nameOrId} from the hub?`);
+  if (!ok) return;
+
+  try {
+    // Prefer sending a direct system message if your webrtc module supports it
+    if (typeof sendSystemToPeer === "function") {
       try {
-        broadcastSystem(
-          "system_force",
-          JSON.stringify(payload),
-          `sys-force-${peerId}`
-        );
+        sendSystemToPeer(peerId, { type: "system", action: "force-leave", reason: "Removed by host", target: peerId });
       } catch (e) {
-        // fallback: broadcast plain text with JSON string if signature differs
-        try {
-          broadcastSystem(
-            "system_force",
-            JSON.stringify(payload),
-            `sys-force-${peerId}`
-          );
-        } catch (er) {
-          console.warn("broadcastSystem (force-leave) failed:", er);
-        }
+        console.warn("sendSystemToPeer failed, falling back to broadcast:", e);
       }
-
-      // remove them locally from the host's view
-      setPeers((prev) => prev.filter((p) => p.id !== peerId));
-
-      const sys = {
-        id: `sys-remove-${Date.now()}`,
-        from: "System",
-        text: `${nameOrId} was removed from the hub.`,
-        ts: Date.now(),
-        type: "system",
-      };
-      setMessages((m) => {
-        const next = [...m, sys];
-        persistMessages(next);
-        return next;
-      });
-
-      // broadcast an updated peers list to everyone (optional)
-      try {
-        broadcastSystem(
-          "system_peers_list",
-          JSON.stringify(peers.filter((p) => p.id !== peerId)),
-          `sys-peers-${localId}`
-        );
-      } catch (e) {}
-    } catch (e) {
-      console.warn("handleRemovePeer failed:", e);
     }
-  };
+
+    // Fallback: broadcast a system message encoding the intent.
+    // Only target peer will react to this and leave; others will ignore it (we will filter in handleIncoming).
+    try {
+      broadcastSystem("system_force", JSON.stringify({ action: "force-leave", target: peerId, reason: "Removed by host" }), `sys-force-${peerId}`);
+    } catch (e) {
+      console.warn("broadcastSystem fallback failed:", e);
+    }
+
+    // Remove from local peers immediately so host UI updates
+    setPeers((prev) => prev.filter((p) => p.id !== peerId));
+
+    // Optionally persist an admin message locally so host sees the action
+    const sys = {
+      id: `sys-remove-${Date.now()}`,
+      from: "System",
+      text: `${nameOrId} was removed from the hub.`,
+      ts: Date.now(),
+      type: "system",
+    };
+    setMessages((m) => {
+      const next = [...m, sys];
+      persistMessages(next);
+      return next;
+    });
+
+    // Broadcast updated peer list (optional)
+    try {
+      broadcastSystem("system_peers_list", JSON.stringify(getPeersForBroadcast()), `sys-peers-${localId}`);
+    } catch (e) {}
+  } catch (e) {
+    console.warn("handleRemovePeer failed:", e);
+  }
+};
+
+// helper: produce a peers array suited for broadcasting (strip any heavy refs)
+function getPeersForBroadcast() {
+  return (peers || []).map((p) => ({ id: p.id, name: p.name, isHost: Boolean(p.isHost) }));
+}
 
   // join hub
   const handleJoinHub = async () => {
