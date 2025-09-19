@@ -2286,6 +2286,7 @@ import {
 import { requestNotificationPermission, showNotification } from "./notify";
 import { nanoid } from "nanoid";
 import ReplyInThread from "./ReplyInThread";
+import HubInfo from "./HubInfo";
 
 const LS_MSGS = "ph_msgs_v1";
 const LS_THREADS = "ph_threads_v1";
@@ -2382,6 +2383,12 @@ export default function Chat() {
     } catch (e) {}
     return [];
   });
+
+  // const [peers, setPeers] = useState([]); // list of {id, name, isHost}
+  const [isHubInfoOpen, setIsHubInfoOpen] = useState(false);
+
+  const [localId, setLocalId] = useState(null);
+  const [localIsHost, setLocalIsHost] = useState(false);
 
   const [notificationsEnabled, setNotificationsEnabled] = useState(
     Notification.permission === "granted"
@@ -3076,12 +3083,62 @@ export default function Chat() {
       } catch (er) {}
     }
   };
-
   const handleIncoming = async (from, payloadOrText) => {
     console.debug("handleIncoming:", { from, payloadOrText });
 
     try {
+      // Normalize message object so we can check fields consistently.
+      // If payloadOrText is a string, convert to a simple chat-like object.
+      const msg =
+        payloadOrText && typeof payloadOrText === "object"
+          ? payloadOrText
+          : {
+              type: "chat",
+              text: typeof payloadOrText === "string" ? payloadOrText : "",
+            };
+
+      // ---- Handle force-leave system action ----
+      // Host will send a system message with action: "force-leave"
+      if (msg.type === "system" && msg.action === "force-leave") {
+        // show friendly UI
+        const sys = {
+          id: `sys-forced-left-${Date.now()}`,
+          from: "System",
+          text: "You were removed from the hub by the host.",
+          ts: Date.now(),
+          type: "system",
+        };
+        setMessages((m) => {
+          const next = [...m, sys];
+          persistMessages(next);
+          return next;
+        });
+
+        // Clean up local data and leave
+        try {
+          // optional cleanup like deleting images
+          await deleteImgDB().catch(() => {});
+        } catch (e) {
+          console.warn("deleteImgDB during force-leave failed:", e);
+        }
+
+        // call your existing leave sequence
+        try {
+          leaveHub();
+        } catch (e) {
+          console.warn("leaveHub during force-leave failed:", e);
+        }
+
+        // clear persisted auto-join since user was removed
+        localStorage.removeItem("ph_hub_bootstrap");
+        localStorage.removeItem("ph_should_autojoin");
+
+        // We handled the system action — return early.
+        return;
+      }
+
       // --- Enhanced Image Processing for Incoming Messages ---
+      // Only run the heavy preprocessing for chat/thread objects that have an id
       if (
         payloadOrText &&
         typeof payloadOrText === "object" &&
@@ -3162,6 +3219,7 @@ export default function Chat() {
             }
           }
 
+          // replace the payload with the processed copy so downstream logic sees the refs
           payloadOrText = incomingCopy;
         } catch (preErr) {
           console.warn("Image preprocessing failed:", preErr, payloadOrText);
@@ -4005,16 +4063,28 @@ export default function Chat() {
     </div>
   );
 
-  // create hub
-  const handleCreateHub = () => {
+  // create hub (updated)
+  const handleCreateHub = async () => {
     const id = getLocalPeerId() || myId;
     if (!id) return alert("Peer not ready yet. Wait a moment and try again.");
+
+    // join the hub (existing behavior)
     joinHub(id);
     setJoinedBootstrap(id);
 
+    // persist for auto-join
     localStorage.setItem("ph_hub_bootstrap", id);
     localStorage.setItem("ph_should_autojoin", "true");
 
+    // set local host metadata
+    setLocalId(id);
+    setLocalIsHost(true);
+
+    // set peers list with yourself as host entry
+    const hostEntry = { id, name: username || "Host", isHost: true };
+    setPeers([hostEntry]);
+
+    // optional: announce to UI messages
     const sysPlain = {
       id: `sys-create-${Date.now()}`,
       from: "System",
@@ -4028,6 +4098,7 @@ export default function Chat() {
       return next;
     });
 
+    // broadcast public host info (your existing code)
     try {
       const publicText = `[${username || "Host"}] is the host`;
       broadcastSystem("system_public", publicText, `sys-host-${id}`);
@@ -4035,7 +4106,70 @@ export default function Chat() {
       console.warn("broadcastSystem failed", e);
     }
 
+    // If you have a mechanism to respond to peer list requests, you can broadcast current peers
+    // (useful if peers connect right after host creation).
+    try {
+      // broadcastSystemToAll is a placeholder - use whatever system broadcast you have
+      // so that new joiners may request or receive the peer list.
+      broadcastSystem(
+        "system_peers_list",
+        JSON.stringify([hostEntry]),
+        `sys-peers-${id}`
+      );
+    } catch (e) {
+      // ignore if not supported
+    }
+
     setMenuOpen(false);
+  };
+
+  // Host removes a peer from hub
+  const handleRemovePeer = async (peerId) => {
+    if (!localIsHost) return;
+    const peerMeta = peers.find((p) => p.id === peerId);
+    const nameOrId = (peerMeta && (peerMeta.name || peerMeta.id)) || peerId;
+    if (!window.confirm(`Remove ${nameOrId} from the hub?`)) return;
+
+    try {
+      // Send a system message to that peer telling them to leave.
+      // Use whatever function you have for sending system messages to a specific peer.
+      // Example: sendSystemToPeer(peerId, { type: 'force-leave', reason: 'Removed by host' });
+      sendSystemToPeer(peerId, {
+        type: "force-leave",
+        reason: "Removed by host",
+      });
+
+      // Optionally close their connection from host side if you have the API
+      // closePeerConnection(peerId);
+
+      // Remove them from local peers list
+      setPeers((prev) => prev.filter((p) => p.id !== peerId));
+
+      // Add a system message in chat so host sees the action
+      const sys = {
+        id: `sys-remove-${Date.now()}`,
+        from: "System",
+        text: `${nameOrId} was removed from the hub.`,
+        ts: Date.now(),
+        type: "system",
+      };
+      setMessages((m) => {
+        const next = [...m, sys];
+        persistMessages(next);
+        return next;
+      });
+
+      // Broadcast updated peers list (optional)
+      try {
+        broadcastSystem(
+          "system_peers_list",
+          JSON.stringify(peers.filter((p) => p.id !== peerId)),
+          `sys-peers-${localId}`
+        );
+      } catch (e) {}
+    } catch (e) {
+      console.warn("handleRemovePeer failed:", e);
+    }
   };
 
   // join hub
@@ -5278,6 +5412,16 @@ export default function Chat() {
               </button>
 
               <button
+                onClick={() => setIsHubInfoOpen(true)}
+                className="w-full text-left px-4 py-3 hover:bg-white/20 border-b border-white/5 text-purple-500"
+              >
+                <span className="font-semibold">Hub Info</span>
+                <div className="text-xs text-gray-400">
+                  View connected peers, host, and IDs
+                </div>
+              </button>
+
+              <button
                 onClick={handleLeaveClick}
                 className="w-full text-left px-4 py-3 hover:bg-white/20 text-red-500 rounded-b-lg"
               >
@@ -5289,6 +5433,18 @@ export default function Chat() {
             </div>
           </div>
         </header>
+
+        {isHubInfoOpen && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30">
+            <HubInfo
+              peers={peers}
+              localId={localId}
+              localIsHost={localIsHost}
+              onRemove={handleRemovePeer}
+              onClose={() => setIsHubInfoOpen(false)}
+            />
+          </div>
+        )}
 
         <div className="w-full text-white h-0.5 bg-white" />
         <br />
