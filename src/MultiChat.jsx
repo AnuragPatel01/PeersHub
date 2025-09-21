@@ -1,6 +1,4 @@
-// Reply in Thread
-
-// src/components/Chat.jsx
+// Chat.jsx (updated — includes WelcomeOverlay + multi-hub wiring)
 import "./App.css";
 import React, { useEffect, useState, useRef } from "react";
 import {
@@ -25,7 +23,11 @@ import {
 import { requestNotificationPermission, showNotification } from "./notify";
 import { nanoid } from "nanoid";
 import ReplyInThread from "./ReplyInThread";
+import WelcomeOverlay from "./WelcomeOverlay";
 
+/* -------------------------
+   constants & IndexedDB helpers
+   ------------------------- */
 const LS_MSGS = "ph_msgs_v1";
 const LS_THREADS = "ph_threads_v1";
 const MAX_MSGS = 100;
@@ -109,6 +111,34 @@ async function idbDelete(key) {
   });
 }
 
+/* -------------------------
+   Multi-hub helpers (client-side only)
+   - stores hubs in `peershub_hubs`
+   - overlay also writes to this key; we sync via storage events
+   ------------------------- */
+
+function loadPeerHubs() {
+  try {
+    const raw = localStorage.getItem("peershub_hubs");
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+    return parsed;
+  } catch (e) {
+    return [];
+  }
+}
+function savePeerHubs(hubs) {
+  try {
+    localStorage.setItem("peershub_hubs", JSON.stringify(hubs || []));
+  } catch (e) {
+    console.warn("savePeerHubs failed", e);
+  }
+}
+
+/* -------------------------
+   Component
+   ------------------------- */
 export default function Chat() {
   // core state
   const [myId, setMyId] = useState(() => getLocalPeerId() || "...");
@@ -122,6 +152,31 @@ export default function Chat() {
     return [];
   });
 
+  useEffect(() => {
+    if (!myId) return;
+    setPeerHubs((prev) => {
+      let changed = false;
+      const next = prev.map((h) => {
+        if (
+          (h.createdBy === "local" || h.createdBy === myId) &&
+          !h.hostPeerId
+        ) {
+          changed = true;
+          return { ...h, hostPeerId: myId, createdBy: myId };
+        }
+        return h;
+      });
+      if (changed) {
+        savePeerHubs(next);
+        // optionally auto-join as host:
+        try {
+          joinHub(myId);
+        } catch (e) {}
+      }
+      return next;
+    });
+  }, [myId]);
+
   const [notificationsEnabled, setNotificationsEnabled] = useState(
     Notification.permission === "granted"
   );
@@ -134,11 +189,6 @@ export default function Chat() {
     } catch (e) {}
     return {};
   });
-
-  const [setNameModalOpen, setSetNameModalOpen] = useState(false);
-  const [setNameInput, setSetNameInput] = useState(
-    () => localStorage.getItem("ph_name") || ""
-  );
 
   // --- Hydration: initial messages from localStorage -> state (rehydrate imageGroup from IndexedDB) ---
   useEffect(() => {
@@ -274,6 +324,14 @@ export default function Chat() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [Object.keys(threadMessages || {}).join(",")]);
 
+  // --- NEW: Multi-hub state (client-side only) ---
+  // persisted key: peershub_hubs (WelcomeOverlay writes to it too)
+  const [peerHubs, setPeerHubs] = useState(() => loadPeerHubs());
+
+  useEffect(() => {
+    savePeerHubs(peerHubs);
+  }, [peerHubs]);
+
   // UI: attach menu + file input refs
   const [attachMenuOpen, setAttachMenuOpen] = useState(false);
   const fileInputImageRef = useRef(null);
@@ -330,6 +388,44 @@ export default function Chat() {
 
   const attachMenuRef = useRef(null);
 
+  /* -------------------------
+     Keep WelcomeOverlay and Chat name in sync.
+     - WelcomeOverlay writes `peershub_name`
+     - Chat writes `ph_name`
+     We mirror both so both components behave correctly.
+     Also listen for storage events so other tabs update.
+     ------------------------- */
+  useEffect(() => {
+    const onStorage = (e) => {
+      try {
+        if (!e) return;
+        if (e.key === "peershub_hubs") {
+          setPeerHubs(loadPeerHubs());
+        }
+        if (e.key === "peershub_name") {
+          const newName = localStorage.getItem("peershub_name") || "";
+          if (newName && newName !== username) {
+            setUsername(newName);
+            localStorage.setItem("ph_name", newName);
+            setShowNamePrompt(false);
+          }
+        }
+      } catch (e) {
+        console.warn("storage event handler failed", e);
+      }
+    };
+    window.addEventListener("storage", onStorage);
+    return () => window.removeEventListener("storage", onStorage);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [username]);
+
+  useEffect(() => {
+    // If user used Chat's name prompt (handleSetName), also mirror to peershub_name for overlay.
+    try {
+      if (username) localStorage.setItem("peershub_name", username);
+    } catch (e) {}
+  }, [username]);
+
   useEffect(() => {
     const handleClickOutside = (e) => {
       if (attachMenuRef.current && !attachMenuRef.current.contains(e.target)) {
@@ -359,7 +455,9 @@ export default function Chat() {
     return () => clearInterval(id);
   }, [incomingFileOffers]);
 
-  // persist messages helper
+  /* -------------------------
+     persist messages helper
+     ------------------------- */
   const persistMessages = (arr) => {
     try {
       // store only lightweight info to avoid localStorage quota issues
@@ -438,38 +536,6 @@ export default function Chat() {
     }
   };
 
-  const openSetNameModal = () => {
-    const existing = localStorage.getItem("ph_name");
-    if (existing) {
-      alert(`Your name is already set: ${existing}`);
-      return;
-    }
-    setSetNameInput("");
-    setSetNameModalOpen(true);
-  };
-
-  const handleSaveName = (evt) => {
-    evt?.preventDefault?.();
-    const trimmed = (setNameInput || "").trim();
-    if (!trimmed) return alert("Please enter a name.");
-    localStorage.setItem("ph_name", trimmed);
-    setUsername(trimmed);
-    setSetNameModalOpen(false);
-
-    const sys = {
-      id: `sys-namechange-${Date.now()}`,
-      from: "System",
-      text: `You are now known as ${trimmed}`,
-      ts: Date.now(),
-      type: "system",
-    };
-    setMessages((m) => {
-      const next = [...m, sys];
-      persistMessages(next);
-      return next;
-    });
-  };
-
   const handleToggleNotifications = async () => {
     try {
       if (Notification.permission === "granted") {
@@ -491,11 +557,15 @@ export default function Chat() {
     }
   };
 
+  // existing handleSetName — keep behavior but mirror to peershub_name as well
   const handleSetName = () => {
     const newName = prompt("Enter your new display name:", username);
     if (!newName) return;
     setUsername(newName);
     localStorage.setItem("ph_name", newName);
+    try {
+      localStorage.setItem("peershub_name", newName);
+    } catch (e) {}
 
     const sys = {
       id: `sys-namechange-${Date.now()}`,
@@ -511,7 +581,9 @@ export default function Chat() {
     });
   };
 
-  // persist thread messages helper — keep imageGroup alongside imageRefs where possible
+  /* -------------------------
+     persist thread messages helper
+     ------------------------- */
   const persistThreadMessages = (threads) => {
     try {
       const safe = {};
@@ -520,7 +592,7 @@ export default function Chat() {
           const m = { ...msg };
 
           // If imageGroup exists, preserve it for immediate display.
-          // If we have imageRefs, we may drop very large inline data URLs to avoid LS bloat,
+          // If we have imageRefs, we may drop very large inline data to avoid LS bloat,
           // but we DO NOT unconditionally delete imageGroup.
           if (Array.isArray(m.imageGroup) && m.imageGroup.length) {
             if (!Array.isArray(m.imageRefs)) {
@@ -562,7 +634,9 @@ export default function Chat() {
     }
   };
 
-  // messages helpers
+  /* -------------------------
+     messages & threads manipulation helpers (unchanged)
+     ------------------------- */
   const upsertIncomingChat = (incoming) => {
     // If this is a thread reply
     if (incoming.type === "thread" && incoming.threadRootId) {
@@ -853,6 +927,9 @@ export default function Chat() {
     }
   };
 
+  /* -------------------------
+     Main incoming message handler (unchanged logic)
+     ------------------------- */
   const handleIncoming = async (from, payloadOrText) => {
     console.debug("handleIncoming:", { from, payloadOrText });
 
@@ -979,9 +1056,6 @@ export default function Chat() {
             (document.hasFocus() || !document.hidden);
 
           if (shouldAutoRead) {
-            // Small delay to ensure delivery ack is processed first
-            // Small delay to ensure delivery ack is processed first
-            // Small delay to ensure delivery ack is processed first
             setTimeout(() => {
               try {
                 const toPeer =
@@ -1019,7 +1093,6 @@ export default function Chat() {
                     payloadOrText.threadRootId
                   );
                 } else {
-                  // sendAckRead(toPeerId, messageId)
                   addUniqueToMsgArray(payloadOrText.id, "reads", localId);
                 }
               } catch (e) {
@@ -1083,18 +1156,15 @@ export default function Chat() {
         payloadOrText.id
       ) {
         try {
-          // debug so you can inspect incoming ack payload shape
           console.debug("Incoming delivery ack payload:", payloadOrText);
 
           const id = payloadOrText.id;
-          // try all possible sender fields; fallback to 'from' envelope if present
           const fromPeer =
             payloadOrText.fromPeer ||
             payloadOrText.from ||
             payloadOrText.peer ||
             null;
 
-          // normalize thread flags (support both naming variants)
           const isThread =
             !!payloadOrText.isThread || !!payloadOrText.thread || false;
           const threadRootId =
@@ -1108,14 +1178,11 @@ export default function Chat() {
             return;
           }
 
-          // If ack carries a 'to' field we can optionally use it to target updates,
-          // but addUniqueToMsgArray expects the peerId who acked, so prefer fromPeer.
           if (!fromPeer) {
             console.warn(
               "Ack deliver missing fromPeer; payload:",
               payloadOrText
             );
-            // still attempt to add with null peer to avoid silent failure
             addUniqueToMsgArray(
               id,
               "deliveries",
@@ -1142,7 +1209,6 @@ export default function Chat() {
       // 3) Read acknowledgments
       if (from === "__system_ack_read__" && payloadOrText && payloadOrText.id) {
         try {
-          // debug so you can inspect incoming ack shape
           console.debug("Incoming read ack payload:", payloadOrText);
 
           const id = payloadOrText.id;
@@ -1468,6 +1534,68 @@ export default function Chat() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []); // run once on mount
 
+  // When myId becomes available, fix up any peerHubs this client created earlier
+  useEffect(() => {
+    if (!myId) return;
+    // Update any hub that we created before peer opened and didn't have hostPeerId set
+    setPeerHubs((prev) => {
+      let changed = false;
+      const next = prev.map((h) => {
+        const createdByLocal = h.createdBy === myId || h.createdBy === "local";
+        if ((!h.hostPeerId || !h.hostPeerId.length) && createdByLocal) {
+          changed = true;
+          return { ...h, hostPeerId: myId, createdBy: myId };
+        }
+        return h;
+      });
+      if (changed) {
+        // persist and optionally auto-join the hub as host
+        try {
+          savePeerHubs(next);
+        } catch (e) {}
+        // Auto-join each hub that we are the (new) host of
+        next.forEach((h) => {
+          if (h.hostPeerId === myId) {
+            try {
+              joinHub(myId);
+              setJoinedBootstrap(myId);
+              localStorage.setItem("ph_hub_bootstrap", myId);
+              localStorage.setItem("ph_should_autojoin", "true");
+              const sysPlain = {
+                id: `sys-create-${Date.now()}`,
+                from: "System",
+                text: `You became host for hub: ${h.name}`,
+                ts: Date.now(),
+                type: "system",
+              };
+              setMessages((m) => {
+                const nextMsgs = [...m, sysPlain];
+                persistMessages(nextMsgs);
+                return nextMsgs;
+              });
+              try {
+                const publicText = `[${username || "Host"}] is the host for ${
+                  h.name
+                }`;
+                broadcastSystem(
+                  "system_public",
+                  publicText,
+                  `sys-host-${myId}-${h.id}`
+                );
+              } catch (e) {
+                console.warn("broadcastSystem failed on host assign", e);
+              }
+            } catch (e) {
+              // best-effort
+            }
+          }
+        });
+      }
+      return next;
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [myId]);
+
   // autoscroll
   useEffect(() => {
     if (!messagesEndRef.current) return;
@@ -1781,7 +1909,204 @@ export default function Chat() {
     </div>
   );
 
-  // create hub
+  /* -------------------------
+     -------------------------
+     NEW: Handlers to integrate WelcomeOverlay
+     -------------------------
+     ------------------------- */
+
+  // Called when the overlay creates a hub (client-side object).
+  // It persists the hub in peershub_hubs and — if peer is open — makes this device the host (joinHub).
+  const handleOverlayCreateHub = (hub) => {
+    try {
+      const localId = getLocalPeerId() || myId || "";
+      const augmented = {
+        ...hub,
+        id:
+          hub.id ||
+          `hub-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+        createdBy: localId || "local",
+        hostPeerId: localId || null,
+      };
+
+      setPeerHubs((prev) => {
+        const next = [augmented, ...prev];
+        savePeerHubs(next);
+        return next;
+      });
+
+      // If peer ready, make this device the host by joining with our local id
+      if (localId) {
+        try {
+          joinHub(localId);
+          setJoinedBootstrap(localId);
+          localStorage.setItem("ph_hub_bootstrap", localId);
+          localStorage.setItem("ph_should_autojoin", "true");
+
+          const sysPlain = {
+            id: `sys-create-${Date.now()}`,
+            from: "System",
+            text: `You created the hub: ${augmented.name}. Share this ID: ${localId}`,
+            ts: Date.now(),
+            type: "system",
+          };
+          setMessages((m) => {
+            const next = [...m, sysPlain];
+            persistMessages(next);
+            return next;
+          });
+
+          try {
+            const publicText = `[${username || "Host"}] is the host`;
+            broadcastSystem("system_public", publicText, `sys-host-${localId}`);
+          } catch (e) {
+            console.warn("broadcastSystem failed", e);
+          }
+        } catch (e) {
+          console.warn("Overlay create joinHub failed (peer not ready?)", e);
+        }
+      }
+    } catch (e) {
+      console.warn("handleOverlayCreateHub failed", e);
+    }
+  };
+
+  // Called when the overlay Join form submits a host ID.
+  // Mirrors the same join/connect behavior as the chat menu's Join Hub.
+  const handleOverlayJoinHub = (hostIdOrInput) => {
+    try {
+      if (!hostIdOrInput) return;
+
+      const id = (hostIdOrInput || "").toString().trim();
+      if (!id) {
+        const sys = {
+          id: `sys-join-failed-${Date.now()}`,
+          from: "System",
+          text: "Invalid host ID provided.",
+          ts: Date.now(),
+          type: "system",
+        };
+        setMessages((m) => {
+          const next = [...m, sys];
+          persistMessages(next);
+          return next;
+        });
+        return;
+      }
+
+      // Save bootstrap + auto-join flags
+      try {
+        joinHub(id);
+      } catch (e) {
+        console.warn("joinHub (overlay) failed", e);
+      }
+      setJoinedBootstrap(id);
+      localStorage.setItem("ph_hub_bootstrap", id);
+      localStorage.setItem("ph_should_autojoin", "true");
+
+      // attempt to connect (best-effort)
+      try {
+        connectToPeer(id, handleIncoming, handlePeerListUpdate, username);
+      } catch (e) {
+        console.warn("connectToPeer (overlay) failed:", e);
+      }
+
+      const friendly = getPeerNames()[id] || id;
+      const sys = {
+        id: `sys-join-${Date.now()}`,
+        from: "System",
+        text: `Attempting to join hub: ${friendly}`,
+        ts: Date.now(),
+        type: "system",
+      };
+      setMessages((m) => {
+        const next = [...m, sys];
+        persistMessages(next);
+        return next;
+      });
+    } catch (err) {
+      console.warn("handleOverlayJoinHub error:", err);
+    }
+  };
+
+  // Called when user clicks "Open" for a hub inside the overlay.
+  // If that hub has a hostPeerId, attempt to join/connect to it.
+  const handleOverlayOpenHub = (hub) => {
+    try {
+      if (!hub) return;
+
+      // if hub has a hostPeerId, join that bootstrap
+      if (hub.hostPeerId) {
+        const hostId = hub.hostPeerId;
+        try {
+          // Save as the bootstrap we want to auto-join
+          setJoinedBootstrap(hostId);
+          localStorage.setItem("ph_hub_bootstrap", hostId);
+          localStorage.setItem("ph_should_autojoin", "true");
+
+          // Attempt to connect to the host peer (best effort)
+          try {
+            connectToPeer(
+              hostId,
+              handleIncoming,
+              handlePeerListUpdate,
+              username
+            );
+          } catch (e) {
+            console.warn("connectToPeer failed on overlay-open", e);
+          }
+
+          const sys = {
+            id: `sys-openhub-${Date.now()}`,
+            from: "System",
+            text: `Attempting to join hub: ${hub.name}`,
+            ts: Date.now(),
+            type: "system",
+          };
+          setMessages((m) => {
+            const next = [...m, sys];
+            persistMessages(next);
+            return next;
+          });
+        } catch (e) {
+          console.warn("handleOverlayOpenHub join failed", e);
+        }
+      } else {
+        // no hostPeerId: if createdBy is local, promote to host (join)
+        const localId = getLocalPeerId() || myId;
+        if (hub.createdBy && hub.createdBy === localId) {
+          try {
+            joinHub(localId);
+            setJoinedBootstrap(localId);
+            localStorage.setItem("ph_hub_bootstrap", localId);
+            localStorage.setItem("ph_should_autojoin", "true");
+            setPeerHubs((prev) => {
+              const next = prev.map((h) =>
+                h.id === hub.id ? { ...h, hostPeerId: localId } : h
+              );
+              savePeerHubs(next);
+              return next;
+            });
+          } catch (e) {
+            console.warn("overlay open promote to host failed", e);
+          }
+        } else {
+          // otherwise show guidance
+          alert(
+            "This hub currently has no host published. Ask the creator to share their host ID."
+          );
+        }
+      }
+    } catch (e) {
+      console.warn("handleOverlayOpenHub failed", e);
+    }
+  };
+
+  /* -------------------------
+     Existing feature code continues unchanged...
+     ------------------------- */
+
+  // create hub (existing menu action) — unchanged, kept as-is so menu still works
   const handleCreateHub = () => {
     const id = getLocalPeerId() || myId;
     if (!id) return alert("Peer not ready yet. Wait a moment and try again.");
@@ -2039,8 +2364,6 @@ export default function Chat() {
       // Message to send to peers — include inline data URLs so they can render immediately.
       const outgoingMsg = {
         ...localMsgObj,
-        // to avoid sending the same large blob twice, keep same shape but it's fine to include imageGroup
-        // peers will store image data on their side
       };
 
       console.debug("Sending image message", {
@@ -2862,6 +3185,14 @@ export default function Chat() {
 
   return (
     <>
+      {/* Welcome Overlay (covers whole screen) */}
+      <WelcomeOverlay
+        onCreateHub={handleOverlayCreateHub}
+        onOpenHub={handleOverlayOpenHub}
+        onJoinHub={handleOverlayJoinHub}
+        initialShow={true}
+      />
+
       {/* Thread View (overlay) */}
       {activeThread && (
         <div className="fixed inset-0 z-60">
@@ -3030,29 +3361,6 @@ export default function Chat() {
                 <span className="font-semibold">Clear all images</span>
                 <div className="text-xs text-gray-400">
                   Remove cached images (local)
-                </div>
-              </button>
-
-              {/* <button
-                onClick={handleSetName}
-                className="w-full text-left px-4 py-3 hover:bg-white/20 border-b border-white/5 text-purple-500"
-              >
-                <span className="font-semibold">Set Name</span>
-                <div className="text-xs text-gray-400">
-                  Update your display name
-                </div>
-              </button> */}
-
-              <button
-                onClick={() => {
-                  setMenuOpen(false);
-                  openSetNameModal();
-                }}
-                className="w-full text-left px-4 py-3 hover:bg-white/20 border-b border-white/5 text-purple-500"
-              >
-                <span className="font-semibold">Set Name</span>
-                <div className="text-xs text-gray-400">
-                  Choose your display name
                 </div>
               </button>
 
@@ -3249,45 +3557,6 @@ export default function Chat() {
           </div>
         </footer>
       </div>
-
-      {setNameModalOpen && (
-        <div className="fixed inset-0 z-80 flex items-center justify-center">
-          <div
-            className="absolute inset-0 bg-black/60 backdrop-blur-sm"
-            onClick={() => setSetNameModalOpen(false)}
-          />
-          <div className="relative w-[min(560px,95%)] max-w-xl p-6 rounded-2xl bg-gradient-to-b from-black/60 to-black/40 border border-white/5 shadow-lg text-white">
-            <h3 className="text-lg font-semibold mb-4">
-              Set your display name
-            </h3>
-
-            <form onSubmit={handleSaveName} className="space-y-4">
-              <input
-                autoFocus
-                value={setNameInput}
-                onChange={(e) => setSetNameInput(e.target.value)}
-                placeholder="e.g. Anurag Patel"
-                className="w-full p-3 rounded-xl bg-white/5 border border-white/10 placeholder-white/40 focus:outline-none focus:ring-2 focus:ring-blue-400"
-              />
-              <div className="flex justify-end gap-3">
-                <button
-                  type="button"
-                  onClick={() => setSetNameModalOpen(false)}
-                  className="px-3 py-2 rounded-lg bg-white/5 text-white/80"
-                >
-                  Cancel
-                </button>
-                <button
-                  type="submit"
-                  className="px-4 py-2 rounded-lg bg-gradient-to-br from-green-500 to-teal-500 text-black font-medium"
-                >
-                  Save
-                </button>
-              </div>
-            </form>
-          </div>
-        </div>
-      )}
 
       {/* Leave confirmation modal */}
       {confirmLeaveOpen && (
