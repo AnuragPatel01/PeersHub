@@ -354,6 +354,13 @@ export default function Chat() {
     requestNotificationPermission();
   }, [username]);
 
+  // automatically open set-name modal for first-time users
+  useEffect(() => {
+    if (showNamePrompt) {
+      setSetNameModalOpen(true);
+    }
+  }, [showNamePrompt]);
+
   // re-render every second if there are incoming offers (countdown)
   useEffect(() => {
     if (!Object.keys(incomingFileOffers).length) return;
@@ -457,6 +464,7 @@ export default function Chat() {
     localStorage.setItem("ph_name", trimmed);
     setUsername(trimmed);
     setSetNameModalOpen(false);
+    setShowNamePrompt(false); // <- new line to stop re-triggering
 
     const sys = {
       id: `sys-namechange-${Date.now()}`,
@@ -1476,7 +1484,10 @@ export default function Chat() {
       try {
         await requestNotificationPermission();
         try {
-          await subscribeToPush("http://localhost:4000/api/save-subscription", { username, myId });
+          await subscribeToPush("http://localhost:4000/api/save-subscription", {
+            username,
+            myId,
+          });
 
           console.log("Push subscription sent to server");
         } catch (err) {
@@ -1997,6 +2008,11 @@ export default function Chat() {
 
   // send chat
   const send = async () => {
+    if (!username) {
+      alert("Please set your display name first.");
+      setSetNameModalOpen(true);
+      return;
+    }
     // 1) Inline image path
     if (pendingPhotos.length > 0) {
       // read previews as data URLs
@@ -3251,6 +3267,7 @@ export default function Chat() {
               value={text}
               onChange={(e) => setText(e.target.value)}
               placeholder="Type a message..."
+              disabled={!username}
               className="flex-1 p-3 pl-10 pr-10 bg-white/10 placeholder-blue-300 text-blue-500 font-mono rounded-3xl border-2"
               onKeyDown={(e) => e.key === "Enter" && send()}
             />
