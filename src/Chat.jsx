@@ -3,6 +3,8 @@
 // src/components/Chat.jsx
 import "./App.css";
 import React, { useEffect, useState, useRef } from "react";
+import { subscribeToPush } from "./push";
+
 import {
   initPeer,
   sendChat,
@@ -1465,8 +1467,26 @@ export default function Chat() {
         p && p.destroy && p.destroy();
       } catch (e) {}
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []); // run once on mount
+  }, []);
+
+  // Subscribe to push notifications when username is set
+  useEffect(() => {
+    if (!username) return;
+    (async () => {
+      try {
+        await requestNotificationPermission();
+        try {
+          await subscribeToPush("http://localhost:4000/api/save-subscription", { username, myId });
+
+          console.log("Push subscription sent to server");
+        } catch (err) {
+          console.warn("subscribeToPush failed:", err);
+        }
+      } catch (e) {
+        console.warn("Notification permission request failed:", e);
+      }
+    })();
+  }, [username, myId]);
 
   // autoscroll
   useEffect(() => {
@@ -3273,13 +3293,13 @@ export default function Chat() {
                 <button
                   type="button"
                   onClick={() => setSetNameModalOpen(false)}
-                  className="px-3 py-2 rounded-lg bg-white/5 text-white/80"
+                  className="px-3 py-2 rounded-lg bg-gradient-to-br from-red-500 to-red-500 text-white/80"
                 >
                   Cancel
                 </button>
                 <button
                   type="submit"
-                  className="px-4 py-2 rounded-lg bg-gradient-to-br from-green-500 to-teal-500 text-black font-medium"
+                  className="px-4 py-2 rounded-lg bg-gradient-to-br from-green-500 to-green-500 text-white/80 font-medium"
                 >
                   Save
                 </button>
