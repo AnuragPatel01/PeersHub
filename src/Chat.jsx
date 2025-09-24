@@ -113,34 +113,88 @@ async function idbDelete(key) {
   });
 }
 
-// ScannerView — small wrapper around react-zxing hook
+// Debug ScannerView — verbose logging + UI feedback
 function ScannerView({ onDetected, onError }) {
-  // useZxing accepts an onResult handler
-  const { ref } = useZxing({
+  const [lastRaw, setLastRaw] = React.useState("");
+  const [lastTime, setLastTime] = React.useState(0);
+  const { ref, error } = useZxing({
     onResult(result) {
-      if (!result) return;
-      // result may expose .text or .getText() or .rawValue depending on platform
-      const raw =
-        (typeof result.getText === "function" && result.getText()) ||
-        result.text ||
-        result.rawValue ||
-        "";
-      if (raw && onDetected) onDetected(String(raw));
+      try {
+        if (!result) return;
+        const raw =
+          (typeof result.getText === "function" && result.getText()) ||
+          result.text ||
+          result.rawValue ||
+          "";
+        console.debug("useZxing onResult raw:", raw, result);
+        // Debounce identical results to avoid double-handling
+        if (raw && raw !== lastRaw && Date.now() - lastTime > 400) {
+          setLastRaw(raw);
+          setLastTime(Date.now());
+          // Visual/vibrate feedback if available
+          try {
+            if (navigator.vibrate) navigator.vibrate(50);
+          } catch (e) {}
+          if (onDetected) onDetected(String(raw));
+        }
+      } catch (e) {
+        console.warn("onResult handler error", e);
+      }
     },
     onError(err) {
+      console.error("useZxing onError:", err);
       if (onError) onError(err);
     },
-    // optional: try to prefer rear camera
-    constraints: { video: { facingMode: "environment" } },
+    constraints: { video: { facingMode: { ideal: "environment" } } },
+    // optional: you can tune additional settings here if the hook accepts them
   });
 
-  // the hook returns a ref — attach to a video element
+  React.useEffect(() => {
+    if (error) {
+      console.error("react-zxing error:", error);
+      if (onError) onError(error);
+    }
+  }, [error, onError]);
+
   return (
-    <div className="w-full flex justify-center">
-      <video
-        ref={ref}
-        style={{ width: "100%", height: 320, background: "#000" }}
-      />
+    <div className="w-full">
+      <div className="mb-2 text-sm text-gray-700">
+        Aim the camera at the QR. Make sure camera permission is allowed.
+      </div>
+
+      <div style={{ position: "relative" }}>
+        <video
+          ref={ref}
+          autoPlay
+          playsInline
+          muted
+          style={{
+            width: "100%",
+            height: 320,
+            background: "#000",
+            borderRadius: 6,
+          }}
+        />
+        <div
+          style={{
+            position: "absolute",
+            left: 8,
+            top: 8,
+            background: "rgba(0,0,0,0.5)",
+            color: "#fff",
+            padding: "4px 8px",
+            borderRadius: 6,
+            fontSize: 12,
+          }}
+        >
+          {lastRaw ? `Last: ${lastRaw.slice(0, 40)}` : "No code yet"}
+        </div>
+      </div>
+
+      <div className="mt-2 text-xs text-gray-500">
+        If nothing happens: open the console and look for errors. Try a simple
+        QR containing just <code>ABC123</code>.
+      </div>
     </div>
   );
 }
