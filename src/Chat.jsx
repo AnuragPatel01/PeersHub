@@ -4,8 +4,6 @@
 import "./App.css";
 import React, { useEffect, useState, useRef } from "react";
 import { subscribeToPush } from "./push";
-import { QRCodeCanvas } from "qrcode.react";
-import { useZxing } from "react-zxing";
 
 import {
   initPeer,
@@ -111,92 +109,6 @@ async function idbDelete(key) {
       reject(r.error);
     };
   });
-}
-
-// Debug ScannerView — verbose logging + UI feedback
-function ScannerView({ onDetected, onError }) {
-  const [lastRaw, setLastRaw] = React.useState("");
-  const [lastTime, setLastTime] = React.useState(0);
-  const { ref, error } = useZxing({
-    onResult(result) {
-      try {
-        if (!result) return;
-        const raw =
-          (typeof result.getText === "function" && result.getText()) ||
-          result.text ||
-          result.rawValue ||
-          "";
-        console.debug("useZxing onResult raw:", raw, result);
-        // Debounce identical results to avoid double-handling
-        if (raw && raw !== lastRaw && Date.now() - lastTime > 400) {
-          setLastRaw(raw);
-          setLastTime(Date.now());
-          // Visual/vibrate feedback if available
-          try {
-            if (navigator.vibrate) navigator.vibrate(50);
-          } catch (e) {}
-          if (onDetected) onDetected(String(raw));
-        }
-      } catch (e) {
-        console.warn("onResult handler error", e);
-      }
-    },
-    onError(err) {
-      console.error("useZxing onError:", err);
-      if (onError) onError(err);
-    },
-    constraints: { video: { facingMode: { ideal: "environment" } } },
-    // optional: you can tune additional settings here if the hook accepts them
-  });
-
-  React.useEffect(() => {
-    if (error) {
-      console.error("react-zxing error:", error);
-      if (onError) onError(error);
-    }
-  }, [error, onError]);
-
-  return (
-    <div className="w-full">
-      <div className="mb-2 text-sm text-gray-700">
-        Aim the camera at the QR. Make sure camera permission is allowed.
-      </div>
-
-      <div style={{ position: "relative" }}>
-        <video
-          ref={ref}
-          autoPlay
-          playsInline
-          muted
-          style={{
-            width: "100%",
-            height: 320,
-            background: "#000",
-            borderRadius: 6,
-          }}
-        />
-        <div
-          style={{
-            position: "absolute",
-            left: 8,
-            top: 8,
-            background: "rgba(0,0,0,0.5)",
-            color: "#fff",
-            padding: "4px 8px",
-            borderRadius: 6,
-            fontSize: 12,
-          }}
-        >
-          {lastRaw ? `Last: ${lastRaw.slice(0, 40)}` : "No code yet"}
-        </div>
-      </div>
-
-      <div className="mt-2 text-xs text-gray-500">
-        If nothing happens: open the console and look for errors. Try a simple
-        QR containing just <code>ABC123</code>.
-      </div>
-    </div>
-  );
 }
 
 export default function Chat() {
@@ -403,13 +315,6 @@ export default function Chat() {
   const [confirmLeaveOpen, setConfirmLeaveOpen] = useState(false);
   const [now, setNow] = useState(Date.now());
 
-  // Share/scan state
-  const [shareModalOpen, setShareModalOpen] = useState(false);
-  const [scannerOpen, setScannerOpen] = useState(false);
-  const [shareUrl, setShareUrl] = useState("");
-  // optional: show a small helper while scanning
-  const [scanError, setScanError] = useState(null);
-
   // typing
   const [typingUsers, setTypingUsers] = useState({});
   const [replyTo, setReplyTo] = useState(null);
@@ -615,23 +520,6 @@ export default function Chat() {
       return next;
     });
   };
-
-  function makeShareLink(peerId) {
-    return `${window.location.origin}${
-      window.location.pathname
-    }?join=${encodeURIComponent(peerId)}`;
-  }
-  function copyToClipboard(text) {
-    if (navigator.clipboard) return navigator.clipboard.writeText(text);
-    try {
-      const ta = document.createElement("textarea");
-      ta.value = text;
-      document.body.appendChild(ta);
-      ta.select();
-      document.execCommand("copy");
-      ta.remove();
-    } catch (e) {}
-  }
 
   // persist thread messages helper — keep imageGroup alongside imageRefs where possible
   const persistThreadMessages = (threads) => {
@@ -1589,30 +1477,7 @@ export default function Chat() {
     };
   }, []);
 
-  useEffect(() => {
-    const joinId = new URLSearchParams(window.location.search).get("join");
-    if (joinId) {
-      joinHub(joinId);
-      try {
-        connectToPeer(joinId, handleIncoming, handlePeerListUpdate, username);
-      } catch (e) {}
-      setJoinedBootstrap(joinId);
-      setMessages((m) => [
-        ...m,
-        {
-          id: `sys-joinlink-${Date.now()}`,
-          from: "System",
-          text: `Joining hub from link: ${joinId}`,
-          ts: Date.now(),
-          type: "system",
-        },
-      ]);
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-
   // Subscribe to push notifications when username is set
-
   useEffect(() => {
     if (!username) return;
     (async () => {
@@ -3191,35 +3056,6 @@ export default function Chat() {
                 </div>
               </button>
 
-              {/* Share Hub (link + QR) */}
-              <button
-                onClick={() => {
-                  const url = makeShareLink(getLocalPeerId() || myId);
-                  setShareUrl(url);
-                  setShareModalOpen(true);
-                  setMenuOpen(false);
-                }}
-                className="w-full text-left px-4 py-3 hover:bg-white/20 text-indigo-500"
-              >
-                <span className="font-semibold">Share Hub</span>
-                <div className="text-xs text-gray-400">
-                  Copy link or show QR
-                </div>
-              </button>
-
-              {/* Scan QR */}
-              <button
-                onClick={() => {
-                  setScanError(null);
-                  setScannerOpen(true);
-                  setMenuOpen(false);
-                }}
-                className="w-full text-left px-4 py-3 hover:bg-white/20 text-indigo-500"
-              >
-                <span className="font-semibold">Scan QR</span>
-                <div className="text-xs text-gray-400">Join using camera</div>
-              </button>
-
               <button
                 onClick={async () => {
                   setMenuOpen(false);
@@ -3450,138 +3286,6 @@ export default function Chat() {
           </div>
         </footer>
       </div>
-
-      {shareModalOpen && (
-        <div className="fixed inset-0 z-80 flex items-center justify-center">
-          <div
-            className="absolute inset-0 bg-black/60"
-            onClick={() => setShareModalOpen(false)}
-          />
-          <div className="relative bg-white p-6 rounded-xl shadow-lg max-w-sm w-full">
-            <h3 className="text-lg font-bold mb-3">Share Hub</h3>
-
-            <input
-              value={shareUrl}
-              readOnly
-              className="w-full p-2 border rounded mb-3"
-              onClick={(e) => e.target.select()}
-            />
-
-            {/* QR canvas generated locally (qrcode.react) */}
-            <div className="mb-3 flex justify-center">
-              <QRCodeCanvas value={shareUrl} size={220} />
-            </div>
-
-            <div className="flex gap-2 mb-3">
-              <button
-                onClick={() =>
-                  copyToClipboard(shareUrl).then(() => alert("Link copied"))
-                }
-                className="flex-1 px-3 py-2 bg-blue-500 text-white rounded"
-              >
-                Copy Link
-              </button>
-              <button
-                onClick={() => {
-                  // download QR as PNG from canvas
-                  const canvas = document.querySelector("canvas");
-                  if (!canvas) return alert("QR canvas not found");
-                  const url = canvas.toDataURL("image/png");
-                  const a = document.createElement("a");
-                  a.href = url;
-                  a.download = "peershub-join.png";
-                  a.click();
-                }}
-                className="flex-1 px-3 py-2 bg-green-500 text-white rounded"
-              >
-                Download QR
-              </button>
-            </div>
-
-            <button
-              onClick={() => setShareModalOpen(false)}
-              className="w-full px-3 py-2 bg-gray-300 rounded"
-            >
-              Close
-            </button>
-          </div>
-        </div>
-      )}
-
-      {scannerOpen && (
-        <div className="fixed inset-0 z-80 flex items-center justify-center">
-          <div
-            className="absolute inset-0 bg-black/60"
-            onClick={() => setScannerOpen(false)}
-          />
-          <div className="relative bg-white p-6 rounded-xl shadow-lg max-w-sm w-full">
-            <h3 className="text-lg font-bold mb-3">Scan QR to Join</h3>
-
-            <div className="mb-3">
-              <ScannerView
-                onDetected={(raw) => {
-                  // parse common shapes: either full URL like ?join=ID or plain ID
-                  try {
-                    let id = null;
-                    if (raw.includes("join=")) {
-                      try {
-                        const url = new URL(raw);
-                        id = url.searchParams.get("join");
-                      } catch (e) {
-                        // maybe raw is just the query string or plain 'join=...'
-                        const m = raw.match(/join=([^&\s]+)/);
-                        if (m) id = decodeURIComponent(m[1]);
-                      }
-                    } else {
-                      // treat raw as peer id directly
-                      id = raw.trim();
-                    }
-                    if (id) {
-                      joinHub(id);
-                      connectToPeer(
-                        id,
-                        handleIncoming,
-                        handlePeerListUpdate,
-                        username
-                      );
-                      setJoinedBootstrap(id);
-                      setScannerOpen(false);
-                      setMessages((m) => [
-                        ...m,
-                        {
-                          id: `sys-scanjoin-${Date.now()}`,
-                          from: "System",
-                          text: `Joined hub via scan: ${id}`,
-                          ts: Date.now(),
-                          type: "system",
-                        },
-                      ]);
-                    } else {
-                      alert("QR did not contain a valid join id.");
-                    }
-                  } catch (e) {
-                    console.warn("scan parse failed", e, raw);
-                  }
-                }}
-                onError={(err) => {
-                  setScanError(err?.message || String(err));
-                }}
-              />
-            </div>
-
-            {scanError && (
-              <div className="text-sm text-red-500 mb-3">{scanError}</div>
-            )}
-
-            <button
-              onClick={() => setScannerOpen(false)}
-              className="w-full px-3 py-2 bg-gray-300 rounded"
-            >
-              Close
-            </button>
-          </div>
-        </div>
-      )}
 
       {setNameModalOpen && (
         <div className="fixed inset-0 z-80 flex items-center justify-center">
